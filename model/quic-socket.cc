@@ -89,7 +89,7 @@ QuicSocket::SetQuicSocketType (QuicSocketTypes_t m_socketType)
 bool
 QuicSocket::CheckVersionNegotiation (uint32_t version)
 {
-  return  (version == QUIC_VERSION_NEGOTIATION) || ((version & QUIC_VERSION_NEGOTIATION_PATTERN) == QUIC_VERSION_NEGOTIATION_PATTERN)
+  return  (version == QUIC_VERSION_NEGOTIATION) || ((version & QUIC_VERSION_NEGOTIATION_PATTERN) == QUIC_VERSION_NEGOTIATION_PATTERN);
 }
 
 } // namespace ns3
