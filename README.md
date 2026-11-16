@@ -92,4 +92,8 @@ RFC 9000 / RFC 9002 updates and ns-3 integration patches:
 
 ## License
 
-GNU General Public License v2.0 — see individual source files for full license headers.
+This module is distributed under the same license as ns-3, the GNU General
+Public License version 2 only (`GPL-2.0-only`). The full text is in
+[LICENSE](LICENSE), and every source file carries an SPDX license identifier.
+The copyright of the original QUIC implementation belongs to its authors,
+listed above and in each file.

@@ -1,1 +1,7 @@
-cmake-build-debug/
+.DS_Store
+.idea/
+.vscode/
+/build/
+cmake-build-*/
+__pycache__/
+.ipynb_checkpoints/
