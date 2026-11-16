@@ -508,6 +508,7 @@ QuicSocketBase::QuicSocketBase (void)
     m_errno (
       ERROR_NOTERROR),
     m_connected (false),
+    m_zeroRttConnect (false),
     m_connectionId (0),
     m_vers (
       QUIC_VERSION_NS3_IMPL),
@@ -610,6 +611,7 @@ QuicSocketBase::QuicSocketBase (const QuicSocketBase& sock)   // Copy constructo
     m_serverBusy (sock.m_serverBusy),
     m_errno (sock.m_errno),
     m_connected (sock.m_connected),
+    m_zeroRttConnect (false),
     m_connectionId (0),
     m_vers (sock.m_vers),
     m_keyPhase (QuicHeader::PHASE_ZERO),
@@ -1445,13 +1447,16 @@ QuicSocketBase::SendDataPacket (SequenceNumber32 packetNumber,
     }
   else if (m_socketState == OPEN)
     {
-      if (!m_connected and !m_quicl4->Is0RTTHandshakeAllowed ())
+      // The first packet of a client that took the fast-connect path carries a
+      // 0-RTT header, whether 0-RTT was forced by attribute or allowed because
+      // the peer address was already authenticated
+      if (!m_connected and !m_zeroRttConnect)
         {
           m_connected = true;
           head = QuicHeader::CreateHandshake (m_connectionId, m_vers,
                                               packetNumber);
         }
-      else if (!m_connected and m_quicl4->Is0RTTHandshakeAllowed ())
+      else if (!m_connected and m_zeroRttConnect)
         {
           head = QuicHeader::Create0RTT (m_connectionId, m_vers,
                                          packetNumber);
@@ -2220,6 +2225,10 @@ QuicSocketBase::SendInitialHandshake (uint8_t type,
     }
   else if (type == QuicHeader::ZRTT_PROTECTED)
     {
+      // Set initial congestion window and Ssthresh, as for an Initial packet
+      m_tcb->m_cWnd = m_tcb->m_initialCWnd;
+      m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
+
       NS_LOG_INFO ("Create ZRTT_PROTECTED");
       Ptr<Packet> p = Create<Packet> ();
       p->AddHeader (OnSendingTransportParameters ());
@@ -2858,6 +2867,7 @@ QuicSocketBase::DoFastConnect (void)
 
   else if (m_socketState == IDLE)
     {
+      m_zeroRttConnect = true;
       SetState (OPEN);
       Simulator::ScheduleNow (&QuicSocketBase::ConnectionSucceeded, this);
       m_congestionControl->CongestionStateSet (m_tcb,
@@ -2934,6 +2944,14 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
       return;
     }
 
+  // A 0-RTT client never receives a Handshake packet: the first packet from
+  // the server shows the 0-RTT data was accepted, which confirms the
+  // handshake and lets the PTO alarm be cancelled when nothing is in flight
+  if (m_zeroRttConnect && !m_tcb->m_handshakeConfirmed)
+    {
+      m_tcb->m_handshakeConfirmed = true;
+    }
+
   int onlyAckFrames = 0;
   bool unsupportedVersion = false;
 
@@ -2948,6 +2966,11 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
         }
 
       m_couldContainTransportParameters = true;
+
+      // A 0-RTT server socket never sends an Initial packet, which is where
+      // the congestion window is otherwise initialized
+      m_tcb->m_cWnd = m_tcb->m_initialCWnd;
+      m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
 
       m_currentRecvPacketNumberSpace = GetPacketNumberSpace (quicHeader);
       onlyAckFrames = m_quicl5->DispatchRecv (p, address);

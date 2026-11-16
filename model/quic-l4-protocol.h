@@ -432,6 +432,17 @@ private:
   Ptr<QuicSocketBase> CloneSocket (Ptr<QuicSocketBase> oldsock);
 
   /**
+   * @brief Find the listening socket that owns the UDP socket a packet arrived on
+   *
+   * A node may host several listeners bound to different ports; the UDP
+   * socket that received the packet identifies which one the peer targeted.
+   *
+   * @param udpSocket the UDP socket that received the packet
+   * @return the matching listening socket, or the first listener if none matches
+   */
+  Ptr<QuicSocketBase> FindListener (Ptr<Socket> udpSocket) const;
+
+  /**
    * \brief Check if an IPv4 address belongs to this node (loopback or local interface)
    *
    * \param addr the IPv4 address to check

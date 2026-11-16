@@ -830,6 +830,7 @@ protected:
   bool m_serverBusy;                        //!< If true, server too busy to accept new connections
   mutable enum SocketErrno m_errno;         //!< Socket error code
   bool m_connected;                         //!< Check if connection is established
+  bool m_zeroRttConnect;                    //!< True on a client socket that connected with a 0-RTT handshake
   uint64_t m_connectionId;                  //!< Connection id
   uint32_t m_vers;                          //!< Quic protocol version
   QuicHeader::KeyPhase_t m_keyPhase;        //!< Key phase

@@ -477,6 +477,32 @@ QuicL4Protocol::GetAuthAddresses () const
   return m_authAddresses;
 }
 
+Ptr<QuicSocketBase>
+QuicL4Protocol::FindListener (Ptr<Socket> udpSocket) const
+{
+  Ptr<QuicSocketBase> firstListener;
+  for (const auto& binding : m_quicUdpBindingList)
+    {
+      if (!binding->m_listenerBinding)
+        {
+          continue;
+        }
+      if (binding->m_budpSocket == udpSocket || binding->m_budpSocket6 == udpSocket)
+        {
+          return binding->m_quicSocket;
+        }
+      if (firstListener == nullptr)
+        {
+          firstListener = binding->m_quicSocket;
+        }
+    }
+  if (firstListener == nullptr)
+    {
+      firstListener = m_quicUdpBindingList.front ()->m_quicSocket;
+    }
+  return firstListener;
+}
+
 void
 QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
 {
@@ -560,20 +586,7 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
 
       if (header.IsInitial () and m_isServer and socket == nullptr)
         {
-          // Find the listener socket (marked with m_listenerBinding)
-          Ptr<QuicSocketBase> listenerSocket;
-          for (auto lit = m_quicUdpBindingList.begin (); lit != m_quicUdpBindingList.end (); ++lit)
-            {
-              if ((*lit)->m_listenerBinding)
-                {
-                  listenerSocket = (*lit)->m_quicSocket;
-                  break;
-                }
-            }
-          if (listenerSocket == nullptr)
-            {
-              listenerSocket = m_quicUdpBindingList.front ()->m_quicSocket;
-            }
+          Ptr<QuicSocketBase> listenerSocket = FindListener (sock);
           NS_LOG_LOGIC (this << " Cloning listening socket " << listenerSocket);
           socket = CloneSocket (listenerSocket);
           socket->SetConnectionId (connectionId);
@@ -607,7 +620,7 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
                         InetSocketAddress::ConvertFrom (from).GetPort () << "");
           m_authAddresses.push_back (InetSocketAddress::ConvertFrom (from).GetIpv4 ()); //add to the list of authenticated sockets
         }
-      else if (header.IsORTT () and m_isServer)
+      else if (header.IsORTT () and m_isServer and socket == nullptr)
         {
           auto result = std::find (m_authAddresses.begin (), m_authAddresses.end (), InetSocketAddress::ConvertFrom (from).GetIpv4 ());
           // check if a 0-RTT is allowed with this endpoint - or if the attribute m_0RTTHandshakeStart has been forced to be true
@@ -624,20 +637,7 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
 
           NS_LOG_LOGIC ("CONNECTION AUTHENTICATED - Server authenticated Client " << InetSocketAddress::ConvertFrom (from).GetIpv4 () << " port " <<
                         InetSocketAddress::ConvertFrom (from).GetPort () << "");
-          // Find the listener socket
-          Ptr<QuicSocketBase> orttListener;
-          for (auto lit = m_quicUdpBindingList.begin (); lit != m_quicUdpBindingList.end (); ++lit)
-            {
-              if ((*lit)->m_listenerBinding)
-                {
-                  orttListener = (*lit)->m_quicSocket;
-                  break;
-                }
-            }
-          if (orttListener == nullptr)
-            {
-              orttListener = m_quicUdpBindingList.front ()->m_quicSocket;
-            }
+          Ptr<QuicSocketBase> orttListener = FindListener (sock);
           NS_LOG_LOGIC ( this << " Cloning listening socket " << orttListener);
           socket = CloneSocket (orttListener);
           socket->SetConnectionId (connectionId);
@@ -656,6 +656,9 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
           socket->Connect (from);
           socket->SetupCallback ();
 
+          // A 0-RTT connection is accepted like a 1-RTT one: the application
+          // must learn about the new socket before data is delivered on it
+          orttListener->NotifyNewConnection (socket, from);
         }
       else if (header.IsShort ())
         {
