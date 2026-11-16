@@ -50,7 +50,6 @@ build_lib(
                  model/quic-stream-tx-buffer.h
                  model/quic-subheader.h
                  model/quic-transport-parameters.h
-                 model/windowed-filter.h
                  helper/quic-helper.h
     LIBRARIES_TO_LINK ${libcore}
                       ${libnetwork}
