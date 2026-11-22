@@ -12,6 +12,21 @@
  * de envio) que permite ao cliente medir o atraso de entrega por fluxo.
  * Com TCP, as mesmas mensagens são intercaladas em um único byte-stream.
  *
+ * Contabilidade das mensagens (igual para QUIC e TCP):
+ *   - a mídia é gerada em instantes fixos, de --streamTime segundos, e o carimbo de cada mensagem é o instante em
+ *     que ela foi GERADA; uma mensagem que espera (conexão ainda abrindo, buffer de envio cheio) entra no atraso;
+ *   - nenhuma mensagem é descartada pela aplicação: as que não cabem no buffer ficam numa fila e são reenviadas;
+ *   - a mensagem não entregue até o fim da simulação conta com atraso = (fim - geração), um limite inferior do
+ *     atraso real, e entra na média, nos percentis, no máximo e em late150_pct; "undelivered" as conta.
+ *   - os quadros de vídeo usam um gerador aleatório de stream fixo: com a mesma repetição (--run), QUIC e TCP
+ *     recebem a mesma sequência de tamanhos.
+ *
+ * TCP: --tcpProfile=ns3 usa os padrões do ns-3 (RTO mínimo de 1 s, timeout do SYN de 3 s, atraso de ACK de 200 ms,
+ * buffers de 128 KB); --tcpProfile=linux usa os valores do Linux: RTO mínimo de 200 ms, timeout do SYN de 1 s
+ * (RFC 6298), atraso de ACK de 40 ms e buffers de 4 MiB. O atraso de ACK precisa acompanhar o RTO: com o padrão do
+ * ns-3 (200 ms, igual ao RTO mínimo) o TCP entra em ciclo de RTOs espúrios, pois o receptor segura o ACK de um único
+ * segmento até o RTO disparar. --tcpPacing=1 liga o pacing do TCP (o CUBIC do QUIC faz pacing).
+ *
  * Uso:
  *   ./ns3 run "quic-video-streaming --transport=quic --loss=0.02 --run=1"
  * Saída: uma linha CSV por fluxo (use --header=1 para imprimir o cabeçalho).
@@ -35,6 +50,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <iostream>
 #include <map>
 #include <vector>
@@ -59,7 +75,9 @@ struct MsgHeader
 
 struct StreamStats
 {
-    std::vector<double> delaysMs;
+    std::vector<double> delaysMs;   // mensagens entregues
+    std::vector<int64_t> sentNs;    // instante de geração de cada mensagem, por número de sequência
+    std::vector<char> got;          // a mensagem de número de sequência i foi entregue
     uint64_t bytes = 0;
     uint32_t sent = 0;
 };
@@ -84,6 +102,9 @@ Time g_audioInterval = MilliSeconds(20);
 uint32_t g_metaBytes = 100;
 Time g_metaInterval = MilliSeconds(100);
 std::map<uint32_t, uint32_t> g_seq;
+std::map<uint32_t, std::deque<MsgHeader>> g_backlog; // mensagens geradas que ainda não couberam no socket (QUIC: por stream; TCP: chave 0)
+Ptr<UniformRandomVariable> g_videoRv;                // tamanho dos quadros de vídeo, stream fixo
+Time g_simEnd;
 bool g_prioritizeAudio = false;
 
 // Cenários de rede e de conexão
@@ -103,11 +124,9 @@ std::vector<double> g_arrivals; // instantes de chegada de mensagens de mídia (
 Ptr<Node> g_clientNode;
 Ipv4Address g_serverAddr;
 Ipv4Address g_newLocal;
-bool g_streaming = false;
 uint64_t g_cliTlsSkip = 0;      // bytes de TLS que o cliente TCP ainda deve descartar
 uint64_t g_srvTlsRx = 0;
 bool g_srvReady = false;
-void StartStreaming();
 void ClientRead(Ptr<Socket> s);
 void ServerAccept(Ptr<Socket> s, const Address&);
 
@@ -130,6 +149,7 @@ class ImpairModel : public ErrorModel
         m_loss = loss;
         m_jitter = MilliSeconds(1) * jitterMs;
         m_rng = CreateObject<UniformRandomVariable>();
+        m_rng->SetStream(101);
     }
 
   private:
@@ -178,30 +198,59 @@ CountDrop(Ptr<const Packet>)
 }
 
 void
+Flush(uint32_t key)
+{
+    std::deque<MsgHeader>& q = g_backlog[key];
+    while (g_serverConn && !q.empty())
+    {
+        const MsgHeader& h = q.front();
+        std::vector<uint8_t> buf(kHdrSize + h.size, 0);
+        std::memcpy(buf.data(), &h, kHdrSize);
+        Ptr<Packet> p = Create<Packet>(buf.data(), buf.size());
+        int r;
+        if (g_transport == "quic")
+        {
+            r = g_serverConn->Send(p, 4 * (h.stream - 1) + 1); // RFC 9000 id of the n-th server-initiated bidirectional stream
+        }
+        else
+        {
+            r = g_serverConn->Send(p);
+        }
+        if (r < 0)
+        {
+            break; // transmit buffer full: the message waits, keeping the instant it was generated
+        }
+        q.pop_front();
+    }
+}
+
+void
+FlushAll()
+{
+    for (auto& kv : g_backlog)
+    {
+        Flush(kv.first);
+    }
+}
+
+void
+OnSendSpace(Ptr<Socket>, uint32_t)
+{
+    FlushAll();
+}
+
+// A message is generated at a fixed instant whatever the state of the connection; it is stamped with that instant
+void
 SendMessage(uint32_t stream, uint32_t payload)
 {
-    if (!g_serverConn)
-    {
-        return;
-    }
     MsgHeader h{kMagic, stream, g_seq[stream]++, payload, (uint64_t)Simulator::Now().GetNanoSeconds()};
-    std::vector<uint8_t> buf(kHdrSize + payload, 0);
-    std::memcpy(buf.data(), &h, kHdrSize);
-    Ptr<Packet> p = Create<Packet>(buf.data(), buf.size());
-    g_stats[stream].sent++;
-    int r;
-    if (g_transport == "quic")
-    {
-        r = g_serverConn->Send(p, 4 * (stream - 1) + 1); // RFC 9000 id of the n-th server-initiated bidirectional stream
-    }
-    else
-    {
-        r = g_serverConn->Send(p);
-    }
-    if (r < 0)
-    {
-        NS_LOG_WARN("send failed on stream " << stream);
-    }
+    StreamStats& st = g_stats[stream];
+    st.sent++;
+    st.sentNs.push_back((int64_t)h.sentNs);
+    st.got.push_back(0);
+    uint32_t key = (g_transport == "quic") ? stream : 0;
+    g_backlog[key].push_back(h);
+    Flush(key);
 }
 
 void
@@ -212,9 +261,8 @@ VideoTick()
         return;
     }
     // quadros de tamanho variável (±30%) com média = bitrate/fps
-    Ptr<UniformRandomVariable> u = CreateObject<UniformRandomVariable>();
     uint32_t mean = g_videoBitrate / 8 / g_fps;
-    uint32_t sz = (uint32_t)(mean * u->GetValue(0.7, 1.3));
+    uint32_t sz = (uint32_t)(mean * g_videoRv->GetValue(0.7, 1.3));
     SendMessage(1, sz);
     Simulator::Schedule(Seconds(1.0 / g_fps), &VideoTick);
 }
@@ -249,20 +297,6 @@ BeginTicks()
     MetaTick();
 }
 
-void
-StartStreaming()
-{
-    // the media starts at the configured time at the earliest and only once, even if the connection is
-    // replaced later (TCP reconnects)
-    if (g_streaming)
-    {
-        return;
-    }
-    g_streaming = true;
-    Time wait = g_streamStart > Simulator::Now() ? g_streamStart - Simulator::Now() : Seconds(0);
-    Simulator::Schedule(wait, &BeginTicks);
-}
-
 // Mensagem de abertura (stream 0): mede o tempo até o primeiro byte da aplicação
 void
 SendHello(Ptr<Socket> s)
@@ -292,8 +326,9 @@ ServerReady(Ptr<Socket> s)
         qs->SetStreamPriority(5, 0xFFFF);
         qs->SetStreamPriority(9, 0xFFFF);
     }
+    s->SetSendCallback(MakeCallback(&OnSendSpace));
     SendHello(s);
-    StartStreaming();
+    FlushAll(); // what was generated while the connection was opening goes out now
 }
 
 // Servidor TCP: acompanha o handshake TLS 1.3 (ClientHello, voo do servidor, Finished do cliente)
@@ -364,8 +399,13 @@ ParseStream(std::vector<uint8_t>& buf)
         {
             std::cerr << "LAT stream=" << h.stream << " seq=" << h.seq << " sent=" << h.sentNs / 1e9 << " delay=" << d << "\n";
         }
-        g_stats[h.stream].delaysMs.push_back(d);
-        g_stats[h.stream].bytes += kHdrSize + h.size;
+        StreamStats& st = g_stats[h.stream];
+        st.delaysMs.push_back(d);
+        st.bytes += kHdrSize + h.size;
+        if (h.seq < st.got.size())
+        {
+            st.got[h.seq] = 1;
+        }
         off += kHdrSize + h.size;
     }
     buf.erase(buf.begin(), buf.begin() + off);
@@ -500,6 +540,8 @@ main(int argc, char* argv[])
     uint32_t header = 0;
     std::string sched = "sfifo";
     std::string cc = "cubic";
+    std::string tcpProfile = "ns3";
+    bool tcpPacing = false;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("transport", "quic | tcp", transport);
@@ -520,6 +562,8 @@ main(int argc, char* argv[])
     cmd.AddValue("pathBw", "Banda depois da mudança", g_pathBw);
     cmd.AddValue("reconnect", "TCP: tempo (s) sem dados até o aplicativo reconectar", g_reconnect);
     cmd.AddValue("tls", "TCP: incluir o handshake TLS 1.3 completo", g_tls);
+    cmd.AddValue("tcpProfile", "TCP: ns3 (padrões do ns-3) | linux (RTO mínimo 200 ms, timeout do SYN 1 s, atraso de ACK 40 ms, buffers de 4 MiB)", tcpProfile);
+    cmd.AddValue("tcpPacing", "TCP: ligar o pacing", tcpPacing);
     cmd.Parse(argc, argv);
     g_transport = transport;
     if (std::getenv("PKTMETA"))
@@ -529,6 +573,9 @@ main(int argc, char* argv[])
 
     RngSeedManager::SetSeed(1);
     RngSeedManager::SetRun(run);
+    // fixed streams: the same video frames in every variant of a repetition, whatever else draws numbers
+    g_videoRv = CreateObject<UniformRandomVariable>();
+    g_videoRv->SetStream(100);
 
     if (transport == "quic")
     {
@@ -544,6 +591,15 @@ main(int argc, char* argv[])
     {
         Config::SetDefault("ns3::TcpL4Protocol::SocketType", StringValue("ns3::TcpCubic"));
         Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(1448));
+        if (tcpProfile == "linux")
+        {
+            Config::SetDefault("ns3::TcpSocketBase::MinRto", TimeValue(MilliSeconds(200)));
+            Config::SetDefault("ns3::TcpSocket::ConnTimeout", TimeValue(Seconds(1)));
+            Config::SetDefault("ns3::TcpSocket::DelAckTimeout", TimeValue(MilliSeconds(40)));
+            Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(4 * 1024 * 1024));
+            Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue(4 * 1024 * 1024));
+        }
+        Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(tcpPacing));
     }
     else
     {
@@ -592,6 +648,8 @@ main(int argc, char* argv[])
             Ptr<UniformRandomVariable> len = CreateObject<UniformRandomVariable>();
             len->SetAttribute("Min", DoubleValue(1));
             len->SetAttribute("Max", DoubleValue(2 * g_burst - 1));
+            len->SetStream(104);
+            bm->AssignStreams(103);
             bm->SetRandomBurstSize(len);
             inner = bm;
         }
@@ -600,6 +658,7 @@ main(int argc, char* argv[])
             Ptr<RateErrorModel> em = CreateObject<RateErrorModel>();
             em->SetAttribute("ErrorRate", DoubleValue(loss));
             em->SetAttribute("ErrorUnit", StringValue("ERROR_UNIT_PACKET"));
+            em->AssignStreams(102);
             inner = em;
         }
         Ptr<ImpairModel> model = CreateObject<ImpairModel>();
@@ -658,14 +717,16 @@ main(int argc, char* argv[])
         Simulator::Schedule(Seconds(g_pathChangeAt), &PathChange, dev);
     }
 
-    Simulator::Stop(g_streamEnd + Seconds(10));
+    Simulator::Schedule(g_streamStart, &BeginTicks);
+    g_simEnd = g_streamEnd + Seconds(10);
+    Simulator::Stop(g_simEnd);
     Simulator::Run();
     Simulator::Destroy();
 
     if (header)
     {
         std::cout << "transport,sched,cc,loss,run,stream,sent,delivered,mean_ms,p95_ms,p99_ms,"
-                     "max_ms,goodput_mbps,corrupt,late150_pct,burst,jitter_ms,path_change,ttfb_ms,max_gap_ms\n";
+                     "max_ms,goodput_mbps,corrupt,late150_pct,burst,jitter_ms,path_change,ttfb_ms,max_gap_ms,undelivered\n";
     }
     std::cerr << "drops=" << g_drops << "\n";
     double ttfb = g_helloAt.IsZero() ? -1 : (g_helloAt - g_connectAt).GetMilliSeconds();
@@ -682,25 +743,36 @@ main(int argc, char* argv[])
     for (uint32_t s = 1; s <= 3; ++s)
     {
         StreamStats& st = g_stats[s];
+        // every message that was generated counts; one that never arrived has a delay of at least (end - generation)
+        std::vector<double> all = st.delaysMs;
+        uint32_t undelivered = 0;
+        for (size_t i = 0; i < st.got.size(); ++i)
+        {
+            if (!st.got[i])
+            {
+                all.push_back((g_simEnd.GetNanoSeconds() - st.sentNs[i]) / 1e6);
+                ++undelivered;
+            }
+        }
         double mean = 0;
-        for (double d : st.delaysMs)
+        for (double d : all)
         {
             mean += d;
         }
-        mean = st.delaysMs.empty() ? 0 : mean / st.delaysMs.size();
+        mean = all.empty() ? 0 : mean / all.size();
         uint32_t late = 0;
-        for (double d : st.delaysMs)
+        for (double d : all)
         {
             late += (d > 150.0) ? 1 : 0;
         }
-        double latePct = st.delaysMs.empty() ? 0 : 100.0 * late / st.delaysMs.size();
+        double latePct = all.empty() ? 0 : 100.0 * late / all.size();
         std::cout << transport << "," << (transport == "quic" ? sched + (g_prioritizeAudio ? "+prio" : "") : std::string("-")) << ","
                   << (transport == "quic" ? cc : "cubic") << "," << loss << "," << run << ","
                   << names[s] << "," << st.sent << "," << st.delaysMs.size() << "," << mean << ","
-                  << Pct(st.delaysMs, 0.95) << "," << Pct(st.delaysMs, 0.99) << ","
-                  << Pct(st.delaysMs, 1.0) << "," << st.bytes * 8.0 / streamTime / 1e6 << ","
+                  << Pct(all, 0.95) << "," << Pct(all, 0.99) << ","
+                  << Pct(all, 1.0) << "," << st.bytes * 8.0 / streamTime / 1e6 << ","
                   << (g_corrupt ? 1 : 0) << "," << latePct << "," << g_burst << "," << g_jitterMs << ","
-                  << g_pathChangeAt << "," << ttfb << "," << maxGap << "\n";
+                  << g_pathChangeAt << "," << ttfb << "," << maxGap << "," << undelivered << "\n";
     }
     return 0;
 }
