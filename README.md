@@ -1,80 +1,87 @@
 # QUIC Module for ns-3
 
-An ns-3 contrib module implementing the **QUIC transport protocol**, forked from [signetlabdei/quic](https://github.com/signetlabdei/quic) and updated to improve RFC compliance.
+An ns-3 contrib module implementing the **QUIC transport protocol**, forked from [signetlabdei/quic](https://github.com/signetlabdei/quic) and updated to follow RFC 9000 and RFC 9002. [msquic](https://github.com/microsoft/msquic) is the reference for the defaults the RFCs leave open.
 
----
+## Features
 
-## Overview
+- **Streams:** RFC 9000 stream ids, flow control per stream and per connection, `RESET_STREAM`, `STOP_SENDING`, stream credit with `MAX_STREAMS`.
+- **Congestion control:** CUBIC (default, RFC 9438, with pacing), NewReno and BBR.
+- **Loss recovery (RFC 9002):** packet and time thresholds, probe timeout, persistent congestion.
+- **Stream schedulers:** per-stream FIFO (default), round-robin, priority FIFO, EDF and per-frame FIFO, selected with `SchedulingPolicy`.
+- **Connections:** connection ids, client-initiated migration with path validation, stateless reset, path MTU discovery.
+- **ACK frequency:** `ACK_FREQUENCY` and `IMMEDIATE_ACK`.
+- **Traces:** congestion window, RTT, spurious loss, stream reset and packet transmit/receive.
 
-This module provides a simulation-ready QUIC stack for ns-3.
-
-### RFC Compliance
+## RFC compliance
 
 | RFC | Description | Status |
 |-----|-------------|--------|
-| [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) | QUIC: A UDP-Based Multiplexed and Secure Transport | Supported |
-| [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002) | QUIC Loss Detection and Congestion Control | Supported |
-| [RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) | Using TLS to Secure QUIC | Partial — TLS-related features are not implemented due to ns-3 limitations |
+| [RFC 9000](https://www.rfc-editor.org/rfc/rfc9000) | QUIC transport | Behaviour and frame layouts follow the RFC; the packet headers only in part, see [Differences from the RFCs](#differences-from-the-rfcs) |
+| [RFC 9002](https://www.rfc-editor.org/rfc/rfc9002) | Loss detection and congestion control | Followed, with one msquic default that can be switched |
+| [RFC 9001](https://www.rfc-editor.org/rfc/rfc9001) | Using TLS to secure QUIC | Not implemented: no TLS, no packet protection, no key update |
+| [RFC 9438](https://www.rfc-editor.org/rfc/rfc9438) | CUBIC | Default congestion control |
 
-> Implementation is based on [msquic](https://github.com/microsoft/msquic) and the official RFCs. Features requiring TLS integration (RFC 9001) are not supported.
-
----
-
-## Module Structure
+## Module structure
 
 ```
 contrib/quic/
-├── model/              # Core QUIC protocol stack
-│   ├── quic-socket.{cc,h}              # Abstract QUIC socket
-│   ├── quic-socket-base.{cc,h}         # Main socket implementation
-│   ├── quic-l4-protocol.{cc,h}         # L4 protocol (UDP-based)
-│   ├── quic-l5-protocol.{cc,h}         # Stream multiplexing layer
-│   ├── quic-stream{,-base}.{cc,h}      # Stream abstraction
-│   ├── quic-header.{cc,h}              # QUIC packet headers
-│   ├── quic-subheader.{cc,h}           # QUIC frame subheaders
-│   ├── quic-transport-parameters.{cc,h}# Transport parameter negotiation
-│   ├── quic-socket-{rx,tx}-buffer.{cc,h} # Socket-level buffers
-│   ├── quic-stream-{rx,tx}-buffer.{cc,h} # Stream-level buffers
-│   ├── quic-socket-tx-scheduler.{cc,h} # Base TX scheduler
-│   ├── quic-socket-tx-edf-scheduler.{cc,h}   # EDF scheduler
-│   ├── quic-socket-tx-pfifo-scheduler.{cc,h}  # Priority FIFO scheduler
-│   ├── quic-congestion-ops.{cc,h}      # Congestion control base
-│   └── quic-bbr.{cc,h}                # BBR congestion control
-├── helper/
-│   └── quic-helper.{cc,h}             # Simulation setup helper
-├── examples/
-│   └── quic-example.cc                # Basic usage example
-└── test/                              # Unit tests
+├── model/       # protocol stack: sockets, L4/L5 protocols, streams, headers and frames,
+│                #   transport parameters, buffers, stream schedulers, NewReno / CUBIC / BBR
+├── helper/      # QuicHelper (InstallQuic)
+├── examples/    # quic-example, quic-video-streaming
+├── scripts/     # streaming_experiment.py
+├── results/     # streaming-loss.csv
+└── test/        # two ns-3 suites, "quic" and "quic-features" (see test/TESTS.md)
 ```
 
----
+## Building and running
 
-## Building
-
-This module requires ns-3 with CMake support. From the ns-3 root:
+The module needs ns-3 with CMake support. From the ns-3 root:
 
 ```bash
 ./ns3 configure --enable-examples --enable-tests
 ./ns3 build
-```
-
-## Running the Example
-
-```bash
 ./ns3 run quic-example
 ```
 
----
+Tests (debug build):
 
-## Known Limitations
+```bash
+build/utils/ns3-dev-test-runner-debug --suite=quic
+build/utils/ns3-dev-test-runner-debug --suite=quic-features
+```
 
-- **No connection migration** (RFC 9000 §9) — reconnection is used instead.
-- **No TLS/QUIC integration** (RFC 9001) — the security layer is not simulated.
+`test/TESTS.md` maps each feature to the test case that covers it.
+
+## Streaming experiment
+
+`examples/quic-video-streaming.cc` sends a video, an audio and a metadata flow (low-latency live media) over one connection through a bottleneck link, with QUIC or TCP, and prints the one-way delivery delay of every flow, counted from the instant each message was generated; a message that never arrives counts as late. `scripts/streaming_experiment.py` runs the experiment of the paper: random loss (uniform at 0 to 3 % and in bursts of mean length 4 at 1 to 3 %) on an otherwise idle 10 Mbps link, no TLS, 30 repetitions of five variants (TCP with the ns-3 defaults, with Linux timers and buffers, and with those plus pacing, and QUIC with round-robin and with per-stream FIFO scheduling, about four minutes) and prints the LaTeX rows of its tables. The results it produced are in `results/streaming-loss.csv`. The TCP is the ns-3 one, without tail loss probe or RACK, and there is no cross traffic, so the experiment measures random loss and not congestion. From the ns-3 root:
+
+```bash
+./ns3 build quic-video-streaming
+contrib/quic/scripts/streaming_experiment.py run      # writes streaming-loss.csv
+contrib/quic/scripts/streaming_experiment.py tables   # rows of the tables
+```
+
+## Differences from the RFCs
+
+The frame layouts are those of RFC 9000 §19, and the first byte of the headers follows §17. What differs:
+
+- **No TLS:** no packet protection, no key update, no CRYPTO frames, no Retry and no address-validation tokens (`NEW_TOKEN` is ignored by clients and is a protocol violation for servers).
+- **Long headers** carry no Source Connection ID, Token or Length, and the packet number is always 4 bytes (32 bits, not 62).
+- **Connection ids** are always 8 bytes, and the connection-id transport parameters (RFC 9000 §7.3) are not checked. `OmitConnectionId` (short headers without the id) is flagged in a reserved bit.
+- **Transport parameters** are a fixed 72-byte structure, not the TLV list of RFC 9000 §18, carried in the handshake payload.
+- **Persistent congestion** is detected as msquic does (a loss after more than 2 consecutive PTOs). The RFC 9002 §7.6 duration test is selected with `PersistentCongestionByPto=false`.
+- **ACK frequency** follows the ack-frequency draft as msquic does; it asks the peer for an ACK tolerance of up to 41 packets, beyond the one-ACK-per-two-packets of RFC 9000 §13.2.2.
+- No ECN marking (only the `ACK_ECN` counts are read) and no coalesced packets.
+
+## Known limitations
+
+- Migration is client-initiated only: no `preferred_address` and no multipath.
+- No keep-alive.
 - Loopback support requires special handling due to ns-3's UDP socket internals.
 
----
-
-## Original Authors
+## Original authors
 
 [SIGNET Lab](https://github.com/signetlabdei), Department of Information Engineering, University of Padova:
 
@@ -84,7 +91,7 @@ This module requires ns-3 with CMake support. From the ns-3 root:
 - Davide Marcato
 - Umberto Paro
 
-## Fork Maintainer
+## Fork maintainer
 
 RFC 9000 / RFC 9002 updates and ns-3 integration patches:
 

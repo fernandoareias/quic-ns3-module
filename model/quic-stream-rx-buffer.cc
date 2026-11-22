@@ -69,7 +69,7 @@ QuicStreamRxBuffer::GetTypeId (void)
 QuicStreamRxBuffer::QuicStreamRxBuffer ()
   : m_numBytesInBuffer (0),
   m_finalSize (0),
-  m_maxBuffer (131072),
+  m_maxBuffer (1048576),
   m_recvFin (
     false)
 {
@@ -178,8 +178,9 @@ QuicStreamRxBuffer::Extract (uint32_t maxSize)
         {
 
           outPkt->AddAtEnd (currentPacket);
-          m_streamRecvList.erase (it);
           NS_LOG_LOGIC ("Extracted and removed packet " << (*it)->m_offset << " from RxBuffer, bytes to extract: " << extractSize);
+          delete *it;
+          m_streamRecvList.erase (it);
 
           m_numBytesInBuffer -= currentPacket->GetSize ();
           extractSize -= currentPacket->GetSize ();
@@ -224,6 +225,37 @@ QuicStreamRxBuffer::GetDeliverable (uint64_t currRecvOffset)
     }
 
   return std::make_pair (offsetToExtract, lengthToExtract);
+}
+
+Ptr<Packet>
+QuicStreamRxBuffer::ExtractInOrder (uint64_t recvOffset)
+{
+  NS_LOG_FUNCTION (this << recvOffset);
+
+  Ptr<Packet> out = Create<Packet> ();
+  uint64_t cur = recvOffset;
+
+  while (!m_streamRecvList.empty ())
+    {
+      QuicStreamRxItem *item = m_streamRecvList.front ();
+      uint64_t itemEnd = item->m_offset + item->m_packet->GetSize ();
+      if (item->m_offset > cur)
+        {
+          break; // gap: wait for the missing data
+        }
+      m_numBytesInBuffer -= item->m_packet->GetSize ();
+      if (itemEnd > cur)
+        {
+          Ptr<Packet> p = item->m_packet->Copy ();
+          p->RemoveAtStart (cur - item->m_offset);
+          out->AddAtEnd (p);
+          cur = itemEnd;
+        }
+      delete item;
+      m_streamRecvList.erase (m_streamRecvList.begin ());
+    }
+
+  return (out->GetSize () > 0) ? out : nullptr;
 }
 
 uint32_t

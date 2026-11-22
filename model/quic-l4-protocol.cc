@@ -23,6 +23,7 @@
 #include "ns3/ipv6-route.h"
 
 #include "quic-l4-protocol.h"
+#include "quic-cubic.h"
 #include "quic-header.h"
 #include "ns3/ipv4-end-point-demux.h"
 #include "ns3/ipv6-end-point-demux.h"
@@ -113,7 +114,7 @@ QuicL4Protocol::GetTypeId (void)
                    MakeBooleanChecker ())
     .AddAttribute ("SocketType",
                    "Socket type of QUIC objects.",
-                   TypeIdValue (QuicCongestionOps::GetTypeId ()),
+                   TypeIdValue (QuicCubic::GetTypeId ()),
                    MakeTypeIdAccessor (&QuicL4Protocol::m_congestionTypeId),
                    MakeTypeIdChecker ())
     .AddAttribute ("SocketList", "The list of UDP and QUIC sockets associated to this protocol.",
@@ -139,6 +140,28 @@ QuicL4Protocol::QuicL4Protocol ()
   NS_LOG_LOGIC ("Created QuicL4Protocol object " << this);
 
   m_quicUdpBindingList = QuicUdpBindingList ();
+
+  Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+  m_resetKeyA = ((uint64_t) rng->GetInteger (0, 0xffffffffu) << 32) | rng->GetInteger (0, 0xffffffffu);
+  m_resetKeyB = ((uint64_t) rng->GetInteger (0, 0xffffffffu) << 32) | rng->GetInteger (0, 0xffffffffu);
+}
+
+namespace {
+uint64_t
+Mix64 (uint64_t x)
+{
+  x += 0x9e3779b97f4a7c15ULL;
+  x = (x ^ (x >> 30)) * 0xbf58476d1ce4e5b9ULL;
+  x = (x ^ (x >> 27)) * 0x94d049bb133111ebULL;
+  return x ^ (x >> 31);
+}
+}
+
+void
+QuicL4Protocol::GenerateStatelessResetToken (uint64_t connectionId, uint64_t &hi, uint64_t &lo) const
+{
+  hi = Mix64 (connectionId ^ m_resetKeyA);
+  lo = Mix64 (hi ^ m_resetKeyB ^ (connectionId << 1));
 }
 
 QuicL4Protocol::~QuicL4Protocol ()
@@ -541,7 +564,12 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
 
       QuicUdpBindingList::iterator it;
       Ptr<QuicSocketBase> socket;
-      for (it = m_quicUdpBindingList.begin (); it != m_quicUdpBindingList.end (); ++it)
+      auto issued = m_cidMap.find (connectionId);
+      if (issued != m_cidMap.end ())
+        {
+          socket = issued->second;
+        }
+      for (it = m_quicUdpBindingList.begin (); socket == nullptr && it != m_quicUdpBindingList.end (); ++it)
         {
           Ptr<QuicUdpBinding> item = *it;
           if (item->m_quicSocket->GetConnectionId () == connectionId)
@@ -647,6 +675,20 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
           // must learn about the new socket before data is delivered on it
           orttListener->NotifyNewConnection (socket, from);
         }
+      else if (header.IsShort () && socket == nullptr)
+        {
+          // msquic QuicBindingReceive: a short header packet without a connection is answered with a
+          // stateless reset by a server; a client checks it against the reset tokens it knows
+          if (m_isServer)
+            {
+              SendStatelessReset (sock, from, header, packet);
+            }
+          else
+            {
+              ReceiveStatelessReset (packet);
+            }
+          continue;
+        }
       else if (header.IsShort ())
         {
           // Auto-authenticate loopback and local addresses for SHORT packets
@@ -662,7 +704,15 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
 
           auto result = std::find (m_authAddresses.begin (), m_authAddresses.end (), InetSocketAddress::ConvertFrom (from).GetIpv4 ());
 
-          if (result == m_authAddresses.end () && m_0RTTHandshakeStart)
+          if (result == m_authAddresses.end () && socket != nullptr
+              && (socket->GetSocketState () == QuicSocketBase::OPEN
+                  || socket->GetSocketState () == QuicSocketBase::CONNECTING_SVR))
+            {
+              // an established connection whose peer moved to another address: the packet carries one of
+              // the connection ids of that connection, and path validation (RFC 9000 s8.2) decides the rest
+              m_authAddresses.push_back (InetSocketAddress::ConvertFrom (from).GetIpv4 ());
+            }
+          else if (result == m_authAddresses.end () && m_0RTTHandshakeStart)
             {
               m_authAddresses.push_back (InetSocketAddress::ConvertFrom (from).GetIpv4 ()); //add to the list of authenticated sockets
             }
@@ -680,6 +730,15 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
           NS_LOG_WARN (this << " no matching socket for connection ID " << connectionId << ", dropping packet");
           continue;
         }
+      if (header.IsShort ())
+        {
+          // the path of the packet: its remote address and the UDP socket it arrived on
+          if (!socket->OnPacketOnPath (sock, from, header.GetSerializedSize () + packet->GetSize (),
+                                       header.GetConnectionId ()))
+            {
+              continue;
+            }
+        }
       if (!m_socketHandlers[socket].IsNull ())
         {
           NS_LOG_LOGIC (this << " waking up handler of socket " << socket);
@@ -690,6 +749,198 @@ QuicL4Protocol::ForwardUp (Ptr<Socket> sock)
           NS_LOG_WARN ( this << " no handler for socket " << socket);
         }
     }
+}
+
+uint64_t
+QuicL4Protocol::AllocateConnectionId (void)
+{
+  Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+  for (;;)
+    {
+      uint64_t cid = ((uint64_t) rng->GetInteger (0, 0xffffffffu) << 32) | rng->GetInteger (0, 0xffffffffu);
+      if (cid == 0 || m_cidMap.count (cid) > 0)
+        {
+          continue;
+        }
+      bool used = false;
+      for (auto &binding : m_quicUdpBindingList)
+        {
+          used = used || binding->m_quicSocket->GetConnectionId () == cid;
+        }
+      if (!used)
+        {
+          return cid;
+        }
+    }
+}
+
+void
+QuicL4Protocol::RegisterConnectionId (uint64_t connectionId, Ptr<QuicSocketBase> socket)
+{
+  m_cidMap[connectionId] = socket;
+}
+
+void
+QuicL4Protocol::UnregisterConnectionId (uint64_t connectionId)
+{
+  m_cidMap.erase (connectionId);
+}
+
+Ptr<Socket>
+QuicL4Protocol::RebindLocalAddress (Ptr<QuicSocketBase> socket, const Address &newLocal)
+{
+  for (auto &binding : m_quicUdpBindingList)
+    {
+      if (binding->m_quicSocket != socket || binding->m_budpSocket == nullptr)
+        {
+          continue;
+        }
+      Address peer;
+      if (binding->m_budpSocket->GetPeerName (peer) != 0)
+        {
+          return nullptr;
+        }
+      Ptr<Socket> udp = CreateUdpSocket ();
+      if (udp->Bind (newLocal) != 0 || udp->Connect (peer) != 0)
+        {
+          return nullptr;
+        }
+      udp->SetRecvCallback (MakeCallback (&QuicL4Protocol::ForwardUp, this));
+      binding->m_budpSocket->SetRecvCallback (MakeNullCallback<void, Ptr<Socket> > ());
+      binding->m_budpSocket->Close ();
+      binding->m_budpSocket = udp;
+      return udp;
+    }
+  return nullptr;
+}
+
+void
+QuicL4Protocol::SetPath (Ptr<QuicSocketBase> socket, Ptr<Socket> udp, const Address &remote)
+{
+  for (auto &binding : m_quicUdpBindingList)
+    {
+      if (binding->m_quicSocket == socket)
+        {
+          binding->m_budpSocket = udp;
+          if (binding->m_hasPeerAddress)
+            {
+              binding->m_peerAddress = remote;
+            }
+          return;
+        }
+    }
+}
+
+bool
+QuicL4Protocol::GetPath (Ptr<QuicSocketBase> socket, Ptr<Socket> &udp, Address &remote) const
+{
+  for (auto &binding : m_quicUdpBindingList)
+    {
+      if (binding->m_quicSocket == socket)
+        {
+          udp = binding->m_budpSocket;
+          if (binding->m_hasPeerAddress)
+            {
+              remote = binding->m_peerAddress;
+              return true;
+            }
+          return udp != nullptr && udp->GetPeerName (remote) == 0;
+        }
+    }
+  return false;
+}
+
+void
+QuicL4Protocol::SendPacketOnPath (Ptr<Packet> pkt, const QuicHeader &head, Ptr<Socket> udp, const Address &remote) const
+{
+  Ptr<Packet> sent = Create<Packet> ();
+  sent->AddHeader (head);
+  sent->AddAtEnd (pkt);
+  Address connected;
+  if (udp->GetPeerName (connected) == 0)
+    {
+      udp->Send (sent, 0);     // a connected UDP socket cannot SendTo
+    }
+  else
+    {
+      udp->SendTo (sent, 0, remote);
+    }
+}
+
+void
+QuicL4Protocol::SendStatelessReset (Ptr<Socket> sock, const Address &from, const QuicHeader &header,
+                                    Ptr<Packet> packet)
+{
+  // QUIC_MIN_STATELESS_RESET_PACKET_LENGTH = 5 + 16 and QUIC_RECOMMENDED_STATELESS_RESET_PACKET_LENGTH = 25 + 16
+  const uint32_t kTokenLen = 16;
+  const uint32_t kMinLen = 5 + kTokenLen;
+  const uint32_t kRecommendedLen = 25 + kTokenLen;
+  uint32_t received = header.GetSerializedSize () + packet->GetSize ();
+  if (received <= kMinLen)
+    {
+      NS_LOG_INFO ("Packet too short for stateless reset");
+      return;
+    }
+  Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable> ();
+  // a bit of randomness (3 bits) in the length, never larger than the packet that triggered the reset
+  uint32_t length = kRecommendedLen + rng->GetInteger (0, 7);
+  if (length >= received)
+    {
+      length = received - 1;
+    }
+  uint64_t cid = ((uint64_t) rng->GetInteger (0, 0xffffffffu) << 32) | rng->GetInteger (0, 0xffffffffu);
+  QuicHeader head = QuicHeader::CreateShort (cid, SequenceNumber32 (rng->GetInteger (0, 0xffffff)), true,
+                                             header.GetKeyPhaseBit (), false);
+  if (length < head.GetSerializedSize () + kTokenLen)
+    {
+      // the header of this model is larger than msquic's 5 bytes: no room left for the token
+      NS_LOG_INFO ("Packet too short for a stateless reset with this header size");
+      return;
+    }
+  uint32_t payloadLen = length - head.GetSerializedSize ();
+  std::vector<uint8_t> bytes (payloadLen);
+  for (auto &b : bytes)
+    {
+      b = (uint8_t) rng->GetInteger (0, 255);
+    }
+  uint64_t hi, lo;
+  GenerateStatelessResetToken (header.GetConnectionId (), hi, lo);
+  for (uint32_t k = 0; k < 8; ++k)
+    {
+      bytes[payloadLen - 16 + k] = (uint8_t) (hi >> (56 - 8 * k));
+      bytes[payloadLen - 8 + k] = (uint8_t) (lo >> (56 - 8 * k));
+    }
+  Ptr<Packet> reset = Create<Packet> (bytes.data (), payloadLen);
+  reset->AddHeader (head);
+  NS_LOG_INFO ("Sending stateless reset of " << reset->GetSize () << " bytes for connection " << header.GetConnectionId ());
+  sock->SendTo (reset, 0, from);
+}
+
+bool
+QuicL4Protocol::ReceiveStatelessReset (Ptr<Packet> packet)
+{
+  if (packet->GetSize () < 16)
+    {
+      return false;
+    }
+  std::vector<uint8_t> bytes (packet->GetSize ());
+  packet->CopyData (bytes.data (), bytes.size ());
+  uint64_t hi = 0, lo = 0;
+  for (uint32_t k = 0; k < 8; ++k)
+    {
+      hi = (hi << 8) | bytes[bytes.size () - 16 + k];
+      lo = (lo << 8) | bytes[bytes.size () - 8 + k];
+    }
+  for (auto &binding : m_quicUdpBindingList)
+    {
+      if (binding->m_quicSocket->MatchesStatelessReset (hi, lo))
+        {
+          NS_LOG_INFO ("Stateless reset received for connection " << binding->m_quicSocket->GetConnectionId ());
+          binding->m_quicSocket->HandleStatelessReset ();
+          return true;
+        }
+    }
+  return false;
 }
 
 void
@@ -762,6 +1013,7 @@ QuicL4Protocol::CloneSocket (Ptr<QuicSocketBase> oldsock)
 {
   NS_LOG_FUNCTION (this);
   Ptr<QuicSocketBase> newsock = CopyObject<QuicSocketBase> (oldsock);
+  newsock->SetServerSide (true);
   NS_LOG_LOGIC (this << " cloned socket " << oldsock << " to socket " << newsock);
   Ptr<QuicUdpBinding> udpBinding = CreateObject<QuicUdpBinding> ();
 
@@ -969,6 +1221,10 @@ QuicL4Protocol::RemoveSocket (Ptr<QuicSocketBase> socket)
       if (item->m_quicSocket == socket)
         {
           found = true;
+          for (auto cit = m_cidMap.begin (); cit != m_cidMap.end ();)
+            {
+              cit = (cit->second == socket) ? m_cidMap.erase (cit) : std::next (cit);
+            }
           if (item->m_listenerBinding)
             {
               closedListener = true;

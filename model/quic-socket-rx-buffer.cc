@@ -71,15 +71,20 @@ QuicSocketRxBuffer::~QuicSocketRxBuffer ()
 }
 
 bool
-QuicSocketRxBuffer::Add (Ptr<Packet> p)
+QuicSocketRxBuffer::Add (Ptr<Packet> p, bool force)
 {
-  NS_LOG_FUNCTION (this << p);
+  NS_LOG_FUNCTION (this << p << force);
 
   NS_LOG_INFO (
     "Try to append " << p->GetSize () << " bytes " << ", availSize=" << Available ());
 
-  if (p->GetSize () <= Available ())
+  if (force || p->GetSize () <= Available ())
     {
+      if (p->GetSize () > Available ())
+        {
+          NS_LOG_WARN ("Receive buffer of " << m_maxBuffer << " bytes exceeded by "
+                       << p->GetSize () - Available () << " bytes of acknowledged data");
+        }
       if (p->GetSize () > 0)
         {
           m_socketRecvList.insert (m_socketRecvList.end (), p->Copy ());
@@ -154,7 +159,7 @@ QuicSocketRxBuffer::Extract (uint32_t maxSize)
 uint32_t
 QuicSocketRxBuffer::Available (void) const
 {
-  return m_maxBuffer - m_recvSize;
+  return m_recvSize < m_maxBuffer ? m_maxBuffer - m_recvSize : 0;
 }
 
 uint32_t

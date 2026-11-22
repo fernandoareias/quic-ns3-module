@@ -10,6 +10,21 @@
  */
 
 #include "quic-socket-tx-buffer.h"
+#include "quic-stream.h"
+
+namespace {
+/** Copy a byte range into a fresh packet (avoids packet-metadata fragmentation issues). */
+ns3::Ptr<ns3::Packet>
+CopyRange (ns3::Ptr<ns3::Packet> p, uint32_t start, uint32_t len)
+{
+  std::vector<uint8_t> all (p->GetSize ());
+  if (!all.empty ())
+    {
+      p->CopyData (all.data (), all.size ());
+    }
+  return ns3::Create<ns3::Packet> (all.data () + start, len);
+}
+}
 
 #include <algorithm>
 #include <iostream>
@@ -196,6 +211,7 @@ QuicSocketTxBuffer::QuicSocketTxBuffer () :
 {
   m_streamZeroList = QuicTxPacketList ();
   m_sentList = QuicTxPacketList ();
+  m_inFlightValid = false;
 }
 
 QuicSocketTxBuffer::~QuicSocketTxBuffer (void)
@@ -203,6 +219,7 @@ QuicSocketTxBuffer::~QuicSocketTxBuffer (void)
   QuicTxPacketList::iterator it;
 
   m_sentList = QuicTxPacketList ();
+  m_inFlightValid = false;
   m_streamZeroList = QuicTxPacketList ();
   m_sentSize = 0;
   m_streamZeroSize = 0;
@@ -249,21 +266,24 @@ bool QuicSocketTxBuffer::Add (Ptr<Packet> p)
           Ptr<QuicSocketTxItem> item = CreateObject<QuicSocketTxItem> ();
           item->m_packet = p;
           // check to which stream this packet belongs to
-          uint32_t streamId = 0;
           bool isStream = false;
+          // Handshake data and control frames without a stream (MAX_DATA, MAX_STREAMS, ...) go first
+          bool priority = true;
           if (headerSize)
             {
-              streamId = qsb.GetStreamId ();
               isStream = qsb.IsStream ();
+              bool carriesStreamId = isStream || qsb.IsRstStream () || qsb.IsStopSending ()
+                || qsb.IsMaxStreamData () || qsb.IsStreamBlocked ();
+              priority = !carriesStreamId || qsb.GetStreamId () == QuicStream::HANDSHAKE_STREAM_ID;
             }
           else
             {
               NS_ABORT_MSG ("No QuicSubheader in this QUIC frame " << p);
             }
           item->m_isStream = isStream;
-          item->m_isStream0 = (streamId == 0);
-          m_numFrameStream0InBuffer += (streamId == 0);
-          if (streamId == 0)
+          item->m_isStream0 = priority;
+          m_numFrameStream0InBuffer += priority;
+          if (priority)
             {
               m_streamZeroList.insert (m_streamZeroList.end (), item);
               m_streamZeroSize += item->m_packet->GetSize ();
@@ -305,6 +325,7 @@ Ptr<Packet> QuicSocketTxBuffer::NextStream0Sequence (
       m_streamZeroList.erase (it);
       m_streamZeroSize -= currentPacket->GetSize ();
       m_sentList.insert (m_sentList.end (), outItem);
+      m_inFlightValid = false;
       m_sentSize += outItem->m_packet->GetSize ();
       --m_numFrameStream0InBuffer;
       Ptr<Packet> toRet = outItem->m_packet;
@@ -346,6 +367,7 @@ Ptr<QuicSocketTxItem> QuicSocketTxBuffer::GetNewSegment (uint32_t numBytes)
     {
       NS_LOG_LOGIC ("Adding packet to sent buffer");
       m_sentList.insert (m_sentList.end (), outItem);
+      m_inFlightValid = false;
       m_sentSize += outItem->m_packet->GetSize ();
     }
 
@@ -375,20 +397,24 @@ std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::OnAckUpdate (
   std::vector<uint32_t>::const_iterator ack_it = compAckBlocks.begin ();
   std::vector<uint32_t>::const_iterator gap_it = compGaps.begin ();
 
-  std::stringstream gap_print;
-  for (auto i = gaps.begin (); i != gaps.end (); ++i)
+#ifdef NS3_LOG_ENABLE
+  // building the text costs more than the work done with it, so only when the message will be printed
+  if (g_log.IsEnabled (ns3::LOG_INFO))
     {
-      gap_print << (*i) << " ";
+      std::stringstream gap_print;
+      for (auto i = gaps.begin (); i != gaps.end (); ++i)
+        {
+          gap_print << (*i) << " ";
+        }
+      std::stringstream block_print;
+      for (auto i = compAckBlocks.begin (); i != compAckBlocks.end (); ++i)
+        {
+          block_print << (*i) << " ";
+        }
+      NS_LOG_INFO (
+        "Largest ACK: " << largestAcknowledged << ", blocks: " << block_print.str () << ", gaps: " << gap_print.str ());
     }
-
-  std::stringstream block_print;
-  for (auto i = compAckBlocks.begin (); i != compAckBlocks.end (); ++i)
-    {
-      block_print << (*i) << " ";
-    }
-
-  NS_LOG_INFO (
-    "Largest ACK: " << largestAcknowledged << ", blocks: " << block_print.str () << ", gaps: " << gap_print.str ());
+#endif
 
   // Iterate over the ACK blocks and gaps
   for (uint32_t numAckBlockAnalyzed = 0; numAckBlockAnalyzed < ackBlockCount;
@@ -411,15 +437,16 @@ std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::OnAckUpdate (
             }
           // The packet is in the current block: ACK it
           NS_LOG_LOGIC ("Packet " << (*sent_it)->m_packetNumber << " ACKed");
-          bool notInGap =
-            ((gap_it >= compGaps.end ())
-             || ((*sent_it)->m_packetNumber
-                 > SequenceNumber32 ((*gap_it))));
+          // the oldest range only reaches down to the ACK floor; older ranges may have been left out
+          bool notInGap = (gap_it >= compGaps.end ())
+            ? ((*sent_it)->m_packetNumber >= SequenceNumber32 (m_ackFloor))
+            : ((*sent_it)->m_packetNumber > SequenceNumber32 ((*gap_it)));
 
           if ((*sent_it)->m_packetNumber <= SequenceNumber32 ((*ack_it))
               and notInGap and (*sent_it)->m_sacked == false)
             {
               (*sent_it)->m_sacked = true;
+              m_inFlightValid = false;
               (*sent_it)->m_ackTime = Now ();
               newlyAcked.push_back ((*sent_it));
               UpdateRateSample ((*sent_it));
@@ -429,19 +456,18 @@ std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::OnAckUpdate (
     }
   NS_LOG_LOGIC ("Mark lost packets");
   // Mark packets as lost as in RFC (Sec. 4.2.1 of draft-ietf-quic-recovery-15)
-  uint32_t index = m_sentList.size ();
+  Time newLossTime = Seconds (0);
   bool lost = false;
   bool outstanding = false;
-  auto acked_it = m_sentList.rend ();
   // Iterate over the sent packet list in reverse
   for (auto sent_it = m_sentList.rbegin ();
        sent_it != m_sentList.rend () and !m_sentList.empty ();
-       ++sent_it, --index)
+       ++sent_it)
     {
       // All previous packets are lost (skip retransmitted packets — give them time to be ACKed)
       if (lost)
         {
-          if (!(*sent_it)->m_sacked && !(*sent_it)->m_retrans)
+          if (!(*sent_it)->m_sacked)
             {
               (*sent_it)->m_lost = true;
               NS_LOG_LOGIC (
@@ -454,14 +480,16 @@ std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::OnAckUpdate (
           if ((*sent_it)->m_packetNumber.GetValue () == largestAcknowledged)
             {
               // Mark the packet as ACKed
-              acked_it = sent_it;
               outstanding = true;
             }
           else if (outstanding && !(*sent_it)->m_sacked)
             {
-              //ACK-based detection (skip retransmitted packets — give them time to be ACKed)
-              if (!(*sent_it)->m_retrans
-                  && largestAcknowledged - (*sent_it)->m_packetNumber.GetValue ()
+              // ACK-based detection (RFC 9002 s6.1.1); each retransmission has its own
+              // packet number, so retransmitted packets can be declared lost as well
+              // RFC 9002 s6.1.1: lost when kPacketThreshold packets were sent after it and one of them was
+              // acknowledged, i.e. LargestAck >= PacketNumber + kPacketThreshold (msquic waits for one more:
+              // it is the same rule with kReorderingThreshold = 4)
+              if (largestAcknowledged - (*sent_it)->m_packetNumber.GetValue ()
                      >= tcbd->m_kReorderingThreshold)
                 {
                   (*sent_it)->m_lost = true;
@@ -469,27 +497,27 @@ std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::OnAckUpdate (
                   NS_LOG_INFO (
                     "Largest ACK " << largestAcknowledged << ", lost packet " << (*sent_it)->m_packetNumber.GetValue () << " - reordering " << tcbd->m_kReorderingThreshold);
                 }
-              // Time-based detection (optional)
-              if (tcbd->m_kUsingTimeLossDetection)
+              // Time-based detection (RFC 9002 s6.1.2)
+              if (tcbd->m_kUsingTimeLossDetection && !(*sent_it)->m_lost)
                 {
-                  double lhsComparison = ((*acked_it)->m_ackTime
-                                          - (*sent_it)->m_lastSent).GetSeconds ();
-                  // RFC 9002 §6.1.2: max(kTimeThreshold * max(smoothedRtt, latestRtt), kGranularity)
                   Time baseRtt = std::max (tcbd->m_smoothedRtt, tcbd->m_latestRtt);
-                  double rhsComparison = std::max (
-                    tcbd->m_kTimeReorderingFraction * baseRtt.GetSeconds (),
-                    MilliSeconds (1).GetSeconds ());
-                  if (lhsComparison >= rhsComparison)
+                  Time lossDelay = std::max (baseRtt * tcbd->m_kTimeReorderingFraction,
+                                             MilliSeconds (1));
+                  Time deadline = (*sent_it)->m_lastSent + lossDelay;
+                  if (Now () >= deadline)
                     {
-                      NS_LOG_UNCOND (
-                        "Largest ACK " << largestAcknowledged << ", lost packet " << (*sent_it)->m_packetNumber.GetValue () << " - time " << rhsComparison);
                       (*sent_it)->m_lost = true;
                       lost = true;
+                    }
+                  else if (newLossTime == Seconds (0) || deadline < newLossTime)
+                    {
+                      newLossTime = deadline;
                     }
                 }
             }
         }
     }
+  tcbd->m_lossTime = newLossTime;
 
   // Clean up acked packets and return new ACKed packet vector
   CleanSentList ();
@@ -509,6 +537,24 @@ void QuicSocketTxBuffer::ResetSentList (uint32_t keepItems)
           (*sent_it)->m_lost = true;
         }
     }
+}
+
+std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::MarkOldestAsLost (uint32_t n)
+{
+  std::vector<Ptr<QuicSocketTxItem> > marked;
+  for (auto &item : m_sentList)
+    {
+      if (marked.size () >= n)
+        {
+          break;
+        }
+      if (!item->m_sacked && !item->m_lost)
+        {
+          item->m_lost = true;
+          marked.push_back (item);
+        }
+    }
+  return marked;
 }
 
 bool QuicSocketTxBuffer::MarkAsLost (const SequenceNumber32 seq)
@@ -538,7 +584,45 @@ uint32_t QuicSocketTxBuffer::Retransmission (SequenceNumber32 packetNumber)
       Ptr<QuicSocketTxItem> item = *sent_it;
       if (item->m_lost)
         {
-          // Add lost packet contents to app buffer
+          if (!item->m_isStream0)
+            {
+              // A sent packet may carry several frames (e.g. from different streams, plus
+              // ACKs). Re-queue each STREAM frame on its own so that the scheduler can
+              // re-segment it; control frames such as ACK are not retransmitted.
+              Ptr<Packet> pkt = item->m_packet->Copy ();
+              while (pkt->GetSize () > 0)
+                {
+                  QuicSubheader sub;
+                  pkt->RemoveHeader (sub);
+                  uint64_t len = sub.GetLength ();
+                  if (sub.IsStream () && len == 0)
+                    {
+                      len = pkt->GetSize ();
+                    }
+                  len = std::min<uint64_t> (len, pkt->GetSize ());
+                  Ptr<Packet> data = CopyRange (pkt, 0, len);
+                  pkt->RemoveAtStart (len);
+                  if (!sub.IsStream () && !sub.IsMaxData () && !sub.IsMaxStreamData ()
+                      && !sub.IsBlocked () && !sub.IsStreamBlocked () && !sub.IsAckFrequency ()
+                      && sub.GetFrameType () != QuicSubheader::MAX_STREAMS_BIDI && sub.GetFrameType () != QuicSubheader::MAX_STREAMS_UNI
+                      && sub.GetFrameType () != QuicSubheader::STREAMS_BLOCKED_BIDI && sub.GetFrameType () != QuicSubheader::STREAMS_BLOCKED_UNI)
+                    {
+                      continue;
+                    }
+                  data->AddHeader (sub);
+                  Ptr<QuicSocketTxItem> retx = CreateObject<QuicSocketTxItem> ();
+                  retx->m_packetNumber = packetNumber++;
+                  retx->m_isStream = true;
+                  retx->m_isStream0 = false;
+                  retx->m_packet = data;
+                  retx->m_lost = false;
+                  retx->m_retrans = true;
+                  toRetx += data->GetSize ();
+                  m_scheduler->Add (retx, true);
+                }
+              m_sentSize -= item->m_packet->GetSize ();
+              continue;
+            }
           Ptr<QuicSocketTxItem> retx = CreateObject<QuicSocketTxItem> ();
           retx->m_packetNumber = packetNumber++;
           retx->m_isStream = item->m_isStream;
@@ -551,17 +635,10 @@ uint32_t QuicSocketTxBuffer::Retransmission (SequenceNumber32 packetNumber)
           retx->m_retrans = true;
           toRetx += retx->m_packet->GetSize ();
           m_sentSize -= retx->m_packet->GetSize ();
-          if (retx->m_isStream0)
-            {
-              NS_LOG_INFO ("Lost stream 0 packet, re-inserting in list");
-              m_streamZeroList.insert (m_streamZeroList.begin (), retx);
-              m_streamZeroSize += retx->m_packet->GetSize ();
-              m_numFrameStream0InBuffer++;
-            }
-          else
-            {
-              m_scheduler->Add (retx, true);
-            }
+          NS_LOG_INFO ("Lost stream 0 packet, re-inserting in list");
+          m_streamZeroList.insert (m_streamZeroList.begin (), retx);
+          m_streamZeroSize += retx->m_packet->GetSize ();
+          m_numFrameStream0InBuffer++;
         }
     }
 
@@ -575,6 +652,7 @@ uint32_t QuicSocketTxBuffer::Retransmission (SequenceNumber32 packetNumber)
         {
           // Remove lost packet from sent vector
           sent_it = m_sentList.erase (sent_it);
+          m_inFlightValid = false;
         }
       else
         {
@@ -582,6 +660,32 @@ uint32_t QuicSocketTxBuffer::Retransmission (SequenceNumber32 packetNumber)
         }
     }
   return toRetx;
+}
+
+void QuicSocketTxBuffer::DetectTimeLoss (Ptr<TcpSocketState> tcb, uint32_t largestAcknowledged)
+{
+  NS_LOG_FUNCTION (this << largestAcknowledged);
+  Ptr<QuicSocketState> tcbd = dynamic_cast<QuicSocketState*> (&(*tcb));
+  Time baseRtt = std::max (tcbd->m_smoothedRtt, tcbd->m_latestRtt);
+  Time lossDelay = std::max (baseRtt * tcbd->m_kTimeReorderingFraction, MilliSeconds (1));
+  Time newLossTime = Seconds (0);
+  for (auto &item : m_sentList)
+    {
+      if (item->m_sacked || item->m_lost || item->m_packetNumber.GetValue () >= largestAcknowledged)
+        {
+          continue;
+        }
+      Time deadline = item->m_lastSent + lossDelay;
+      if (Now () >= deadline)
+        {
+          item->m_lost = true;
+        }
+      else if (newLossTime == Seconds (0) || deadline < newLossTime)
+        {
+          newLossTime = deadline;
+        }
+    }
+  tcbd->m_lossTime = newLossTime;
 }
 
 std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::DetectLostPackets ()
@@ -641,9 +745,10 @@ void QuicSocketTxBuffer::CleanSentList ()
       Ptr<QuicSocketTxItem> item = *sent_it;
       item->m_acked = true;
       m_sentSize -= item->m_packet->GetSize ();
-      m_sentList.erase (sent_it);
       NS_LOG_LOGIC (
-        "Packet " << (*sent_it)->m_packetNumber << " received and ACKed. Removing from sent buffer");
+        "Packet " << item->m_packetNumber << " received and ACKed. Removing from sent buffer");
+      m_sentList.erase (sent_it);
+      m_inFlightValid = false;
       sent_it = m_sentList.begin ();
     }
 }
@@ -675,24 +780,23 @@ uint32_t QuicSocketTxBuffer::GetNumFrameStream0InBuffer (void) const
 
 uint32_t QuicSocketTxBuffer::BytesInFlight () const
 {
-  NS_LOG_FUNCTION (this);
-
-  uint32_t inFlight = 0;
-
-  for (auto sent_it = m_sentList.begin ();
-       sent_it != m_sentList.end () and !m_sentList.empty (); ++sent_it)
+  // the sum over the sent list only changes when packets are added, acknowledged or removed, and it
+  // is asked for several times per packet: keep it until one of those happens
+  if (m_inFlightValid)
     {
-      if (!(*sent_it)->m_isStream0 && (*sent_it)->m_isStream
-          && !(*sent_it)->m_sacked)
+      return m_inFlightCache;
+    }
+  uint32_t inFlight = 0;
+  for (const auto &item : m_sentList)
+    {
+      if (!item->m_isStream0 && item->m_isStream && !item->m_sacked)
         {
-          inFlight += (*sent_it)->m_packet->GetSize ();
+          inFlight += item->m_packet->GetSize ();
         }
     }
-
-  NS_LOG_INFO (
-    "Compute bytes in flight " << inFlight << " m_sentSize " << m_sentSize << " m_appSize " << m_streamZeroSize + m_scheduler->AppSize ());
+  m_inFlightCache = inFlight;
+  m_inFlightValid = true;
   return inFlight;
-
 }
 
 void QuicSocketTxBuffer::SetQuicSocketState (Ptr<QuicSocketState> tcb)

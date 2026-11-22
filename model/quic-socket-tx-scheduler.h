@@ -156,6 +156,44 @@ public:
    */
   void AddScheduleItem (Ptr<QuicSocketTxScheduleItem> item, bool retx);
 
+  /**
+   * \brief Set the send priority of a stream (msquic QUIC_PARAM_STREAM_PRIORITY: higher goes first)
+   *
+   * Only schedulers that honour stream priorities act on it.
+   * \param streamId the stream
+   * \param priority 0..65535, default 0x7FFF
+   */
+  virtual void SetStreamPriority (uint64_t streamId, uint16_t priority);
+
+  /**
+   * \brief Tell the scheduler that a stream holds (or no longer holds) unsent application data,
+   * wherever that data is buffered. msquic keeps such a stream in its send list.
+   * \param streamId the stream
+   * \param backlogged true while data remains
+   */
+  virtual void OnStreamBacklog (uint64_t streamId, bool backlogged);
+
+protected:
+  /**
+   * \brief Called when bytes of a stream enter the scheduling list
+   * \param streamId the stream
+   * \param bytes number of bytes
+   */
+  virtual void OnQueued (uint64_t streamId, uint32_t bytes);
+
+  /**
+   * \brief Called when bytes of a stream leave the scheduling list
+   * \param streamId the stream
+   * \param bytes number of bytes
+   */
+  virtual void OnDequeued (uint64_t streamId, uint32_t bytes);
+
+  /**
+   * \\brief Called with the scheduling key of every item taken from the list
+   * \\param priority the key the item was queued with
+   */
+  virtual void OnItemServed (double priority);
+
 private:
   typedef std::priority_queue<Ptr<QuicSocketTxScheduleItem>, std::vector<Ptr<QuicSocketTxScheduleItem> >, CompareScheduleItems> QuicTxPacketList;        //!< container for data stored in the buffer
   QuicTxPacketList m_appList;

@@ -140,6 +140,10 @@ main(int argc, char* argv[])
     cmd.AddValue("verbose", "Enable QUIC debug logs",         verbose);
     cmd.Parse(argc, argv);
 
+  // Like msquic, no stream may be opened by the peer until the application allows some
+  Config::SetDefault ("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue (4));
+  Config::SetDefault ("ns3::QuicSocketBase::MaxStreamIdUni", UintegerValue (4));
+
     g_payloadBytes = payloadB;
 
     if (verbose)

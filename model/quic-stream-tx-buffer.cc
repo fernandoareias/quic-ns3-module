@@ -97,7 +97,7 @@ QuicStreamTxBuffer::GetTypeId (void)
 }
 
 QuicStreamTxBuffer::QuicStreamTxBuffer ()
-  : m_maxBuffer (131072),
+  : m_maxBuffer (1048576),
     m_appSize (0),
     m_sentSize (0)
 {
@@ -418,5 +418,14 @@ QuicStreamTxBuffer::BytesInFlight () const
 
 }
 
+
+uint32_t
+QuicStreamTxBuffer::DiscardAppData (void)
+{
+  uint32_t discarded = m_appSize;
+  m_appList.clear ();
+  m_appSize = 0;
+  return discarded;
+}
 
 }

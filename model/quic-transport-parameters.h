@@ -71,7 +71,7 @@ public:
    * \param initial_max_stream_data the initial value for the maximum data that can be sent on any newly created stream
    * \param initial_max_data the initial value for the maximum amount of data that can be sent on the connection
    * \param initial_max_stream_id_bidi the the initial maximum number of application-owned bidirectional streams the peer may initiate
-   * \param idleTimeout the idle timeout value in seconds
+   * \param idleTimeout the max_idle_timeout value in milliseconds (0 disables it)
    * \param omit_connection the flag that indicates if the connection id is required in the upcoming connection
    * \param max_packet_size the limit on the size of packets that the endpoint is willing to receive
    * \param stateless_reset_token the stateless reset token
@@ -79,7 +79,7 @@ public:
    * \param initial_max_stream_id_uni the initial maximum number of application-owned unidirectional streams the peer may initiate
    * \return the generated QuicTransportParameters
    */
-  static QuicTransportParameters CreateTransportParameters (uint32_t initial_max_stream_data, uint32_t initial_max_data, uint32_t initial_max_stream_id_bidi, uint16_t idleTimeout,
+  static QuicTransportParameters CreateTransportParameters (uint32_t initial_max_stream_data, uint32_t initial_max_data, uint32_t initial_max_stream_id_bidi, uint32_t idleTimeout,
                                                             uint8_t omit_connection, uint16_t max_packet_size, /*uint128_t stateless_reset_token,*/ uint8_t ack_delay_exponent, uint32_t initial_max_stream_id_uni);
 
   // Getters, Setters and Controls
@@ -100,13 +100,13 @@ public:
    * \brief Get the idle timeout
    * \return The idle timeout for this QuicTransportParameters
    */
-  uint16_t GetIdleTimeout () const;
+  uint32_t GetIdleTimeout () const;
 
   /**
    * \brief Set the idle timeout
    * \param idleTimeout the idle timeout for this QuicTransportParameters
    */
-  void SetIdleTimeout (uint16_t idleTimeout);
+  void SetIdleTimeout (uint32_t idleTimeout);
 
   /**
    * \brief Get the initial max data limit
@@ -167,6 +167,18 @@ public:
    * \param val the max ack delay in ms
    */
   void SetMaxAckDelay (uint16_t val);
+
+  /**
+   * \brief Get the min_ack_delay transport parameter (ack-frequency draft), in microseconds
+   * \return the value; 0 means the peer does not support ACK_FREQUENCY
+   */
+  uint32_t GetMinAckDelay () const;
+
+  /**
+   * \brief Set the min_ack_delay transport parameter, in microseconds
+   * \param val the value
+   */
+  void SetMinAckDelay (uint32_t val);
 
   /**
    * \brief Get the initial max bidirectional stream id limit
@@ -294,7 +306,7 @@ private:
   uint32_t m_initial_max_stream_data;             //!< initial_max_stream_data_bidi_local (0x05): max data on locally-initiated bidi streams
   uint32_t m_initial_max_data;            //!< The initial value for the maximum amount of data that can be sent on the connection
   uint32_t m_initial_max_stream_id_bidi;  //!< The the initial maximum number of application-owned bidirectional streams the peer may initiate
-  uint16_t m_idleTimeout;                 //!< The idle timeout value in seconds
+  uint32_t m_idleTimeout;                 //!< max_idle_timeout in milliseconds, 0 = disabled (RFC 9000 s18.2)
   uint8_t m_omit_connection;              //!< The flag that indicates if the connection id is required in the upcoming connection
   uint16_t m_max_packet_size;             //!< The limit on the size of packets that the endpoint is willing to receive
   uint64_t m_stateless_reset_token_hi;    //!< Upper 64 bits of the stateless reset token (RFC 9000 §18.2)
@@ -303,6 +315,7 @@ private:
   uint32_t m_initial_max_stream_id_uni;   //!< The initial maximum number of application-owned unidirectional streams the peer may initiate
   uint32_t m_initial_max_stream_data_bidi_remote; //!< initial_max_stream_data_bidi_remote (RFC 9000 §18.2, 0x06)
   uint32_t m_initial_max_stream_data_uni;         //!< initial_max_stream_data_uni (RFC 9000 §18.2, 0x07)
+  uint32_t m_min_ack_delay;                       //!< min_ack_delay in us (ack-frequency draft), 0 = unsupported
   uint16_t m_max_ack_delay;                       //!< max_ack_delay in ms (RFC 9000 §18.2, 0x0b), default 25
   uint8_t m_active_connection_id_limit;           //!< Active connection id limit ≥2 (RFC 9000 §18.2)
   uint8_t m_disable_active_migration;             //!< Disable active migration flag (RFC 9000 §18.2)

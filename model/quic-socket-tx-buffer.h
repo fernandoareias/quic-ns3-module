@@ -194,6 +194,13 @@ public:
   std::vector<Ptr<QuicSocketTxItem> > DetectLostPackets ();
 
   /**
+   * \brief Apply the time-threshold loss detection (RFC 9002 s6.1.2) and update the loss time
+   * \param tcb the socket state (its m_lossTime is updated)
+   * \param largestAcknowledged largest packet number acknowledged so far
+   */
+  void DetectTimeLoss (Ptr<TcpSocketState> tcb, uint32_t largestAcknowledged);
+
+  /**
    * \brief Check if any acknowledged packet was sent strictly between two send times.
    *
    * Used for RFC 9002 §7.6.2 persistent congestion detection:
@@ -263,6 +270,13 @@ public:
   void ResetSentList (uint32_t keepItems = 1);
 
   /**
+   * \brief Mark the oldest outstanding packets as lost so their data is queued again (PTO probes)
+   * \param n maximum number of packets
+   * \return the packets that were marked
+   */
+  std::vector<Ptr<QuicSocketTxItem> > MarkOldestAsLost (uint32_t n);
+
+  /**
    * Mark a packet as lost
    * \param the sequence number of the packet
    * \return true if the packet is in the send buffer
@@ -287,6 +301,18 @@ public:
    * \param The scheduler object
    */
   void SetScheduler (Ptr<QuicSocketTxScheduler> sched);
+
+  /**
+   * \\brief Lowest packet number covered by the oldest range of the ACK frame being processed
+   * \\param floor the lower bound; packets below it are not reported by the frame
+   */
+  void SetAckFloor (uint32_t floor) { m_ackFloor = floor; }
+
+  /**
+   * \\brief Get the scheduler
+   * \\return the scheduler, null before InitializeScheduling
+   */
+  Ptr<QuicSocketTxScheduler> GetScheduler (void) const { return m_scheduler; }
 
   /**
    * Updates per packet variables required for rate sampling on each packet transmission
@@ -368,6 +394,9 @@ private:
   uint32_t m_sentSize;                       //!< Size of all data in the sent list
   uint32_t m_numFrameStream0InBuffer;        //!< Number of Stream 0 frames buffered
 
+  mutable uint32_t m_inFlightCache {0};                       //!< Cached BytesInFlight ()
+  mutable bool m_inFlightValid {false};                       //!< The cache is up to date
+  uint32_t m_ackFloor {0};                                    //!< Lower bound of the last range of the current ACK
   Ptr<QuicSocketTxScheduler> m_scheduler { nullptr };         //!< Scheduler
   Ptr<QuicSocketState> m_tcb { nullptr };
   struct RateSample m_rs;

@@ -106,17 +106,16 @@ QuicCongestionOps::OnAckReceived (Ptr<TcpSocketState> tcb,
       && lastAcked->m_ackEliciting)
     {
       tcbd->m_lastRtt = Now () - lastAcked->m_lastSent;
-      UpdateRtt (tcbd, tcbd->m_lastRtt, Time (ack.GetAckDelay ()));
+      UpdateRtt (tcbd, tcbd->m_lastRtt, MicroSeconds (ack.GetAckDelay ()));
     }
 
   NS_LOG_LOGIC ("Processing acknowledged packets");
   // Process each acked packet
   for (auto it = newAcks.rbegin (); it != newAcks.rend (); ++it)
     {
-      if ((*it)->m_acked)
-        {
-          OnPacketAcked (tcb, (*it));
-        }
+      // newAcks only holds newly acknowledged packets, including those acknowledged
+      // after a gap (m_acked is only set once the packet leaves the sent list)
+      OnPacketAcked (tcb, (*it));
     }
 }
 
@@ -128,20 +127,22 @@ QuicCongestionOps::UpdateRtt (Ptr<TcpSocketState> tcb, Time latestRtt,
   Ptr<QuicSocketState> tcbd = dynamic_cast<QuicSocketState*> (&(*tcb));
   NS_ASSERT_MSG (tcbd != nullptr, "tcb is not a QuicSocketState");
 
-  // m_minRtt ignores ack delay.
+  // RFC 9002 s5.2: min_rtt ignores the ack delay
   tcbd->m_minRtt = std::min (tcbd->m_minRtt, latestRtt);
 
-  NS_LOG_LOGIC ("Correct for ACK delay");
-  // Adjust for ack delay if it's plausible.
-  // RFC 9002 §5.3: MUST ignore Ack Delay field before handshake is confirmed.
-  if (tcbd->m_handshakeConfirmed && latestRtt - tcbd->m_minRtt > ackDelay)
+  // RFC 9002 s5.3: the ack delay is ignored until the handshake is confirmed, is capped at the peer's
+  // max_ack_delay and is not subtracted when the result would be below min_rtt
+  Time adjustedRtt = latestRtt;
+  if (tcbd->m_handshakeConfirmed)
     {
-      latestRtt -= ackDelay;
-      // RFC 9002 §5.3: update maxAckDelay from incoming ACK frames (only after handshake)
-      tcbd->m_maxAckDelay = std::max (tcbd->m_maxAckDelay, ackDelay);
+      ackDelay = std::min (ackDelay, tcbd->m_maxAckDelay);
+      if (latestRtt >= tcbd->m_minRtt + ackDelay)
+        {
+          adjustedRtt = latestRtt - ackDelay;
+        }
     }
 
-  // RFC 9002 §5.3: store latest RTT (used for time-based loss threshold)
+  // latest_rtt is the raw sample: the time-threshold loss detection (RFC 9002 s6.1.2) uses it unadjusted
   tcbd->m_latestRtt = latestRtt;
 
   NS_LOG_LOGIC ("Update smoothed RTT");
@@ -154,9 +155,9 @@ QuicCongestionOps::UpdateRtt (Ptr<TcpSocketState> tcb, Time latestRtt,
   else
     {
       Time rttVarSample = Time (
-        std::abs ((tcbd->m_smoothedRtt - latestRtt).GetDouble ()));
+        std::abs ((tcbd->m_smoothedRtt - adjustedRtt).GetDouble ()));
       tcbd->m_rttVar = tcbd->m_rttVar * 3 / 4 + rttVarSample / 4;
-      tcbd->m_smoothedRtt = tcbd->m_smoothedRtt * 7 / 8 + latestRtt / 8;
+      tcbd->m_smoothedRtt = tcbd->m_smoothedRtt * 7 / 8 + adjustedRtt / 8;
     }
 
 }
@@ -239,6 +240,10 @@ QuicCongestionOps::OnPacketsLost (
   Ptr<QuicSocketState> tcbd = dynamic_cast<QuicSocketState*> (&(*tcb));
   NS_ASSERT_MSG (tcbd != nullptr, "tcb is not a QuicSocketState");
 
+  if (lostPackets.empty ())
+    {
+      return;
+    }
   auto largestLostPacket = *(lostPackets.end () - 1);
 
   NS_LOG_INFO ("Go in recovery mode");
@@ -246,12 +251,7 @@ QuicCongestionOps::OnPacketsLost (
   if (!InRecovery (tcbd, largestLostPacket->m_packetNumber))
     {
       tcbd->m_endOfRecovery = tcbd->m_highTxMark;
-      tcbd->m_cWnd *= tcbd->m_kLossReductionFactor;
-      if (tcbd->m_cWnd < tcbd->m_kMinimumWindow)
-        {
-          tcbd->m_cWnd = tcbd->m_kMinimumWindow;
-        }
-      tcbd->m_ssThresh = tcbd->m_cWnd;
+      OnCongestionEvent (tcbd);
     }
 
   // RFC 9002 §7.6.3: Persistent Congestion detection.
@@ -259,7 +259,19 @@ QuicCongestionOps::OnPacketsLost (
   // Note: the "no intermediate ACK" refinement (§7.6.2) is not checked here because
   // OnPacketsLost() has no tx-buffer access; it is an edge-case that doesn't affect
   // the primary detection logic.
-  if (lostPackets.size () >= 2 && tcbd->m_smoothedRtt > Seconds (0))
+  if (tcbd->m_kPersistentCongestionByPto)
+    {
+      // msquic (QUIC_PERSISTENT_CONGESTION_THRESHOLD = 2): the loss is persistent congestion when it
+      // follows more than 2 consecutive probe timeouts
+      if (tcbd->m_ptoCountForLoss > 2)
+        {
+          NS_LOG_INFO ("Persistent congestion (msquic): loss after " << tcbd->m_ptoCountForLoss << " PTOs");
+          OnPersistentCongestion (tcbd);
+          tcbd->m_minRtt = tcbd->m_latestRtt;
+        }
+    }
+  else if (lostPackets.size () >= 2 && tcbd->m_smoothedRtt > Seconds (0)
+      && !tcbd->m_lostSpanHasAck)
     {
       Time kGranularity = MilliSeconds (1);
       Time ptoDuration = tcbd->m_smoothedRtt
@@ -284,12 +296,49 @@ QuicCongestionOps::OnPacketsLost (
       if (newestSendTime - oldestSendTime >= persistentCongestionDuration)
         {
           NS_LOG_INFO ("Persistent congestion detected — collapsing cwnd to minimum (RFC 9002 §7.6.3)");
-          tcbd->m_cWnd = tcbd->m_kMinimumWindow;
-          tcbd->m_ssThresh = tcbd->m_kMinimumWindow;
+          OnPersistentCongestion (tcbd);
           // RFC 9002 §5.2: reset min_rtt after persistent congestion
           tcbd->m_minRtt = tcbd->m_latestRtt;
         }
     }
+}
+
+void
+QuicCongestionOps::OnSpuriousLoss (Ptr<TcpSocketState> tcb, SequenceNumber32 packetNumber)
+{
+  NS_LOG_FUNCTION (this << packetNumber);
+}
+
+void
+QuicCongestionOps::OnPathChange (Ptr<TcpSocketState> tcb)
+{
+  Ptr<QuicSocketState> tcbd = dynamic_cast<QuicSocketState*> (&(*tcb));
+  if (tcbd == nullptr)
+    {
+      return;
+    }
+  tcbd->m_cWnd = tcbd->m_initialCWnd;
+  tcbd->m_ssThresh = tcbd->m_initialSsThresh;
+  tcbd->m_endOfRecovery = tcbd->m_highTxMark;
+}
+
+void
+QuicCongestionOps::OnCongestionEvent (Ptr<QuicSocketState> tcbd)
+{
+  tcbd->m_cWnd *= tcbd->m_kLossReductionFactor;
+  if (tcbd->m_cWnd < tcbd->m_kMinimumWindow)
+    {
+      tcbd->m_cWnd = tcbd->m_kMinimumWindow;
+    }
+  tcbd->m_ssThresh = tcbd->m_cWnd;
+}
+
+void
+QuicCongestionOps::OnPersistentCongestion (Ptr<QuicSocketState> tcbd)
+{
+  // RFC 9002 s7.6.2: only the window collapses; ssthresh keeps the value the congestion event gave it, so
+  // slow start resumes from the minimum window up to it
+  tcbd->m_cWnd = tcbd->m_kMinimumWindow;
 }
 
 void

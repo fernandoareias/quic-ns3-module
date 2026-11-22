@@ -113,7 +113,34 @@ public:
    */
   bool InRecovery (Ptr<TcpSocketState> tcb, SequenceNumber32 packetNumber);
 
+public:
+  /**
+   * \brief A packet previously declared lost was acknowledged (spurious loss)
+   * \param tcb the socket state
+   * \param packetNumber number of the packet that had been declared lost
+   */
+  virtual void OnSpuriousLoss (Ptr<TcpSocketState> tcb, SequenceNumber32 packetNumber);
+
+  /**
+   * \\brief The connection moved to another network path: forget what was learned about the old one
+   * (msquic QuicCongestionControlReset on a path change that is not a UDP port rebind)
+   * \\param tcb the socket state
+   */
+  virtual void OnPathChange (Ptr<TcpSocketState> tcb);
+
 protected:
+  /**
+   * \brief Reduce the window on a new congestion event (new recovery epoch)
+   * \param tcbd the socket state
+   */
+  virtual void OnCongestionEvent (Ptr<QuicSocketState> tcbd);
+
+  /**
+   * \brief Collapse the window on persistent congestion (RFC 9002 s7.6)
+   * \param tcbd the socket state
+   */
+  virtual void OnPersistentCongestion (Ptr<QuicSocketState> tcbd);
+
   // QuicCongestionControl Draft10
 
   /**

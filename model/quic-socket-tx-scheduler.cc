@@ -10,6 +10,20 @@
 
 #include "quic-socket-tx-scheduler.h"
 
+namespace {
+/** Copy a byte range into a fresh packet (avoids packet-metadata fragmentation issues). */
+ns3::Ptr<ns3::Packet>
+CopyRange (ns3::Ptr<ns3::Packet> p, uint32_t start, uint32_t len)
+{
+  std::vector<uint8_t> all (p->GetSize ());
+  if (!all.empty ())
+    {
+      p->CopyData (all.data (), all.size ());
+    }
+  return ns3::Create<ns3::Packet> (all.data () + start, len);
+}
+}
+
 #include <algorithm>
 #include <iostream>
 #include <sstream>
@@ -165,6 +179,7 @@ QuicSocketTxScheduler::AddScheduleItem (Ptr<QuicSocketTxScheduleItem> item, bool
   NS_LOG_FUNCTION (this << item);
   m_appList.push (item);
   m_appSize += item->GetItem ()->m_packet->GetSize ();
+  OnQueued (item->GetStreamId (), item->GetItem ()->m_packet->GetSize ());
   QuicSubheader qsb;
   item->GetItem ()->m_packet->PeekHeader (qsb);
   NS_LOG_INFO ("Adding packet on stream " << qsb.GetStreamId () << " with priority " << item->GetPriority ());
@@ -176,6 +191,31 @@ QuicSocketTxScheduler::AddScheduleItem (Ptr<QuicSocketTxScheduleItem> item, bool
     {
       NS_LOG_INFO ("Retransmitted item, add at beginning (offset " << qsb.GetOffset () << ")");
     }
+}
+
+void
+QuicSocketTxScheduler::SetStreamPriority (uint64_t streamId, uint16_t priority)
+{
+}
+
+void
+QuicSocketTxScheduler::OnStreamBacklog (uint64_t streamId, bool backlogged)
+{
+}
+
+void
+QuicSocketTxScheduler::OnItemServed (double priority)
+{
+}
+
+void
+QuicSocketTxScheduler::OnQueued (uint64_t streamId, uint32_t bytes)
+{
+}
+
+void
+QuicSocketTxScheduler::OnDequeued (uint64_t streamId, uint32_t bytes)
+{
 }
 
 Ptr<QuicSocketTxItem>
@@ -200,6 +240,8 @@ QuicSocketTxScheduler::GetNewSegment (uint32_t numBytes)
       currentPacket = currentItem->m_packet;
       m_appSize -= currentPacket->GetSize ();
       m_appList.pop ();
+      OnDequeued (scheduleItem->GetStreamId (), currentPacket->GetSize ());
+      OnItemServed (scheduleItem->GetPriority ());
 
       if (outItemSize + currentItem->m_packet->GetSize ()   /*- subheaderSize*/
           <= numBytes)       // Merge
@@ -225,12 +267,29 @@ QuicSocketTxScheduler::GetNewSegment (uint32_t numBytes)
           currentPacket->PeekHeader (qsb);
 
           // new packet size
-          int newPacketSizeInt = (int)numBytes - outItemSize - qsb.GetSerializedSize ();
+          // The header of the part sent now always carries a LENGTH field, so size it from that header
+          // (the stored one may lack the bit) and not from the header of the frame being split
+          bool offBit = (qsb.GetOffset () != 0);
+          auto headerSize = [&] (uint32_t len)
+          {
+            return (int) QuicSubheader::CreateStreamSubHeader (qsb.GetStreamId (), qsb.GetOffset (), len, offBit, true, false).GetSerializedSize ();
+          };
+          int room = (int)numBytes - (int)outItemSize;
+          int newPacketSizeInt = room - headerSize (std::max (room, 0));
+          if (newPacketSizeInt > 0)
+            {
+              int refined = room - headerSize (newPacketSizeInt);
+              if (refined > newPacketSizeInt && headerSize (refined) == headerSize (newPacketSizeInt))
+                {
+                  newPacketSizeInt = refined;
+                }
+            }
           if (newPacketSizeInt <= 0)
             {
               NS_LOG_INFO ("Not enough bytes even for the header");
               m_appList.push (scheduleItem);
               m_appSize += currentPacket->GetSize ();
+              OnQueued (scheduleItem->GetStreamId (), currentPacket->GetSize ());
               break;
             }
           else
@@ -265,7 +324,7 @@ QuicSocketTxScheduler::GetNewSegment (uint32_t numBytes)
               QuicSubheader newQsbToBuffer = QuicSubheader::CreateStreamSubHeader (qsb.GetStreamId (),
                                                                                    newOffset, newLength, newOffBit, newLengthBit, oldFinBit);
 
-              Ptr<Packet> firstPartPacket = currentItem->m_packet->CreateFragment (
+              Ptr<Packet> firstPartPacket = CopyRange (currentItem->m_packet,
                 0, newPacketSize);
               NS_ASSERT_MSG (firstPartPacket->GetSize () == newPacketSize,
                              "Wrong size " << firstPartPacket->GetSize ());
@@ -274,7 +333,7 @@ QuicSocketTxScheduler::GetNewSegment (uint32_t numBytes)
               NS_LOG_INFO ("Split packet, putting second part back in application buffer - stream " << newQsbToBuffer.GetStreamId () << ", storing from offset " << newQsbToBuffer.GetOffset ());
 
 
-              Ptr<Packet> secondPartPacket = currentItem->m_packet->CreateFragment (
+              Ptr<Packet> secondPartPacket = CopyRange (currentItem->m_packet,
                 newPacketSize, newLength);
               secondPartPacket->AddHeader (newQsbToBuffer);
 
@@ -287,6 +346,7 @@ QuicSocketTxScheduler::GetNewSegment (uint32_t numBytes)
 
               m_appList.push (CreateObject<QuicSocketTxScheduleItem> (scheduleItem->GetStreamId (), scheduleItem->GetOffset (), scheduleItem->GetPriority (), toBeBuffered));
               m_appSize += toBeBuffered->m_packet->GetSize ();
+              OnQueued (scheduleItem->GetStreamId (), toBeBuffered->m_packet->GetSize ());
 
 
               NS_LOG_LOGIC ("Buffer size: " << m_appSize << " (put back " << toBeBuffered->m_packet->GetSize () << " bytes)");

@@ -273,6 +273,69 @@ public:
   bool SetListener (Ptr<QuicSocketBase> sock);
 
   /**
+   * \\brief Derive the 128 bit stateless reset token of a connection id with this endpoint's secret
+   * (msquic QuicLibraryGenerateStatelessResetToken)
+   * \\param connectionId the connection id
+   * \\param hi the upper 64 bits of the token
+   * \\param lo the lower 64 bits of the token
+   */
+  void GenerateStatelessResetToken (uint64_t connectionId, uint64_t &hi, uint64_t &lo) const;
+
+  /**
+   * \\brief Pick a connection id not used by any connection of this endpoint
+   * \\return the new id
+   */
+  uint64_t AllocateConnectionId (void);
+
+  /**
+   * \\brief Route packets that carry this connection id to a connection (msquic: the lookup table)
+   * \\param connectionId the id
+   * \\param socket the connection
+   */
+  void RegisterConnectionId (uint64_t connectionId, Ptr<QuicSocketBase> socket);
+
+  /**
+   * \\brief Stop routing a connection id
+   * \\param connectionId the id
+   */
+  void UnregisterConnectionId (uint64_t connectionId);
+
+  /**
+   * \\brief Replace the local UDP socket of a client connection by one bound to a new local address
+   * (msquic QUIC_PARAM_CONN_LOCAL_ADDRESS); the old socket is closed
+   * \\param socket the connection
+   * \\param newLocal the new local address (port 0 picks an ephemeral port)
+   * \\return the new UDP socket, or null on failure
+   */
+  Ptr<Socket> RebindLocalAddress (Ptr<QuicSocketBase> socket, const Address &newLocal);
+
+  /**
+   * \\brief Make a UDP socket and peer address the path the connection sends on
+   * \\param socket the connection
+   * \\param udp the UDP socket
+   * \\param remote the peer address
+   */
+  void SetPath (Ptr<QuicSocketBase> socket, Ptr<Socket> udp, const Address &remote);
+
+  /**
+   * \\brief The UDP socket and peer address the connection currently sends on
+   * \\param socket the connection
+   * \\param udp the UDP socket
+   * \\param remote the peer address
+   * \\return false if the connection has no binding
+   */
+  bool GetPath (Ptr<QuicSocketBase> socket, Ptr<Socket> &udp, Address &remote) const;
+
+  /**
+   * \\brief Send a packet on a given path, not necessarily the active one (probing)
+   * \\param pkt the payload
+   * \\param head the QUIC header
+   * \\param udp the UDP socket
+   * \\param remote the peer address
+   */
+  void SendPacketOnPath (Ptr<Packet> pkt, const QuicHeader &head, Ptr<Socket> udp, const Address &remote) const;
+
+  /**
    * \brief Check if this L4 Protocol is Server
    *
    * \return true if this L4 Protocol is Server, otherwhise false
@@ -444,6 +507,25 @@ private:
   std::map <Ptr<Socket>, Callback<void, Ptr<Packet>, const QuicHeader&, Address& > > m_socketHandlers;  //!< Callback handlers for sockets
 
   std::vector<Address > m_authAddresses;    //!< Authenticated addresses for this L4 Protocol
+  std::map<uint64_t, Ptr<QuicSocketBase> > m_cidMap;  //!< Connection id -> connection (every id issued to a peer)
+  uint64_t m_resetKeyA {0};                 //!< Secret of the stateless reset token function
+  uint64_t m_resetKeyB {0};                 //!< Secret of the stateless reset token function
+
+  /**
+   * \\brief Answer a short header packet that matches no connection with a stateless reset (msquic binding.c)
+   * \\param sock the UDP socket the packet arrived on
+   * \\param from the sender
+   * \\param header the received header
+   * \\param packet the received payload
+   */
+  void SendStatelessReset (Ptr<Socket> sock, const Address &from, const QuicHeader &header, Ptr<Packet> packet);
+
+  /**
+   * \\brief Look for a stateless reset among the connections of this endpoint (msquic connection.c)
+   * \\param packet the payload of a packet that matched no connection
+   * \\return true if the packet reset a connection
+   */
+  bool ReceiveStatelessReset (Ptr<Packet> packet);
   QuicUdpBindingList m_quicUdpBindingList;  //!< List of QuicUdp bindings
   bool m_isServer;                          //!< A flag indicating if the L4 Protocol is server
 

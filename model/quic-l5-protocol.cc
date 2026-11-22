@@ -67,73 +67,129 @@ QuicL5Protocol::~QuicL5Protocol ()
   NS_LOG_FUNCTION (this);
 }
 
-void
-QuicL5Protocol::CreateStream (
-  const QuicStreamBase::QuicStreamDirectionTypes_t streamDirectionType)
+bool
+QuicL5Protocol::IsLocallyInitiated (uint64_t streamId) const
 {
-  NS_LOG_FUNCTION (this);
-  NS_LOG_INFO ("Create the stream with ID " << m_streams.size ());
+  bool serverInitiated = (streamId & 1) == 1;
+  return serverInitiated == m_socket->IsServerSide ();
+}
+
+Ptr<QuicStreamBase>
+QuicL5Protocol::AddStream (uint64_t streamId)
+{
+  NS_LOG_FUNCTION (this << streamId);
   Ptr<QuicStreamBase> stream = CreateObject<QuicStreamBase> ();
-
   stream->SetQuicL5 (this);
-
   stream->SetNode (m_node);
-
   stream->SetConnectionId (m_connectionId);
+  stream->SetStreamId (streamId);
 
-  stream->SetStreamId ((uint64_t) m_streams.size ());
-
-  uint64_t mask = 0x00000003;
-  if ((m_streams.size () & mask) == QuicStream::CLIENT_INITIATED_BIDIRECTIONAL
-      or (m_streams.size () & mask)
-      == QuicStream::SERVER_INITIATED_BIDIRECTIONAL)
+  if (streamId == QuicStream::HANDSHAKE_STREAM_ID)
     {
       stream->SetStreamDirectionType (QuicStream::BIDIRECTIONAL);
-
+      stream->SetMaxStreamData (UINT64_MAX);
+      stream->InitRecvWindow (m_socket->GetOwnStreamRecvWindow (true, true));
     }
   else
     {
-      stream->SetStreamDirectionType (streamDirectionType);
+      bool local = IsLocallyInitiated (streamId);
+      bool bidi = (streamId & 2) == 0;
+      stream->SetStreamDirectionType (bidi ? QuicStream::BIDIRECTIONAL
+                                           : (local ? QuicStream::SENDER : QuicStream::RECEIVER));
+      stream->SetMaxStreamData (m_socket->GetPeerStreamDataLimit (local, bidi));
+      stream->InitRecvWindow (m_socket->GetOwnStreamRecvWindow (local, bidi));
     }
-
-  if (stream->GetStreamId () > 0)
-    {
-      stream->SetMaxStreamData (m_socket->GetInitialMaxStreamData ());
-    }
-  else
-    {
-      stream->SetMaxStreamData (UINT32_MAX);
-    }
-
   m_streams.push_back (stream);
-
+  m_streamById[streamId] = stream;
+  return stream;
 }
 
 void
-QuicL5Protocol::CreateStream (
-  const QuicStream::QuicStreamDirectionTypes_t streamDirectionType,
-  uint64_t streamNum)
+QuicL5Protocol::CreateHandshakeStream (void)
 {
-
-  NS_LOG_FUNCTION (this << m_streams.size () << streamNum);
-
-
-  if (streamNum > m_socket->GetMaxStreamId ())   // TODO separate unidirectional and bidirectional
+  if (m_streamById.find (QuicStream::HANDSHAKE_STREAM_ID) == m_streamById.end ())
     {
-      NS_LOG_INFO ("MaxStreamId " << m_socket->GetMaxStreamId ());
-      SignalAbortConnection (
-        QuicSubheader::TransportErrorCodes_t::STREAM_LIMIT_ERROR,
-        "Initiating Stream with higher StreamID with respect to what already negotiated");
+      AddStream (QuicStream::HANDSHAKE_STREAM_ID);
+    }
+}
+
+Ptr<QuicStreamBase>
+QuicL5Protocol::OpenLocalStream (uint64_t streamId)
+{
+  NS_LOG_FUNCTION (this << streamId);
+  Ptr<QuicStreamBase> existing = SearchStream (streamId);
+  if (existing != nullptr)
+    {
+      return existing;
+    }
+  if (!IsLocallyInitiated (streamId))
+    {
+      NS_LOG_WARN ("Stream " << streamId << " belongs to the peer: it cannot be opened here");
+      return nullptr;
+    }
+  bool bidi = (streamId & 2) == 0;
+  uint64_t count = (streamId >> 2) + 1;
+  // RFC 9000 s4.6: the peer's stream limit; tell it when that is what stops us
+  if (count > m_socket->GetPeerMaxStreams (bidi))
+    {
+      NS_LOG_INFO ("Stream limit reached (" << m_socket->GetPeerMaxStreams (bidi) << "), sending STREAMS_BLOCKED");
+      m_socket->SendStreamsBlockedFrame (m_socket->GetPeerMaxStreams (bidi), bidi);
+      return nullptr;
+    }
+  // RFC 9000 s3.2: using a stream id opens every lower numbered stream of the same type
+  uint64_t type = streamId & 3;
+  while (m_streamsCreated[type] < count)
+    {
+      AddStream (type + (m_streamsCreated[type] << 2));
+      ++m_streamsCreated[type];
+    }
+  return SearchStream (streamId);
+}
+
+Ptr<QuicStreamBase>
+QuicL5Protocol::GetStreamForPeer (uint64_t streamId, bool &fatal)
+{
+  fatal = false;
+  Ptr<QuicStreamBase> stream = SearchStream (streamId);
+  if (stream != nullptr)
+    {
+      return stream;
+    }
+  if (IsLocallyInitiated (streamId))
+    {
+      // a frame for a stream of ours that was never opened (RFC 9000 s19.8)
+      SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::STREAM_STATE_ERROR,
+                             "Frame for a local stream that was not opened");
+      fatal = true;
+      return nullptr;
+    }
+  bool bidi = (streamId & 2) == 0;
+  uint64_t count = (streamId >> 2) + 1;
+  if (count > m_socket->GetOwnMaxStreams (bidi))
+    {
+      SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::STREAM_LIMIT_ERROR,
+                             "Peer used more streams than allowed");
+      fatal = true;
+      return nullptr;
+    }
+  uint64_t type = streamId & 3;
+  while (m_streamsCreated[type] < count)
+    {
+      AddStream (type + (m_streamsCreated[type] << 2));
+      ++m_streamsCreated[type];
+    }
+  return SearchStream (streamId);
+}
+
+void
+QuicL5Protocol::OnStreamClosed (Ptr<QuicStreamBase> stream)
+{
+  if (stream->IsHandshake () || IsLocallyInitiated (stream->GetStreamId ()))
+    {
       return;
     }
-
-  // create streamNum streams
-  while (m_streams.size () <= streamNum)
-    {
-      NS_LOG_INFO ("Create stream " << m_streams.size ());
-      CreateStream (streamDirectionType);
-    }
-
+  bool bidi = (stream->GetStreamId () & 2) == 0;
+  m_socket->GrantPeerStream (bidi);
 }
 
 void
@@ -146,80 +202,41 @@ QuicL5Protocol::SetSocket (Ptr<QuicSocketBase> sock)
 int
 QuicL5Protocol::DispatchSend (Ptr<Packet> data)
 {
-  NS_LOG_FUNCTION (this);
-
-  int sentData = 0;
-
-  // if the streams are not created yet, open the streams
-  if (m_streams.size () != m_socket->GetMaxStreamId ())
-    {
-      NS_LOG_INFO ("Create the missing streams");
-      CreateStream (QuicStream::SENDER, m_socket->GetMaxStreamId ());   // TODO open up to max_stream_uni and max_stream_bidi
-    }
-
-  std::vector<Ptr<Packet> > disgregated = DisgregateSend (data);
-
-  std::vector<Ptr<QuicStreamBase> >::iterator jt = m_streams.begin () + 1;   // Avoid Send on stream <0>, which is used only for handshake
-
-  for (std::vector<Ptr<Packet> >::iterator it = disgregated.begin ();
-       it != disgregated.end (); ++jt)
-    {
-      if (jt == m_streams.end ())             // Sending Remaining Load
-        {
-          jt = m_streams.begin () + 1;
-        }
-      NS_LOG_LOGIC (
-        this << " " << (uint64_t)(*jt)->GetStreamDirectionType () << (uint64_t) QuicStream::SENDER << (uint64_t) QuicStream::BIDIRECTIONAL);
-
-      if ((*jt)->GetStreamDirectionType () == QuicStream::SENDER
-          or (*jt)->GetStreamDirectionType () == QuicStream::BIDIRECTIONAL)
-        {
-          NS_LOG_INFO (
-            "Sending data on stream " << (*jt)->GetStreamId ());
-          int streamSentData = (*jt)->Send ((*it));
-          if (streamSentData > 0)
-            {
-              sentData += streamSentData;
-            }
-          ++it;
-        }
-    }
-
-  return (sentData > 0) ? sentData : -1;
+  // no stream given: use the first bidirectional stream this endpoint initiates (id 0 for a client,
+  // 1 for a server), as an application using a single stream would
+  return DispatchSend (data, m_socket->IsServerSide () ? 1 : 0);
 }
 
 int
 QuicL5Protocol::DispatchSend (Ptr<Packet> data, uint64_t streamId)
 {
   NS_LOG_FUNCTION (this);
-
   NS_LOG_INFO ("Send packet on (specified) stream " << streamId);
 
-  // RFC 9000 §4.6: if stream limit reached, send STREAMS_BLOCKED instead of aborting
-  if (streamId > m_socket->GetMaxStreamId ())
-    {
-      NS_LOG_INFO ("Stream limit reached, sending STREAMS_BLOCKED (limit=" << m_socket->GetMaxStreamId () << ")");
-      m_socket->SendStreamsBlockedFrame (m_socket->GetMaxStreamId (), true);
-      return -1;
-    }
-
   Ptr<QuicStreamBase> stream = SearchStream (streamId);
-
   if (stream == nullptr)
     {
-      CreateStream (QuicStream::SENDER, streamId);
+      if (streamId == QuicStream::HANDSHAKE_STREAM_ID)
+        {
+          CreateHandshakeStream ();
+          stream = SearchStream (streamId);
+        }
+      else
+        {
+          stream = OpenLocalStream (streamId);
+        }
     }
-
-  stream = SearchStream (streamId);
-  int sentData = 0;
+  if (stream == nullptr)
+    {
+      return -1;
+    }
 
   if (stream->GetStreamDirectionType () == QuicStream::SENDER
       or stream->GetStreamDirectionType () == QuicStream::BIDIRECTIONAL)
     {
-      sentData = stream->Send (data);
+      return stream->Send (data);
     }
-
-  return sentData;
+  return -1;
 }
 
 int
@@ -239,24 +256,14 @@ QuicL5Protocol::DispatchRecv (Ptr<Packet> data, Address &address)
     }
 
   bool onlyAckFrames = true;
-  uint64_t currStreamNum = m_streams.size () - 1;
   for (auto &elem : disgregated)
     {
-      QuicSubheader sub = elem.second;
-
-      // check if this is an ack frame
-      if (!sub.IsAck ())
+      if (!elem.second.IsAck ())
         {
           onlyAckFrames = false;
         }
-
-      if (sub.GetStreamId () > currStreamNum)
-        {
-          currStreamNum = sub.GetStreamId ();
-        }
+      m_socket->NoteFrame (elem.second);
     }
-
-  CreateStream (QuicStream::RECEIVER, currStreamNum);
 
   for (auto it = disgregated.begin (); it != disgregated.end (); ++it)
     {
@@ -266,10 +273,27 @@ QuicL5Protocol::DispatchRecv (Ptr<Packet> data, Address &address)
           or sub.IsStreamBlocked () or sub.IsStopSending ()
           or sub.IsStream ())
         {
-          Ptr<QuicStreamBase> stream = SearchStream (sub.GetStreamId ());
+          Ptr<QuicStreamBase> stream;
+          if (sub.GetStreamId () == QuicStream::HANDSHAKE_STREAM_ID)
+            {
+              CreateHandshakeStream ();
+              stream = SearchStream (QuicStream::HANDSHAKE_STREAM_ID);
+            }
+          else
+            {
+              bool fatal = false;
+              stream = GetStreamForPeer (sub.GetStreamId (), fatal);
+              if (fatal)
+                {
+                  return -1;
+                }
+            }
 
+          // MAX_STREAM_DATA and STOP_SENDING travel from the receiving to the sending side
+          bool towardsSender = sub.IsMaxStreamData () or sub.IsStopSending ();
           if (stream != nullptr
-              and (stream->GetStreamDirectionType () == QuicStream::RECEIVER
+              and (towardsSender
+                   or stream->GetStreamDirectionType () == QuicStream::RECEIVER
                    or stream->GetStreamDirectionType ()
                    == QuicStream::BIDIRECTIONAL))
             {
@@ -388,7 +412,14 @@ QuicL5Protocol::DisgregateRecv (Ptr<Packet> data)
 
       NS_LOG_INFO ("subheader " << sub << " dataSizeByte " << dataSizeByte
                                 << " remaining " << data->GetSize () << " frame size " << frameDataLen);
-      Ptr<Packet> remainingfragment = data->CreateFragment (0, frameDataLen);
+      // Copy the frame bytes instead of CreateFragment: the packet metadata of a received
+      // datagram is not guaranteed to be fragmentable at arbitrary frame boundaries
+      std::vector<uint8_t> frameBytes (frameDataLen);
+      if (frameDataLen > 0)
+        {
+          data->CopyData (frameBytes.data (), frameDataLen);
+        }
+      Ptr<Packet> remainingfragment = Create<Packet> (frameBytes.data (), frameDataLen);
       NS_LOG_INFO ("fragment size " << remainingfragment->GetSize ());
 
       // remove the first portion of the packet
@@ -404,19 +435,8 @@ QuicL5Protocol::DisgregateRecv (Ptr<Packet> data)
 Ptr<QuicStreamBase>
 QuicL5Protocol::SearchStream (uint64_t streamId)
 {
-  NS_LOG_FUNCTION (this);
-  std::vector<Ptr<QuicStreamBase> >::iterator it = m_streams.begin ();
-  Ptr<QuicStreamBase> stream;
-  while (it != m_streams.end ())
-    {
-      if ((*it)->GetStreamId () == streamId)
-        {
-          stream = *it;
-          break;
-        }
-      ++it;
-    }
-  return stream;
+  auto it = m_streamById.find (streamId);
+  return (it == m_streamById.end ()) ? nullptr : it->second;
 }
 
 void
@@ -461,16 +481,14 @@ QuicL5Protocol::SignalAbortConnection (uint16_t transportErrorCode,
 }
 
 void
-QuicL5Protocol::UpdateInitialMaxStreamData (uint32_t newMaxStreamData)
+QuicL5Protocol::UpdateInitialMaxStreamData (void)
 {
-  NS_LOG_FUNCTION (this << newMaxStreamData);
-
-  // TODO handle in a different way bidirectional and unidirectional streams
   for (auto stream : m_streams)
     {
-      if (stream->GetStreamId () > 0) // stream 0 is set to UINT32_MAX and not modified
+      if (!stream->IsHandshake ())
         {
-          stream->SetMaxStreamData (newMaxStreamData);
+          uint64_t id = stream->GetStreamId ();
+          stream->SetMaxStreamData (m_socket->GetPeerStreamDataLimit (IsLocallyInitiated (id), (id & 2) == 0));
         }
     }
 }
@@ -478,15 +496,161 @@ QuicL5Protocol::UpdateInitialMaxStreamData (uint32_t newMaxStreamData)
 uint64_t
 QuicL5Protocol::GetMaxData ()
 {
-  NS_LOG_FUNCTION (this);
-
-  uint64_t maxData = 0;
-  for (auto stream : m_streams)
+  if (m_connMaxAllowed == 0)
     {
-      maxData += stream->SendMaxStreamData ();
+      m_connMaxAllowed = m_socket->GetConnRecvWindow ();
     }
-  return maxData;
+  return m_connMaxAllowed;
 }
 
-} // namespace ns3
+uint64_t
+QuicL5Protocol::ConnectionSendWindow () const
+{
+  if (m_socket->GetSocketState () != QuicSocket::OPEN && !m_socket->IsFlushingOnClose ())
+    {
+      return 0; // no application data before the handshake completes
+    }
+  uint64_t peerMax = m_socket->GetConnectionMaxData ();
+  return (peerMax > m_connSent) ? peerMax - m_connSent : 0;
+}
 
+void
+QuicL5Protocol::OnNewDataSent (int64_t bytes)
+{
+  m_connSent += bytes;
+}
+
+void
+QuicL5Protocol::OnBytesDelivered (uint64_t bytes)
+{
+  // msquic: MaxData slides with every delivered byte; the MAX_DATA frame goes out once
+  // ConnFlowControlWindow / 4 bytes accumulated
+  uint64_t window = m_socket->GetConnRecvWindow ();
+  if (m_connMaxAllowed == 0)
+    {
+      m_connMaxAllowed = window;
+    }
+  m_connMaxAllowed += bytes;
+  m_connDeliveredAccumulator += bytes;
+  if (m_connDeliveredAccumulator < window / 4)
+    {
+      return;
+    }
+  m_connDeliveredAccumulator = 0;
+  QuicSubheader md = QuicSubheader::CreateMaxData (m_connMaxAllowed);
+  Ptr<Packet> p = Create<Packet> (0);
+  p->AddHeader (md);
+  Send (p);
+}
+
+bool
+QuicL5Protocol::IsAckPending () const
+{
+  return m_socket != nullptr && m_socket->HasAckPending ();
+}
+
+void
+QuicL5Protocol::OnConnectionWindowUpdate ()
+{
+  for (auto stream : m_streams)
+    {
+      if (!stream->IsHandshake ())
+        {
+          stream->WakeUp ();
+        }
+    }
+}
+
+void
+QuicL5Protocol::NotifySocketTxFull ()
+{
+  NS_LOG_FUNCTION (this);
+  m_socketTxFull = true;
+}
+
+void
+QuicL5Protocol::OnSocketTxSpace ()
+{
+  NS_LOG_FUNCTION (this << m_socketTxFull);
+  if (!m_socketTxFull)
+    {
+      return;
+    }
+  m_socketTxFull = false;
+  NS_LOG_INFO ("The socket buffer has room again: waking " << m_streams.size () << " streams");
+  for (auto stream : m_streams)
+    {
+      stream->WakeUp ();
+    }
+}
+
+bool
+QuicL5Protocol::OnBytesReceivedAtOffset (uint64_t bytes)
+{
+  m_connRecvTotal += bytes;
+  return m_connRecvTotal <= GetMaxData ();
+}
+
+bool
+QuicL5Protocol::HasPendingStreamData () const
+{
+  for (auto stream : m_streams)
+    {
+      if (!stream->IsHandshake () && stream->HasPendingData ())
+        {
+          return true;
+        }
+    }
+  return false;
+}
+
+void
+QuicL5Protocol::ReportConnectionBlockedIfNeeded ()
+{
+  uint64_t limit = m_socket->GetConnectionMaxData ();
+  if (m_connSent >= limit && limit > 0 && m_connBlockedReportedAt != limit)
+    {
+      m_connBlockedReportedAt = limit;
+      Ptr<Packet> p = Create<Packet> (0);
+      p->AddHeader (QuicSubheader::CreateBlocked (limit));
+      Send (p);
+    }
+}
+
+Time
+QuicL5Protocol::GetSmoothedRtt () const
+{
+  return m_socket->GetSmoothedRtt ();
+}
+
+void
+QuicL5Protocol::NotifyStreamBacklog (uint64_t streamId, bool backlogged)
+{
+  if (m_socket != nullptr)
+    {
+      m_socket->SetStreamBacklog (streamId, backlogged);
+    }
+}
+
+bool
+QuicL5Protocol::ResetStream (uint64_t streamId, uint16_t errorCode)
+{
+  Ptr<QuicStreamBase> stream = SearchStream (streamId);
+  return stream != nullptr && stream->Reset (errorCode);
+}
+
+bool
+QuicL5Protocol::StopSendingOnStream (uint64_t streamId, uint16_t errorCode)
+{
+  Ptr<QuicStreamBase> stream = SearchStream (streamId);
+  return stream != nullptr && stream->StopSending (errorCode);
+}
+
+bool
+QuicL5Protocol::FinishStream (uint64_t streamId)
+{
+  Ptr<QuicStreamBase> stream = SearchStream (streamId);
+  return stream != nullptr && stream->Finish ();
+}
+
+}

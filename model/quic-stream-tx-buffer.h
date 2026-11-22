@@ -161,6 +161,12 @@ public:
    */
   uint32_t BytesInFlight () const;
 
+  /**
+   * \brief Drop all application data that was not yet transmitted
+   * \return the number of bytes discarded
+   */
+  uint32_t DiscardAppData (void);
+
 private:
   typedef std::list<Ptr<QuicStreamTxItem>> QuicTxPacketList;  //!< container for data stored in the buffer
 
