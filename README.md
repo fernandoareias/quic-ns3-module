@@ -53,6 +53,18 @@ build/utils/ns3-dev-test-runner-debug --suite=quic-features
 
 `test/TESTS.md` maps each feature to the test case that covers it.
 
+## Using the module from an application
+
+```cpp
+QuicHelper quic;
+quic.InstallQuic(nodes);                        // instead of InternetStackHelper
+Ptr<Socket> socket = Socket::CreateSocket(node, QuicSocketFactory::GetTypeId());
+```
+
+- **Stream limits.** Like msquic, the module lets the peer open no stream until the application allows some: `MaxStreamIdBidi` and `MaxStreamIdUni` default to 0. An application that never raises them hangs after the handshake (`STREAMS_BLOCKED`). Set them with `Config::SetDefault("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue(n))` or per socket with `SetAttribute`, on both ends.
+- **Default stream.** `Socket::Send(packet)` writes on the first bidirectional stream the endpoint opens: stream 0 on the client and stream 1 on the server (RFC 9000 stream ids), so both ends need a stream allowance. `Socket::Send(packet, streamId)` picks the stream.
+- **0-RTT.** A client that already knows a server still gets a full handshake. Set `ns3::QuicL4Protocol::0RTT-Handshake` on the client's `QuicL4Protocol` to connect with 0-RTT; the server accepts it from addresses it has authenticated.
+
 ## Streaming experiment
 
 `examples/quic-video-streaming.cc` sends a video, an audio and a metadata flow (low-latency live media) over one connection through a bottleneck link, with QUIC or TCP, and prints the one-way delivery delay of every flow, counted from the instant each message was generated; a message that never arrives counts as late. `scripts/streaming_experiment.py` runs the experiment of the paper: random loss (uniform at 0 to 3 % and in bursts of mean length 4 at 1 to 3 %) on an otherwise idle 10 Mbps link, no TLS, 30 repetitions of five variants (TCP with the ns-3 defaults, with Linux timers and buffers, and with those plus pacing, and QUIC with round-robin and with per-stream FIFO scheduling, about four minutes) and prints the LaTeX rows of its tables. The results it produced are in `results/streaming-loss.csv`. The TCP is the ns-3 one, without tail loss probe or RACK, and there is no cross traffic, so the experiment measures random loss and not congestion. From the ns-3 root:
