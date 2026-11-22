@@ -1185,7 +1185,7 @@ QuicSocketBase::SendPendingData (bool withAck)
       if (m_flushAllowance == 0)
         {
           NS_LOG_INFO ("Pacing allowance exhausted - next chunk in 1 ms");
-          if (!m_pacingTimer.IsPending ())
+          if (!m_pacingTimer.IsRunning ())
             {
               m_pacingTimer.Schedule (MilliSeconds (1));
             }
