@@ -30,7 +30,7 @@ contrib/quic/
 ├── helper/      # QuicHelper (InstallQuic)
 ├── examples/    # quic-example, quic-video-streaming
 ├── scripts/     # streaming_experiment.py
-├── results/     # streaming-uniform-loss.csv
+├── results/     # streaming-loss.csv
 └── test/        # two ns-3 suites, "quic" and "quic-features" (see test/TESTS.md)
 ```
 
@@ -55,11 +55,11 @@ build/utils/ns3-dev-test-runner-debug --suite=quic-features
 
 ## Streaming experiment
 
-`examples/quic-video-streaming.cc` sends a video, an audio and a metadata flow (low-latency live media) over one connection through a bottleneck link, with QUIC or TCP, and prints the one-way delivery delay of every flow, counted from the instant each message was generated; a message that never arrives counts as late. `scripts/streaming_experiment.py` runs the experiment of the paper (uniform random loss of 0 to 3 % on an otherwise idle 10 Mbps link, no TLS, 30 repetitions of five variants: TCP with the ns-3 defaults, with Linux timer values and with Linux values plus pacing, and QUIC with round-robin and with per-stream FIFO scheduling, about two minutes) and prints the LaTeX rows of its tables; the results it produced are in `results/streaming-uniform-loss.csv`. There is no cross traffic, so the experiment measures random loss and not congestion. From the ns-3 root:
+`examples/quic-video-streaming.cc` sends a video, an audio and a metadata flow (low-latency live media) over one connection through a bottleneck link, with QUIC or TCP, and prints the one-way delivery delay of every flow, counted from the instant each message was generated; a message that never arrives counts as late. `scripts/streaming_experiment.py` runs the experiment of the paper: random loss (uniform at 0 to 3 % and in bursts of mean length 4 at 1 to 3 %) on an otherwise idle 10 Mbps link, no TLS, 30 repetitions of five variants (TCP with the ns-3 defaults, with Linux timers and buffers, and with those plus pacing, and QUIC with round-robin and with per-stream FIFO scheduling, about four minutes) and prints the LaTeX rows of its tables. The results it produced are in `results/streaming-loss.csv`. The TCP is the ns-3 one, without tail loss probe or RACK, and there is no cross traffic, so the experiment measures random loss and not congestion. From the ns-3 root:
 
 ```bash
 ./ns3 build quic-video-streaming
-contrib/quic/scripts/streaming_experiment.py run      # writes streaming-uniform-loss.csv
+contrib/quic/scripts/streaming_experiment.py run      # writes streaming-loss.csv
 contrib/quic/scripts/streaming_experiment.py tables   # rows of the tables
 ```
 

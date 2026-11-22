@@ -1,7 +1,7 @@
 /*
  * quic-video-streaming.cc
  *
- * Streaming de mídia sobre QUIC (módulo contrib/quic) vs TCP no NS-3.
+ * Mídia ao vivo de baixa latência sobre QUIC (módulo contrib/quic) vs TCP no NS-3.
  *
  * Topologia: servidor --(gargalo: banda/atraso/perda)-- cliente.
  * O servidor envia, em UMA única conexão, três fluxos de mídia:
@@ -22,10 +22,16 @@
  *     recebem a mesma sequência de tamanhos.
  *
  * TCP: --tcpProfile=ns3 usa os padrões do ns-3 (RTO mínimo de 1 s, timeout do SYN de 3 s, atraso de ACK de 200 ms,
- * buffers de 128 KB); --tcpProfile=linux usa os valores do Linux: RTO mínimo de 200 ms, timeout do SYN de 1 s
- * (RFC 6298), atraso de ACK de 40 ms e buffers de 4 MiB. O atraso de ACK precisa acompanhar o RTO: com o padrão do
- * ns-3 (200 ms, igual ao RTO mínimo) o TCP entra em ciclo de RTOs espúrios, pois o receptor segura o ACK de um único
- * segmento até o RTO disparar. --tcpPacing=1 liga o pacing do TCP (o CUBIC do QUIC faz pacing).
+ * buffers de 128 KB); --tcpProfile=linux-timers usa os temporizadores e buffers do Linux (RTO mínimo de 200 ms,
+ * timeout do SYN de 1 s, atraso de ACK de 40 ms, buffers de 4 MiB), mas o TCP continua sendo o do ns-3, sem Tail
+ * Loss Probe nem RACK. O atraso de ACK precisa ser bem menor que o RTO mínimo: com RTO mínimo de 200 ms e o atraso
+ * de ACK padrão do ns-3 (200 ms) o TCP entra em ciclo de RTOs espúrios, pois o receptor segura o ACK de um único
+ * segmento até o RTO disparar. --tcpMinRto=<ms> troca o RTO mínimo do perfil. --tcpPacing=1 liga o pacing do TCP (o
+ * CUBIC do QUIC faz pacing). A coluna rto_episodes conta as entradas do TCP no estado CA_LOSS: vários RTOs seguidos, com o recuo
+ * exponencial do temporizador, contam uma vez; no QUIC vale -1. A coluna pacing_below_pct
+ * é, no TCP com pacing, a parte da janela de mídia (em %) em que a taxa de pacing ficou abaixo da carga oferecida;
+ * vale -1 sem pacing e no QUIC. Com RTO mínimo de 60 ms e atraso de ACK de 40 ms
+ * o TCP entra em ciclo de RTOs espúrios: --tcpMinRto não deve ficar perto do atraso de ACK mais o RTT.
  *
  * Uso:
  *   ./ns3 run "quic-video-streaming --transport=quic --loss=0.02 --run=1"
@@ -102,6 +108,11 @@ Time g_audioInterval = MilliSeconds(20);
 uint32_t g_metaBytes = 100;
 Time g_metaInterval = MilliSeconds(100);
 std::map<uint32_t, uint32_t> g_seq;
+double g_offeredBps = 0;      // carga oferecida pela aplicação, em bit/s (com os cabeçalhos das mensagens)
+double g_paceBelowS = 0;      // TCP com pacing: tempo, dentro da janela de mídia, em que a taxa de pacing ficou abaixo da carga
+double g_paceLastT = 0;
+double g_paceLastBps = -1;    // taxa de pacing em vigor desde g_paceLastT (-1: ainda desconhecida)
+uint32_t g_rtos = 0;                                 // TCP: episódios de RTO (entradas no estado CA_LOSS)
 std::map<uint32_t, std::deque<MsgHeader>> g_backlog; // mensagens geradas que ainda não couberam no socket (QUIC: por stream; TCP: chave 0)
 Ptr<UniformRandomVariable> g_videoRv;                // tamanho dos quadros de vídeo, stream fixo
 Time g_simEnd;
@@ -161,6 +172,7 @@ class ImpairModel : public ErrorModel
         }
         if (m_loss && m_loss->IsCorrupt(p))
         {
+            ++g_drops;
             return true;
         }
         if (m_jitter.IsStrictlyPositive())
@@ -190,12 +202,6 @@ class ImpairModel : public ErrorModel
     Time m_lastRelease;
     bool m_reinject = false;
 };
-
-void
-CountDrop(Ptr<const Packet>)
-{
-    ++g_drops;
-}
 
 void
 Flush(uint32_t key)
@@ -230,6 +236,34 @@ FlushAll()
     for (auto& kv : g_backlog)
     {
         Flush(kv.first);
+    }
+}
+
+void
+AccountPacing(double now)
+{
+    double from = std::max(g_paceLastT, g_streamStart.GetSeconds());
+    double to = std::min(now, g_streamEnd.GetSeconds());
+    if (g_paceLastBps >= 0 && g_paceLastBps < g_offeredBps && to > from)
+    {
+        g_paceBelowS += to - from;
+    }
+    g_paceLastT = now;
+}
+
+void
+OnPacingRate(DataRate, DataRate newRate)
+{
+    AccountPacing(Simulator::Now().GetSeconds());
+    g_paceLastBps = (double)newRate.GetBitRate();
+}
+
+void
+OnTcpCongState(TcpSocketState::TcpCongState_t oldState, TcpSocketState::TcpCongState_t newState)
+{
+    if (newState == TcpSocketState::CA_LOSS && oldState != TcpSocketState::CA_LOSS)
+    {
+        ++g_rtos;
     }
 }
 
@@ -327,6 +361,11 @@ ServerReady(Ptr<Socket> s)
         qs->SetStreamPriority(9, 0xFFFF);
     }
     s->SetSendCallback(MakeCallback(&OnSendSpace));
+    if (g_transport == "tcp")
+    {
+        s->TraceConnectWithoutContext("CongState", MakeCallback(&OnTcpCongState));
+        DynamicCast<TcpSocketBase>(s)->TraceConnectWithoutContext("PacingRate", MakeCallback(&OnPacingRate));
+    }
     SendHello(s);
     FlushAll(); // what was generated while the connection was opening goes out now
 }
@@ -542,6 +581,7 @@ main(int argc, char* argv[])
     std::string cc = "cubic";
     std::string tcpProfile = "ns3";
     bool tcpPacing = false;
+    uint32_t tcpMinRtoMs = 0;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("transport", "quic | tcp", transport);
@@ -562,7 +602,8 @@ main(int argc, char* argv[])
     cmd.AddValue("pathBw", "Banda depois da mudança", g_pathBw);
     cmd.AddValue("reconnect", "TCP: tempo (s) sem dados até o aplicativo reconectar", g_reconnect);
     cmd.AddValue("tls", "TCP: incluir o handshake TLS 1.3 completo", g_tls);
-    cmd.AddValue("tcpProfile", "TCP: ns3 (padrões do ns-3) | linux (RTO mínimo 200 ms, timeout do SYN 1 s, atraso de ACK 40 ms, buffers de 4 MiB)", tcpProfile);
+    cmd.AddValue("tcpProfile", "TCP: ns3 (padrões do ns-3) | linux-timers (RTO mínimo 200 ms, timeout do SYN 1 s, atraso de ACK 40 ms, buffers de 4 MiB)", tcpProfile);
+    cmd.AddValue("tcpMinRto", "TCP: RTO mínimo em ms (0 = o do perfil)", tcpMinRtoMs);
     cmd.AddValue("tcpPacing", "TCP: ligar o pacing", tcpPacing);
     cmd.Parse(argc, argv);
     g_transport = transport;
@@ -591,13 +632,17 @@ main(int argc, char* argv[])
     {
         Config::SetDefault("ns3::TcpL4Protocol::SocketType", StringValue("ns3::TcpCubic"));
         Config::SetDefault("ns3::TcpSocket::SegmentSize", UintegerValue(1448));
-        if (tcpProfile == "linux")
+        if (tcpProfile == "linux-timers")
         {
             Config::SetDefault("ns3::TcpSocketBase::MinRto", TimeValue(MilliSeconds(200)));
             Config::SetDefault("ns3::TcpSocket::ConnTimeout", TimeValue(Seconds(1)));
             Config::SetDefault("ns3::TcpSocket::DelAckTimeout", TimeValue(MilliSeconds(40)));
             Config::SetDefault("ns3::TcpSocket::SndBufSize", UintegerValue(4 * 1024 * 1024));
             Config::SetDefault("ns3::TcpSocket::RcvBufSize", UintegerValue(4 * 1024 * 1024));
+        }
+        if (tcpMinRtoMs > 0)
+        {
+            Config::SetDefault("ns3::TcpSocketBase::MinRto", TimeValue(MilliSeconds(tcpMinRtoMs)));
         }
         Config::SetDefault("ns3::TcpSocketState::EnablePacing", BooleanValue(tcpPacing));
     }
@@ -664,7 +709,6 @@ main(int argc, char* argv[])
         Ptr<ImpairModel> model = CreateObject<ImpairModel>();
         model->Setup(DynamicCast<PointToPointNetDevice>(dev.Get(1)), inner, g_jitterMs);
         dev.Get(1)->SetAttribute("ReceiveErrorModel", PointerValue(model));
-        dev.Get(1)->TraceConnectWithoutContext("PhyRxDrop", MakeCallback(&CountDrop));
     }
 
     InternetStackHelper internet;
@@ -698,6 +742,8 @@ main(int argc, char* argv[])
             1,
             Ipv4InterfaceAddress(g_newLocal, Ipv4Mask("255.255.255.0")));
     }
+    g_offeredBps = ((g_videoBitrate / 8.0 / g_fps + kHdrSize) * g_fps + (g_audioBytes + kHdrSize) / g_audioInterval.GetSeconds() +
+                    (g_metaBytes + kHdrSize) / g_metaInterval.GetSeconds()) * 8.0;
     g_streamStart = Seconds(1.0);
     g_streamEnd = g_streamStart + Seconds(streamTime);
     if (transport == "quic")
@@ -726,8 +772,9 @@ main(int argc, char* argv[])
     if (header)
     {
         std::cout << "transport,sched,cc,loss,run,stream,sent,delivered,mean_ms,p95_ms,p99_ms,"
-                     "max_ms,goodput_mbps,corrupt,late150_pct,burst,jitter_ms,path_change,ttfb_ms,max_gap_ms,undelivered\n";
+                     "max_ms,goodput_mbps,corrupt,late150_pct,burst,jitter_ms,path_change,ttfb_ms,max_gap_ms,undelivered,rto_episodes,pacing_below_pct\n";
     }
+    AccountPacing(g_streamEnd.GetSeconds());
     std::cerr << "drops=" << g_drops << "\n";
     double ttfb = g_helloAt.IsZero() ? -1 : (g_helloAt - g_connectAt).GetMilliSeconds();
     std::sort(g_arrivals.begin(), g_arrivals.end());
@@ -772,7 +819,9 @@ main(int argc, char* argv[])
                   << Pct(all, 0.95) << "," << Pct(all, 0.99) << ","
                   << Pct(all, 1.0) << "," << st.bytes * 8.0 / streamTime / 1e6 << ","
                   << (g_corrupt ? 1 : 0) << "," << latePct << "," << g_burst << "," << g_jitterMs << ","
-                  << g_pathChangeAt << "," << ttfb << "," << maxGap << "," << undelivered << "\n";
+                  << g_pathChangeAt << "," << ttfb << "," << maxGap << "," << undelivered << ","
+                  << (transport == "tcp" ? (int)g_rtos : -1) << ","
+                  << (transport == "tcp" && tcpPacing ? 100.0 * g_paceBelowS / streamTime : -1.0) << "\n";
     }
     return 0;
 }
