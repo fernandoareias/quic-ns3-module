@@ -2053,6 +2053,192 @@ private:
 };
 
 /**
+ * Receive error model that drops the first `count` QUIC packets sent to `dst` whose first frame is `frameType`.
+ * It parses the packet as the device receives it: PPP, IPv4, UDP, QUIC short header, first frame.
+ */
+class QuicFrameDropper : public ErrorModel
+{
+public:
+  static TypeId GetTypeId (void)
+  {
+    static TypeId tid = TypeId ("ns3::QuicFrameDropper").SetParent<ErrorModel> ().AddConstructor<QuicFrameDropper> ();
+    return tid;
+  }
+  void Configure (Ipv4Address dst, uint8_t frameType, uint32_t count)
+  {
+    m_dst = dst;
+    m_frameType = frameType;
+    m_count = count;
+  }
+  uint32_t Dropped (void) const { return m_dropped; }
+
+private:
+  bool DoCorrupt (Ptr<Packet> p) override
+  {
+    if (m_dropped >= m_count)
+      {
+        return false;
+      }
+    Ptr<Packet> c = p->Copy ();
+    PppHeader ppp;
+    c->RemoveHeader (ppp);
+    Ipv4Header ip;
+    c->RemoveHeader (ip);
+    if (ip.GetProtocol () != 17 || ip.GetDestination () != m_dst)
+      {
+        return false;
+      }
+    UdpHeader udp;
+    c->RemoveHeader (udp);
+    QuicHeader quic;
+    c->RemoveHeader (quic);
+    if (!quic.IsShort () || c->GetSize () == 0)
+      {
+        return false;
+      }
+    QuicSubheader frame;
+    c->RemoveHeader (frame);
+    if (frame.GetFrameType () != m_frameType)
+      {
+        return false;
+      }
+    ++m_dropped;
+    return true;
+  }
+  void DoReset (void) override {}
+
+  Ipv4Address m_dst;
+  uint8_t m_frameType {0};
+  uint32_t m_count {0};
+  uint32_t m_dropped {0};
+};
+
+/**
+ * Path validation survives losses (RFC 9000 s8.2, s9.3). The client moves to another address while the server has
+ * nothing in flight, so no ACK from the client replenishes the server's anti-amplification allowance on the new
+ * path (three times what the client sent there). The server then has to repeat a lost PATH_CHALLENGE (or answer
+ * again when the PATH_RESPONSE was lost) with what it kept of that allowance: a first challenge that spends all of
+ * it leaves the path unvalidated, the server blocked, and the connection is closed when the validation times out.
+ * After the move the server writes again, which only gets through once the new path is validated.
+ */
+class QuicPathValidationLossTestCase : public TestCase
+{
+public:
+  QuicPathValidationLossTestCase (std::string name, uint8_t droppedFrame, uint32_t drops)
+    : TestCase (name), m_droppedFrame (droppedFrame), m_drops (drops)
+  {
+  }
+
+private:
+  static constexpr uint32_t kFirst = 100000;    //!< written when the connection opens
+  static constexpr uint32_t kSecond = 100000;   //!< written after the client moved
+
+  void DoRun () override
+  {
+    StreamDefaults ();
+    NodeContainer nodes;
+    nodes.Create (2);
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute ("DataRate", StringValue ("100Mbps"));
+    p2p.SetChannelAttribute ("Delay", StringValue ("10ms"));
+    NetDeviceContainer dev = p2p.Install (nodes);
+    InternetStackHelper internet;
+    internet.Install (nodes);
+    QuicHelper quic;
+    quic.InstallQuic (nodes);
+    Ipv4AddressHelper ip;
+    ip.SetBase ("10.9.12.0", "255.255.255.0");
+    Ipv4InterfaceContainer ifs = ip.Assign (dev);
+    Ptr<Ipv4> clientIp = nodes.Get (1)->GetObject<Ipv4> ();
+    clientIp->AddAddress (1, Ipv4InterfaceAddress (Ipv4Address ("10.9.12.77"), Ipv4Mask ("255.255.255.0")));
+
+    // the challenge goes to the client's new address, the response back to the server
+    Ptr<QuicFrameDropper> dropper = CreateObject<QuicFrameDropper> ();
+    bool challenge = m_droppedFrame == QuicSubheader::PATH_CHALLENGE;
+    dropper->Configure (challenge ? Ipv4Address ("10.9.12.77") : ifs.GetAddress (0), m_droppedFrame, m_drops);
+    dev.Get (challenge ? 1 : 0)->SetAttribute ("ReceiveErrorModel", PointerValue (dropper));
+
+    TypeId tid = QuicSocketFactory::GetTypeId ();
+    m_listen = Socket::CreateSocket (nodes.Get (0), tid);
+    m_listen->Bind (InetSocketAddress (Ipv4Address::GetAny (), 4433));
+    m_listen->Listen ();
+    m_listen->SetAcceptCallback (MakeNullCallback<bool, Ptr<Socket>, const Address &> (),
+                                 MakeCallback (&QuicPathValidationLossTestCase::Accept, this));
+    m_client = Socket::CreateSocket (nodes.Get (1), tid);
+    m_client->SetRecvCallback (MakeCallback (&QuicPathValidationLossTestCase::Read, this));
+    Simulator::Schedule (Seconds (0.1), [this, &ifs] () {
+      m_client->Connect (InetSocketAddress (ifs.GetAddress (0), 4433));
+    });
+    Simulator::Schedule (Seconds (1.0), [this] () {
+      Ptr<QuicSocketBase> c = DynamicCast<QuicSocketBase> (m_client);
+      c->TraceConnectWithoutContext ("Tx", MakeCallback (&QuicPathValidationLossTestCase::OnClientTx, this));
+      m_moved = c->Migrate (InetSocketAddress (Ipv4Address ("10.9.12.77"), 0));
+    });
+    Simulator::Schedule (Seconds (1.5), [this] () { Write (kSecond); });
+    Simulator::Stop (Seconds (15));
+    Simulator::Run ();
+    Ptr<QuicSocketBase> srv = DynamicCast<QuicSocketBase> (m_server);
+    // (a server that closed the connection has dropped its paths: no remote address any more)
+    Address activeRemote = srv->GetActiveRemote ();
+    Ipv4Address remote = InetSocketAddress::IsMatchingType (activeRemote) ? InetSocketAddress::ConvertFrom (activeRemote).GetIpv4 () : Ipv4Address ();
+    bool validated = srv->IsActivePathValidated ();
+    bool open = srv->GetSocketState () == QuicSocketBase::OPEN;
+    uint32_t dropped = dropper->Dropped ();
+    Simulator::Destroy ();
+
+    NS_TEST_ASSERT_MSG_EQ (m_moved, true, "the client could not move");
+    NS_TEST_ASSERT_MSG_GT (m_firstProbe, (uint32_t) QuicSocketBase::MIN_INITIAL_PACKET_SIZE - 1,
+                           "the first packet on the new path is " << m_firstProbe << " bytes: too small to give the server room to repeat a challenge");
+    NS_TEST_ASSERT_MSG_EQ (dropped, m_drops, "the loss was not injected");
+    NS_TEST_ASSERT_MSG_EQ (open, true, "the server closed the connection when the path validation failed");
+    NS_TEST_ASSERT_MSG_EQ (remote == Ipv4Address ("10.9.12.77"), true, "the server did not follow the client");
+    NS_TEST_ASSERT_MSG_EQ (validated, true, "the new path was never validated");
+    NS_TEST_ASSERT_MSG_EQ (m_rx, kFirst + kSecond, "data written after the move did not arrive");
+  }
+
+  void Accept (Ptr<Socket> s, const Address &)
+  {
+    m_server = s;
+    Write (kFirst);
+  }
+
+  // the first packet the client sends after it moved: the probe of the new path
+  void OnClientTx (Ptr<const Packet> p, const QuicHeader &h, Ptr<const QuicSocketBase>)
+  {
+    if (m_firstProbe == 0)
+      {
+        m_firstProbe = p->GetSize () + h.GetSerializedSize ();
+      }
+  }
+
+  void Write (uint32_t bytes)
+  {
+    for (uint32_t off = 0; off < bytes; off += 1000)
+      {
+        m_server->Send (Create<Packet> (1000), ServerStreamId (1));
+      }
+  }
+
+  void Read (Ptr<Socket> s)
+  {
+    Ptr<Packet> p;
+    while ((p = s->Recv ()) && p->GetSize () > 0)
+      {
+        m_rx += p->GetSize ();
+      }
+  }
+
+  uint8_t m_droppedFrame;
+  uint32_t m_drops;
+  uint32_t m_rx {0};
+  uint32_t m_firstProbe {0};
+  bool m_moved {false};
+  Ptr<Socket> m_listen;
+  Ptr<Socket> m_server;
+  Ptr<Socket> m_client;
+};
+
+/**
  * After 20 s without sending, msquic switches to a new destination connection id (DestCidUpdateIdleTimeoutMs);
  * the peer answers by switching its own, and the retired ids go back with RETIRE_CONNECTION_ID.
  */
@@ -2195,6 +2381,11 @@ QuicTestSuite::QuicTestSuite ()
   AddTestCase (new QuicMigrationTestCase ("migration to a new address restarts the path", false), TestCase::Duration::QUICK);
   AddTestCase (new QuicMigrationTestCase ("port-only rebinding keeps the congestion window", true), TestCase::Duration::QUICK);
   AddTestCase (new QuicMigrationTestCase ("a server that announces disable_active_migration is not migrated", false, true), TestCase::Duration::QUICK);
+  AddTestCase (new QuicPathValidationLossTestCase ("path validation, nothing lost", QuicSubheader::PATH_CHALLENGE, 0), TestCase::Duration::QUICK);
+  AddTestCase (new QuicPathValidationLossTestCase ("path validation survives the loss of the first PATH_CHALLENGE", QuicSubheader::PATH_CHALLENGE, 1), TestCase::Duration::QUICK);
+  AddTestCase (new QuicPathValidationLossTestCase ("path validation survives the loss of the first PATH_RESPONSE", QuicSubheader::PATH_RESPONSE, 1), TestCase::Duration::QUICK);
+  AddTestCase (new QuicPathValidationLossTestCase ("path validation survives the loss of two PATH_CHALLENGEs in a row", QuicSubheader::PATH_CHALLENGE, 2), TestCase::Duration::QUICK);
+  AddTestCase (new QuicPathValidationLossTestCase ("path validation survives the loss of three PATH_CHALLENGEs in a row", QuicSubheader::PATH_CHALLENGE, 3), TestCase::Duration::QUICK);
   AddTestCase (new QuicMtuDiscoveryTestCase ("path MTU discovery reaches 1500", 1500, 1500), TestCase::Duration::QUICK);
   AddTestCase (new QuicMtuDiscoveryTestCase ("path MTU discovery stops below a 1400 byte path", 1400, 1368), TestCase::Duration::QUICK);
   AddTestCase (new QuicIdleTimeoutTestCase, TestCase::Duration::QUICK);

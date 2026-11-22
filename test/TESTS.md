@@ -1,10 +1,10 @@
 # Test evidence map
 
-Two suites, 88 test cases, all passing:
+Two suites, 93 test cases, all passing:
 
 ```
 ./ns3 build
-build/utils/ns3-dev-test-runner-debug --suite=quic          --verbose   # 41 cases, quic-test-suite.cc
+build/utils/ns3-dev-test-runner-debug --suite=quic          --verbose   # 46 cases, quic-test-suite.cc
 build/utils/ns3-dev-test-runner-debug --suite=quic-features --verbose   # 47 cases, quic-features-test-suite.cc
 ```
 
@@ -49,6 +49,7 @@ A suite stops at its first failing case, so the cases after it are not run until
 | Transport parameter ranges (`ack_delay_exponent` 20 accepted, 25 rejected) (RFC 9000 s18.2) | `quic-features`: the two `transport parameters:` cases |
 | Frame bytes as RFC 9000 s19 (ACK ranges, error codes, CONNECTION_CLOSE, NEW_CONNECTION_ID) and header first bytes as s17 | `quic-features`: the two `wire:` byte-layout cases |
 | A server that announces `disable_active_migration` is not migrated (RFC 9000 s18.2) | `quic`: the third migration case |
+| Path validation survives a lost PATH_CHALLENGE (one, two or three in a row) or a lost PATH_RESPONSE when the server has nothing in flight; the first packet on the new path is at least 1200 bytes | `quic`: the five `path validation` cases |
 
 ## Defects found while writing these tests (fixed)
 
@@ -119,3 +120,13 @@ A suite stops at its first failing case, so the cases after it are not run until
 14. With the draining state, the stream-0 send loop of `SendPendingData` never ended when a frame stayed queued (the
     send refused it for ever). It now stops when the send reports the draining state. Found by the
     `ack_delay_exponent 25` case, whose client receives a CONNECTION_CLOSE in the middle of the handshake.
+15. After a client migration the server may send only three times what it receives on the new path until the path is
+    validated. The client's probe was a bare PING (a few bytes), so the server's allowance was enough for one
+    PATH_CHALLENGE; data then took what was left, and a challenge (or its response) that was lost could not be
+    repeated. With the server idle and no packet from the client to replenish the allowance, the validation timed
+    out, every path was gone and the server closed the connection (1 run in 200 of the streaming scenario with a path
+    change and 1% loss). The probe is now expanded to 1200 bytes (RFC 9000 s8.2.1), which gives the server 3600 bytes
+    of allowance, and data leaves the last 152 bytes of an unvalidated path alone while a challenge is pending.
+    The size of a challenge is also counted with its header now (it used to overshoot the allowance by the header).
+    Covered by `quic`: the five `path validation` cases (a receive error model drops the first PATH_CHALLENGE or
+    PATH_RESPONSE packets by parsing PPP, IPv4, UDP and the QUIC frame).

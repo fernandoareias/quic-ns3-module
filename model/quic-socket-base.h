@@ -1223,6 +1223,8 @@ protected:
   EventId m_pathTimer;                      //!< path validation: challenge retransmission and timeout
   static constexpr uint32_t kMaxPaths = 4;           //!< QUIC_MAX_PATH_COUNT
   static constexpr uint8_t kActiveCidLimit = 4;      //!< QUIC_ACTIVE_CONNECTION_ID_LIMIT
+  static constexpr uint32_t kMinSendAllowance = 76;  //!< QUIC_MIN_SEND_ALLOWANCE: smallest packet worth sending on an unvalidated path
+  static constexpr uint32_t kChallengeReserve = 2 * kMinSendAllowance;   //!< allowance data leaves alone on an unvalidated path while a PATH_CHALLENGE is pending, to repeat it
 
   Time m_destCidUpdateIdleTimeout {Seconds (20)};  //!< Attribute DestCidUpdateIdleTimeout
   Time m_lastPacketSent {Seconds (0)};              //!< When this endpoint last sent a packet

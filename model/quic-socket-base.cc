@@ -1219,12 +1219,18 @@ QuicSocketBase::SendPendingData (bool withAck)
         }
 
       // msquic amplification protection: a path that is not validated yet takes at most three times
-      // what the peer sent on it; a packet is cut down to what is left (QuicPathSetAllowance)
+      // what the peer sent on it; a packet is cut down to what is left (QuicPathSetAllowance). While a challenge
+      // is pending on the path, data leaves the reserve alone: it is what repeats a lost challenge (see
+      // SendPathChallenge), and nothing else replenishes the allowance if the peer has nothing to send
       uint32_t s = GetSegSize ();
       if (!m_paths.empty () && !m_paths.front ().validated)
         {
           uint64_t room = m_paths.front ().allowance;
-          if (room < 76)       // QUIC_MIN_SEND_ALLOWANCE
+          if (m_paths.front ().sendChallenge)
+            {
+              room = room > kChallengeReserve ? room - kChallengeReserve : 0;
+            }
+          if (room < kMinSendAllowance)
             {
               NS_LOG_INFO ("Blocked by amplification protection");
               break;
@@ -4499,7 +4505,7 @@ QuicSocketBase::OnPacketOnPath (Ptr<Socket> udp, const Address &from, uint32_t b
     {
       // amplification protection: three times what the peer sent on this path (QuicPathSetAllowance)
       p.allowance = (p.allowance > UINT64_MAX - 3ULL * bytes) ? UINT64_MAX : p.allowance + 3ULL * bytes;
-      if (p.sendChallenge && p.lastChallengeSent.IsZero () && p.allowance >= 76)
+      if (p.sendChallenge && p.lastChallengeSent.IsZero () && p.allowance >= kMinSendAllowance)
         {
           SendPathChallenge (p);
         }
@@ -4529,29 +4535,31 @@ QuicSocketBase::PathValidationTimeout (void) const
 void
 QuicSocketBase::SendPathChallenge (QuicPath &path)
 {
-  if (path.udp == nullptr || path.allowance < 76)     // QUIC_MIN_SEND_ALLOWANCE
+  if (path.udp == nullptr || path.allowance < kMinSendAllowance)
     {
+      NS_LOG_INFO ("PATH_CHALLENGE held back on path " << path.id << " (allowance " << path.allowance << ")");
       path.sendChallenge = true;        // sent as soon as the path allows
       return;
     }
   QuicSubheader frame = QuicSubheader::CreatePathChallenge (path.challenge);
-  Ptr<Packet> p = Create<Packet> (0);
-  // padded to the path MTU to validate it (QuicSendPathChallenges), within what the path allows
-  uint32_t segment = path.active ? m_tcb->m_segmentSize : (path.segSize ? path.segSize : kPmtudInitialMtu - kPmtudOverhead);
-  uint32_t padTo = std::min<uint64_t> (segment, path.allowance);
-  uint32_t used = frame.GetSerializedSize ();
-  Ptr<Packet> pad = Create<Packet> (padTo > used ? padTo - used : 0);
-  p->AddAtEnd (pad);
-  p->AddHeader (frame);
   SequenceNumber32 pn = ++m_tcb->m_nextTxSequence;
   QuicHeader head = QuicHeader::CreateShort (PathDestCid (path), pn, !m_omit_connection_id, m_keyPhase, m_spinBit);
+
+  // The packet is padded to the path MTU to validate it (QuicSendPathChallenges), within what the path allows
+  uint32_t segment = path.active ? m_tcb->m_segmentSize : (path.segSize ? path.segSize : kPmtudInitialMtu - kPmtudOverhead);
+  uint32_t total = (uint32_t) std::min<uint64_t> (segment, path.allowance);   // the whole packet, headers included
+  uint32_t used = frame.GetSerializedSize () + head.GetSerializedSize ();
+  Ptr<Packet> p = Create<Packet> (0);
+  Ptr<Packet> pad = Create<Packet> (total > used ? total - used : 0);
+  p->AddAtEnd (pad);
+  p->AddHeader (frame);
   if (!path.validated)
     {
       uint64_t size = p->GetSize () + head.GetSerializedSize ();
       path.allowance = (size >= path.allowance) ? 0 : path.allowance - size;
     }
   path.lastChallengeSent = Simulator::Now ();
-  NS_LOG_INFO ("PATH_CHALLENGE on path " << path.id << " (" << p->GetSize () << " bytes)");
+  NS_LOG_INFO ("PATH_CHALLENGE on path " << path.id << " (" << p->GetSize () << " bytes, allowance left " << path.allowance << ")");
   m_quicl4->SendPacketOnPath (p, head, path.udp, path.remote);
   m_txTrace (p, head, this);
 }
@@ -4791,8 +4799,13 @@ QuicSocketBase::Migrate (const Address &newLocal)
       return false;
     }
   m_paths.front ().udp = udp;
-  // the peer learns the new address from the next packet; a PING makes sure there is one
-  SendControlFrame (QuicSubheader::CreatePing ());
+  // The peer learns the new address from the next packet, and a PING makes sure there is one. Like any probe of
+  // a new path (RFC 9000 s8.2.1) it is expanded to the smallest datagram size, 1200 bytes: the peer may send only
+  // three times what it receives on a path it has not validated, and a bare PING would leave it room for a single
+  // PATH_CHALLENGE, so that one lost challenge (or response) could never be repeated
+  Ptr<Packet> probe = Create<Packet> (MIN_INITIAL_PACKET_SIZE - 11);   // 11: the PING and the short header
+  probe->AddHeader (QuicSubheader::CreatePing ());
+  AppendingTx (probe);
   return true;
 }
 
