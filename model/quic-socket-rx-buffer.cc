@@ -120,30 +120,20 @@ QuicSocketRxBuffer::Extract (uint32_t maxSize)
 
   Ptr<Packet> outPkt = Create<Packet> ();
 
-  QuicSocketRxPacketList::iterator it = m_socketRecvList.begin ();
-
-  while (extractSize > 0 && !m_socketRecvList.empty () && it != m_socketRecvList.end ())
+  while (!m_socketRecvList.empty ())
     {
-      it = m_socketRecvList.begin ();
-      Ptr<Packet> currentPacket = *it;
+      Ptr<Packet> currentPacket = m_socketRecvList.front ();
+      uint32_t size = currentPacket->GetSize ();
 
-      if (currentPacket->GetSize () + outPkt->GetSize () <= extractSize)   // Merge
-        {
-
-          outPkt->AddAtEnd ((*it));
-          m_socketRecvList.erase (it);
-
-          m_recvSize -= (*it)->GetSize ();
-          extractSize -= (*it)->GetSize ();
-          NS_LOG_LOGIC ("Added packet of size " << (*it)->GetSize ());
-          continue;
-        }
-      else
+      if (outPkt->GetSize () + size > extractSize)
         {
           break;
         }
 
-      it++;
+      outPkt->AddAtEnd (currentPacket);
+      m_socketRecvList.erase (m_socketRecvList.begin ());
+      m_recvSize -= size;
+      NS_LOG_LOGIC ("Added packet of size " << size);
     }
 
   if (outPkt->GetSize () == 0)
