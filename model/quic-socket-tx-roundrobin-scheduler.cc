@@ -1,4 +1,11 @@
-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * Copyright (c) 2026 Fernando Areias
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Author: Fernando Areias <nando.calheirosx@gmail.com>
+ */
+
 #include "quic-socket-tx-roundrobin-scheduler.h"
 
 #include <cmath>

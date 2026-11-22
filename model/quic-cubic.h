@@ -1,4 +1,11 @@
-/* -*- Mode:C++; c-file-style:"gnu"; indent-tabs-mode:nil; -*- */
+/*
+ * Copyright (c) 2026 Fernando Areias
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Author: Fernando Areias <nando.calheirosx@gmail.com>
+ */
+
 /*
  * QUIC CUBIC congestion control, following the behaviour of msquic (cubic.c):
  * RFC 9438 (CUBIC) with the Reno-friendly region, fast convergence, HyStart++

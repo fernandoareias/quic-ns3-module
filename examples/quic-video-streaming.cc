@@ -1,4 +1,12 @@
 /*
+ * Copyright (c) 2026 Fernando Areias
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
+ *
+ * Author: Fernando Areias <nando.calheirosx@gmail.com>
+ */
+
+/*
  * quic-video-streaming.cc
  *
  * Mídia ao vivo de baixa latência sobre QUIC (módulo contrib/quic) vs TCP no NS-3.

@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# SPDX-License-Identifier: GPL-2.0-only
+# Copyright (c) 2026 Fernando Areias
 """Low-latency media experiment: QUIC (this module) against TCP under random packet loss.
 
 One server sends three media flows (video, audio, metadata) over a single connection through a 10 Mbps, 20 ms
