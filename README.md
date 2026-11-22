@@ -28,7 +28,9 @@ contrib/quic/
 ├── model/       # protocol stack: sockets, L4/L5 protocols, streams, headers and frames,
 │                #   transport parameters, buffers, stream schedulers, NewReno / CUBIC / BBR
 ├── helper/      # QuicHelper (InstallQuic)
-├── examples/    # quic-example
+├── examples/    # quic-example, quic-video-streaming
+├── scripts/     # streaming_experiment.py
+├── results/     # streaming-uniform-loss.csv
 └── test/        # two ns-3 suites, "quic" and "quic-features" (see test/TESTS.md)
 ```
 
@@ -50,6 +52,16 @@ build/utils/ns3-dev-test-runner-debug --suite=quic-features
 ```
 
 `test/TESTS.md` maps each feature to the test case that covers it.
+
+## Streaming experiment
+
+`examples/quic-video-streaming.cc` sends a video, an audio and a metadata flow over one connection through a bottleneck link, with QUIC or TCP, and prints the one-way delivery delay of every flow. `scripts/streaming_experiment.py` runs the experiment of the paper (uniform loss of 0 to 3 %, TCP against QUIC, 30 repetitions, about one minute) and prints the LaTeX rows of its tables; the results it produced are in `results/streaming-uniform-loss.csv`. From the ns-3 root:
+
+```bash
+./ns3 build quic-video-streaming
+contrib/quic/scripts/streaming_experiment.py run      # writes streaming-uniform-loss.csv
+contrib/quic/scripts/streaming_experiment.py tables   # rows of the tables
+```
 
 ## Differences from the RFCs
 
