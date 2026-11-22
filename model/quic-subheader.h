@@ -139,7 +139,9 @@ public:
     PATH_RESPONSE        = 0x1b,  //!< Path Response    RFC 9000 §19.18 (era 0x0F no draft-13)
     CONNECTION_CLOSE     = 0x1c,  //!< Connection Close RFC 9000 §19.19 (era 0x02 no draft-13)
     CONNECTION_CLOSE_APP = 0x1d,  //!< Conn Close App   RFC 9000 §19.19 (era APPLICATION_CLOSE=0x03)
-    HANDSHAKE_DONE       = 0x1e   //!< Handshake Done   RFC 9000 §19.20
+    HANDSHAKE_DONE       = 0x1e,  //!< Handshake Done   RFC 9000 §19.20
+    IMMEDIATE_ACK        = 0x1f,  //!< Immediate Ack    draft-ietf-quic-ack-frequency (msquic)
+    ACK_FREQUENCY        = 0xaf   //!< Ack Frequency    draft-ietf-quic-ack-frequency (msquic)
   } TypeFrame_t;
 
   // Backward-compat aliases para código legado que ainda usa os nomes antigos do draft-13
@@ -360,6 +362,32 @@ public:
   static QuicSubheader CreateNewConnectionId (uint64_t sequence, uint64_t connectionId);     //uint128_t statelessResetToken);
 
   /**
+   * Create a NEW_CONNECTION_ID subheader with all its fields (RFC 9000 s19.15)
+   * \param sequence the sequence number of the id
+   * \param retirePriorTo ids with a lower sequence number are to be retired
+   * \param connectionId the new connection id
+   * \param tokenHi upper 64 bits of the stateless reset token of this id
+   * \param tokenLo lower 64 bits of the stateless reset token of this id
+   * \return the generated QuicSubheader
+   */
+  static QuicSubheader CreateNewConnectionId (uint64_t sequence, uint64_t retirePriorTo, uint64_t connectionId,
+                                             uint64_t tokenHi, uint64_t tokenLo);
+
+  /**
+   * Create a RETIRE_CONNECTION_ID subheader (RFC 9000 s19.16)
+   * \param sequence the sequence number of the id to retire
+   * \return the generated QuicSubheader
+   */
+  static QuicSubheader CreateRetireConnectionId (uint64_t sequence);
+
+  /** \return the retire prior to field of a NEW_CONNECTION_ID frame */
+  uint64_t GetRetirePriorTo () const { return m_retirePriorTo; }
+  /** \return the upper 64 bits of the stateless reset token of a NEW_CONNECTION_ID frame */
+  uint64_t GetResetTokenHi () const { return m_resetTokenHi; }
+  /** \return the lower 64 bits of the stateless reset token of a NEW_CONNECTION_ID frame */
+  uint64_t GetResetTokenLo () const { return m_resetTokenLo; }
+
+  /**
    * Create a Stop Sending subheader
    *
    * \param streamId the stream id of the stream being ignored
@@ -367,6 +395,37 @@ public:
    * \return the generated QuicSubheader
    */
   static QuicSubheader CreateStopSending (uint64_t streamId, uint16_t applicationErrorCode);
+
+  /**
+   * Create an ACK_FREQUENCY subheader (draft-ietf-quic-ack-frequency, as msquic)
+   *
+   * \param sequence the frame sequence number
+   * \param ackElicitingThreshold how many ack-eliciting packets may arrive before an ACK is due
+   * \param maxAckDelayUs the requested maximum ACK delay, in microseconds
+   * \param reorderingThreshold the reordering threshold that makes the peer ACK at once
+   * \return the generated QuicSubheader
+   */
+  static QuicSubheader CreateAckFrequency (uint64_t sequence, uint64_t ackElicitingThreshold,
+                                          uint64_t maxAckDelayUs, uint64_t reorderingThreshold);
+
+  /**
+   * Create an IMMEDIATE_ACK subheader
+   * \return the generated QuicSubheader
+   */
+  static QuicSubheader CreateImmediateAck (void);
+
+  /** \return true if this is an ACK_FREQUENCY frame */
+  bool IsAckFrequency () const;
+  /** \return true if this is an IMMEDIATE_ACK frame */
+  bool IsImmediateAck () const;
+  /** \return the ACK_FREQUENCY sequence number */
+  uint64_t GetAckFreqSequence () const { return m_ackFreqSeq; }
+  /** \return the ACK_FREQUENCY ack-eliciting threshold */
+  uint64_t GetAckFreqThreshold () const { return m_ackFreqThreshold; }
+  /** \return the ACK_FREQUENCY requested maximum ack delay (us) */
+  uint64_t GetAckFreqMaxDelayUs () const { return m_ackFreqMaxDelayUs; }
+  /** \return the ACK_FREQUENCY reordering threshold */
+  uint64_t GetAckFreqReordering () const { return m_ackFreqReordering; }
 
   /**
    * Create a Ack subheader
@@ -788,13 +847,33 @@ public:
   uint32_t CalculateSubHeaderLength () const;
 
 private:
+  /**
+   * \brief The ACK ranges as RFC 9000 s19.3.1 writes them: first range length, then (gap, length) pairs
+   * \return the values in wire order, after the range count
+   */
+  std::vector<uint64_t> AckWireRanges () const;
+
+  /**
+   * \brief Read the range count and the ranges of an ACK frame, rebuilding the absolute ranges
+   * \param i the buffer iterator, positioned at the ACK Range Count
+   */
+  void ReadAckRanges (Buffer::Iterator &i);
+
   uint8_t m_frameType;                          //!< Frame type
   uint64_t m_streamId;                          //!< Stream id
   uint16_t m_errorCode;                         //!< Error code
+  uint64_t m_triggerFrameType {0};              //!< CONNECTION_CLOSE: the frame type that triggered the error (0 = unknown)
   uint64_t m_offset;                            //!< Offset
   uint64_t m_reasonPhraseLength;                //!< Reason phrase length
   std::vector<uint8_t> m_reasonPhrase;          //!< Reason phrase
   uint64_t m_maxData;                           //!< Max data limit
+  uint64_t m_retirePriorTo {0};                 //!< NEW_CONNECTION_ID retire prior to
+  uint64_t m_resetTokenHi {0};                  //!< NEW_CONNECTION_ID stateless reset token, upper 64 bits
+  uint64_t m_resetTokenLo {0};                  //!< NEW_CONNECTION_ID stateless reset token, lower 64 bits
+  uint64_t m_ackFreqSeq {0};                    //!< ACK_FREQUENCY sequence number
+  uint64_t m_ackFreqThreshold {2};              //!< ACK_FREQUENCY ack-eliciting threshold
+  uint64_t m_ackFreqMaxDelayUs {25000};         //!< ACK_FREQUENCY requested max ack delay (us)
+  uint64_t m_ackFreqReordering {1};             //!< ACK_FREQUENCY reordering threshold
   uint64_t m_maxStreamData;                     //!< Max stream data limit
   uint64_t m_maxStreamId;                       //!< Max stream id limit
   uint64_t m_sequence;                          //!< Sequence

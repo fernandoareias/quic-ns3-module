@@ -27,6 +27,7 @@
 
 #include "ns3/ptr.h"
 #include "ns3/traced-value.h"
+#include "ns3/traced-callback.h"
 #include "quic-stream.h"
 #include "ns3/event-id.h"
 #include "quic-stream-rx-buffer.h"
@@ -121,6 +122,43 @@ public:
   uint32_t SendPendingData (void);
 
   /**
+   * \brief Resume sending if data is pending (after a flow-control window update)
+   */
+  void WakeUp (void);
+
+  /**
+   * \brief Abruptly terminate the sending side (RFC 9000 s3.1): drop unsent data and send RESET_STREAM
+   * \param errorCode application error code
+   * \return true if a RESET_STREAM was generated
+   */
+  bool Reset (uint16_t errorCode);
+
+  /**
+   * \\brief Finish the sending side gracefully: the last byte is sent with the FIN bit
+   * \\return true if the FIN was queued
+   */
+  bool Finish (void);
+
+  /**
+   * \brief Ask the peer to stop sending on this stream (STOP_SENDING); later data is discarded
+   * \param errorCode application error code
+   * \return true if a STOP_SENDING was generated
+   */
+  bool StopSending (uint16_t errorCode);
+
+  /**
+   * \brief Whether the stream was reset by either side
+   * \return true if reset
+   */
+  bool IsReset (void) const;
+
+  /**
+   * \brief Whether application data is still buffered in the stream
+   * \return true if data is pending
+   */
+  bool HasPendingData (void) const;
+
+  /**
    * \brief Send a data frame of size maxSize
    *
    * \param seq the sequence number in the buffer of the next packet to be sent
@@ -136,6 +174,23 @@ public:
      */
   uint32_t SendMaxStreamData ();
 
+  /**
+   * \brief Set the initial receive window, advertised to the peer (msquic: StreamRecvWindowDefault)
+   * \param initialWindow initial window in bytes
+   */
+  void InitRecvWindow (uint32_t initialWindow);
+
+  /**
+   * \brief Account for in-order delivered bytes: advance the advertised limits (auto-tuning)
+   */
+  void OnDelivered ();
+
+  /**
+   * \brief Absolute stream offset up to which the peer may send
+   * \return the limit
+   */
+  uint64_t GetMaxAllowedRecvOffset () const;
+
   // void CommandFlow (uint8_t type);
 
   /**
@@ -143,14 +198,14 @@ public:
    *
    * \param maxStreamData a uint32_t with the maximum amount of data
    */
-  void SetMaxStreamData (uint32_t maxStreamData);
+  void SetMaxStreamData (uint64_t maxStreamData);
 
   /**
    * \brief Get the maximum amount of data that can be sent in this stream
    *
    * \return a uint32_t with the maximum amount of data
    */
-  uint32_t GetMaxStreamData () const;
+  uint64_t GetMaxStreamData () const;
 
   /**
    * \brief Set the stream TX buffer size.
@@ -189,9 +244,21 @@ public:
   void SetConnectionId (uint64_t connId);
   void SetStreamId (uint64_t streamId);
   uint64_t GetStreamId (void);
+
+  /** \\return true for the stream that carries the handshake, not an application stream */
+  bool IsHandshake (void) const { return m_streamId == HANDSHAKE_STREAM_ID; }
   uint32_t GetStreamTxAvailable (void) const;
 
 protected:
+  /**
+   * \brief Make sure the receive buffer can hold a receive window of this size
+   *
+   * Out-of-order data can fill up to one window of the buffer, so the buffer is never smaller than the
+   * window advertised to the peer (msquic sizes its receive buffer after the window in the same way).
+   * \param window the receive window in bytes
+   */
+  void GrowRxBuffer (uint32_t window);
+
   QuicStreamTypes_t m_streamType;                    //!< The stream type
   QuicStreamDirectionTypes_t m_streamDirectionType;  //!< The stream direction
   QuicStreamStates_t m_streamStateSend;              //!< The state of the send stream
@@ -202,7 +269,21 @@ protected:
   Ptr<QuicL5Protocol>  m_quicl5;                     //!< The L5 Protocol this stack is associated with
 
   // Flow Control Parameters
-  uint32_t m_maxStreamData;                          //!< Maximum amount of data that can be sent/received on the stream
+  uint64_t m_maxStreamData;                          //!< Peer limit: highest stream offset we may send (absolute)
+  uint64_t m_maxAllowedRecvOffset;                   //!< Highest stream offset we allow the peer to send (absolute)
+  uint32_t m_recvWindow;                             //!< Current receive window, grown by auto-tuning
+  uint32_t m_recvWindowMax;                          //!< Upper bound of the auto-tuned receive window
+  uint64_t m_windowBytesDelivered {0};               //!< Bytes delivered since the last window update
+  uint64_t m_windowBase {0};                         //!< Delivered offset already accounted in m_windowBytesDelivered
+  Time m_lastWindowUpdate;                           //!< Last time MAX_STREAM_DATA was advanced
+  TracedCallback<uint64_t, uint16_t, bool> m_streamResetTrace; //!< Reset trace (id, error, by peer)
+  bool m_finQueued {false};                          //!< The application finished the sending side
+  bool m_closedReported {false};                     //!< The stream layer was told this stream is complete
+  void CheckClosed (void);
+  bool m_stopSendingSent {false};                    //!< STOP_SENDING already sent on this stream
+  uint64_t m_blockedReportedAt {UINT64_MAX};         //!< Stream limit for which STREAM_DATA_BLOCKED was last sent
+  uint64_t m_highestRecvOffset {0};                  //!< Highest end offset received (connection-level accounting)
+  uint64_t m_deliveredReported;                      //!< Bytes already reported to the connection-level flow control
   uint32_t m_maxAdvertisedData;                                          //!< Last advertised MaxData
   uint32_t m_maxDataInterval;                                            //!< Interval between MaxData frames
   uint64_t m_sentSize;                               //!< Amount of data sent in this stream

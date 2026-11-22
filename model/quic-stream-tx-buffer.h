@@ -41,6 +41,7 @@ namespace ns3 {
 class QuicStreamTxItem : public Object
 {
 public:
+  static TypeId GetTypeId (void);
   QuicStreamTxItem ();
   QuicStreamTxItem (const QuicStreamTxItem &other);
   ~QuicStreamTxItem ();
@@ -167,6 +168,12 @@ public:
    * \returns total bytes in flight
    */
   uint32_t BytesInFlight () const;
+
+  /**
+   * \brief Drop all application data that was not yet transmitted
+   * \return the number of bytes discarded
+   */
+  uint32_t DiscardAppData (void);
 
 private:
   typedef std::list<Ptr<QuicStreamTxItem>> QuicTxPacketList;  //!< container for data stored in the buffer

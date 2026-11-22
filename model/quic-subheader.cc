@@ -23,6 +23,7 @@
  */
 
 #include <stdint.h>
+#include <algorithm>
 #include <iostream>
 #include "quic-subheader.h"
 #include "ns3/buffer.h"
@@ -121,6 +122,14 @@ QuicSubheader::FrameTypeToString () const
     {
       typeDescription.append (frameTypeNames[m_frameType]);
     }
+  else if (m_frameType == IMMEDIATE_ACK)
+    {
+      typeDescription = "IMMEDIATE_ACK";
+    }
+  else if (m_frameType == ACK_FREQUENCY)
+    {
+      typeDescription = "ACK_FREQUENCY";
+    }
   else
     {
       typeDescription = "UNKNOWN_FRAME_TYPE";
@@ -171,6 +180,48 @@ QuicSubheader::TransportErrorCodeToString () const
 }
 
 
+std::vector<uint64_t>
+QuicSubheader::AckWireRanges () const
+{
+  // In memory the ranges are absolute packet numbers: range 0 is (m_gaps[0], largest], range k is
+  // (m_gaps[k], m_additionalAckBlocks[k - 1]] and the last one ends at m_firstAckBlock (the ACK floor). On the wire
+  // (RFC 9000 s19.3.1) they are counts: the length of the first range, then for each older range the number of
+  // packets missing between it and the newer one (minus one) and its own length (minus one).
+  auto lowest = [this] (uint64_t k) -> int64_t {
+    return (k < m_ackBlockCount) ? (int64_t) m_gaps[k] + 1 : (int64_t) m_firstAckBlock;
+  };
+  std::vector<uint64_t> wire;
+  int64_t lo = lowest (0);
+  wire.push_back ((uint64_t) std::max<int64_t> ((int64_t) m_largestAcknowledged - lo, 0));
+  for (uint64_t k = 1; k <= m_ackBlockCount; ++k)
+    {
+      int64_t hi = (int64_t) m_additionalAckBlocks[k - 1];
+      int64_t olderLo = lowest (k);
+      wire.push_back ((uint64_t) std::max<int64_t> (lo - hi - 2, 0));
+      wire.push_back ((uint64_t) std::max<int64_t> (hi - olderLo, 0));
+      lo = olderLo;
+    }
+  return wire;
+}
+
+void
+QuicSubheader::ReadAckRanges (Buffer::Iterator &i)
+{
+  // inverse of AckWireRanges ()
+  m_ackBlockCount = ReadVarInt64 (i);
+  m_gaps.clear ();
+  m_additionalAckBlocks.clear ();
+  int64_t lo = (int64_t) m_largestAcknowledged - (int64_t) ReadVarInt64 (i);   // lowest packet of the first range
+  for (uint64_t k = 1; k <= m_ackBlockCount; ++k)
+    {
+      m_gaps.push_back ((uint32_t) std::max<int64_t> (lo - 1, 0));
+      int64_t hi = lo - (int64_t) ReadVarInt64 (i) - 2;
+      lo = hi - (int64_t) ReadVarInt64 (i);
+      m_additionalAckBlocks.push_back ((uint32_t) std::max<int64_t> (hi, 0));
+    }
+  m_firstAckBlock = (uint32_t) std::max<int64_t> (lo, 0);
+}
+
 uint32_t
 QuicSubheader::GetSerializedSize (void) const
 {
@@ -183,7 +234,7 @@ uint32_t
 QuicSubheader::CalculateSubHeaderLength () const
 {
   NS_LOG_FUNCTION (this);
-  NS_ASSERT (m_frameType >= PADDING and m_frameType <= HANDSHAKE_DONE);
+  NS_ASSERT (m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
   uint32_t len = 8;
 
   switch (m_frameType)
@@ -195,20 +246,21 @@ QuicSubheader::CalculateSubHeaderLength () const
       case RESET_STREAM:                       // 0x04 RFC 9000 §19.4
 
         len += GetVarInt64Size (m_streamId);
-        len += 16;
+        len += GetVarInt64Size (m_errorCode);
         len += GetVarInt64Size (m_offset);
         break;
 
-      case CONNECTION_CLOSE:                   // 0x1c RFC 9000 §19.19
+      case CONNECTION_CLOSE:                   // 0x1c RFC 9000 §19.19: error code, frame type, reason
 
-        len += 16;
+        len += GetVarInt64Size (m_errorCode);
+        len += GetVarInt64Size (m_triggerFrameType);
         len += GetVarInt64Size (m_reasonPhraseLength);
         len += (m_reasonPhraseLength * 8);
         break;
 
-      case CONNECTION_CLOSE_APP:               // 0x1d RFC 9000 §19.19
+      case CONNECTION_CLOSE_APP:               // 0x1d RFC 9000 §19.19: error code, reason
 
-        len += 16;
+        len += GetVarInt64Size (m_errorCode);
         len += GetVarInt64Size (m_reasonPhraseLength);
         len += (m_reasonPhraseLength * 8);
         break;
@@ -232,7 +284,16 @@ QuicSubheader::CalculateSubHeaderLength () const
 
       case PING:                               // 0x01 RFC 9000 §19.2
       case HANDSHAKE_DONE:                     // 0x1e RFC 9000 §19.20
+      case IMMEDIATE_ACK:                      // 0x1f ack-frequency draft
 
+        break;
+
+      case ACK_FREQUENCY:                      // 0xaf ack-frequency draft
+
+        len += GetVarInt64Size (m_ackFreqSeq);
+        len += GetVarInt64Size (m_ackFreqThreshold);
+        len += GetVarInt64Size (m_ackFreqMaxDelayUs);
+        len += GetVarInt64Size (m_ackFreqReordering);
         break;
 
       case DATA_BLOCKED:                       // 0x14 RFC 9000 §19.12
@@ -255,8 +316,10 @@ QuicSubheader::CalculateSubHeaderLength () const
       case NEW_CONNECTION_ID:                  // 0x18 RFC 9000 §19.15
 
         len += GetVarInt64Size (m_sequence);
-        len += 64;
-        //len += 128; // stateless reset token (todo)
+        len += GetVarInt64Size (m_retirePriorTo);
+        len += 8;       // connection id length (RFC 9000 s19.15)
+        len += 64;      // connection id (this module issues 8-byte ids)
+        len += 128;     // stateless reset token
         break;
 
       case RETIRE_CONNECTION_ID:               // 0x19 RFC 9000 §19.16
@@ -267,7 +330,7 @@ QuicSubheader::CalculateSubHeaderLength () const
       case STOP_SENDING:                       // 0x05 RFC 9000 §19.5
 
         len += GetVarInt64Size (m_streamId);
-        len += 16;
+        len += GetVarInt64Size (m_errorCode);
         break;
 
       case ACK:                                // 0x02 RFC 9000 §19.3
@@ -275,11 +338,9 @@ QuicSubheader::CalculateSubHeaderLength () const
         len += GetVarInt64Size (m_largestAcknowledged);
         len += GetVarInt64Size (m_ackDelay);
         len += GetVarInt64Size (m_ackBlockCount);
-        len += GetVarInt64Size (m_firstAckBlock);
-        for (uint64_t j = 0; j < m_ackBlockCount; j++)
+        for (uint64_t v : AckWireRanges ())
           {
-            len += GetVarInt64Size (m_gaps[j]);
-            len += GetVarInt64Size (m_additionalAckBlocks[j]);
+            len += GetVarInt64Size (v);
           }
         break;
 
@@ -288,11 +349,9 @@ QuicSubheader::CalculateSubHeaderLength () const
         len += GetVarInt64Size (m_largestAcknowledged);
         len += GetVarInt64Size (m_ackDelay);
         len += GetVarInt64Size (m_ackBlockCount);
-        len += GetVarInt64Size (m_firstAckBlock);
-        for (uint64_t j = 0; j < m_ackBlockCount; j++)
+        for (uint64_t v : AckWireRanges ())
           {
-            len += GetVarInt64Size (m_gaps[j]);
-            len += GetVarInt64Size (m_additionalAckBlocks[j]);
+            len += GetVarInt64Size (v);
           }
         // ECN Counts section (RFC 9000 §19.3.2)
         len += GetVarInt64Size (m_ect0Count);
@@ -373,7 +432,7 @@ void
 QuicSubheader::Serialize (Buffer::Iterator start) const
 {
   NS_LOG_FUNCTION (this << (uint64_t)m_frameType);
-  NS_ASSERT (m_frameType >= PADDING and m_frameType <= HANDSHAKE_DONE);
+  NS_ASSERT (m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
 
   Buffer::Iterator i = start;
   i.WriteU8 ((uint8_t)m_frameType);
@@ -388,14 +447,18 @@ QuicSubheader::Serialize (Buffer::Iterator start) const
       case RESET_STREAM:
 
         WriteVarInt64 (i, m_streamId);
-        i.WriteU16 (m_errorCode);
+        WriteVarInt64 (i, m_errorCode);
         WriteVarInt64 (i, m_offset);
         break;
 
       case CONNECTION_CLOSE:
       case CONNECTION_CLOSE_APP:
 
-        i.WriteU16 (m_errorCode);
+        WriteVarInt64 (i, m_errorCode);
+        if (m_frameType == CONNECTION_CLOSE)
+          {
+            WriteVarInt64 (i, m_triggerFrameType);   // RFC 9000 s19.19: only the transport close names the frame
+          }
         WriteVarInt64 (i, m_reasonPhraseLength);
         for (auto& elem : m_reasonPhrase)
           {
@@ -422,7 +485,16 @@ QuicSubheader::Serialize (Buffer::Iterator start) const
 
       case PING:
       case HANDSHAKE_DONE:
+      case IMMEDIATE_ACK:
 
+        break;
+
+      case ACK_FREQUENCY:
+
+        WriteVarInt64 (i, m_ackFreqSeq);
+        WriteVarInt64 (i, m_ackFreqThreshold);
+        WriteVarInt64 (i, m_ackFreqMaxDelayUs);
+        WriteVarInt64 (i, m_ackFreqReordering);
         break;
 
       case DATA_BLOCKED:
@@ -445,8 +517,11 @@ QuicSubheader::Serialize (Buffer::Iterator start) const
       case NEW_CONNECTION_ID:
 
         WriteVarInt64 (i, m_sequence);
+        WriteVarInt64 (i, m_retirePriorTo);
+        i.WriteU8 (8);                            // RFC 9000 s19.15: connection id length
         i.WriteHtonU64 (m_connectionId);
-        //i.WriteHtonU128 (m_statelessResetToken);
+        i.WriteHtonU64 (m_resetTokenHi);
+        i.WriteHtonU64 (m_resetTokenLo);
         break;
 
       case RETIRE_CONNECTION_ID:
@@ -457,7 +532,7 @@ QuicSubheader::Serialize (Buffer::Iterator start) const
       case STOP_SENDING:
 
         WriteVarInt64 (i, m_streamId);
-        i.WriteU16 (m_errorCode);
+        WriteVarInt64 (i, m_errorCode);
         break;
 
       case ACK:
@@ -465,11 +540,9 @@ QuicSubheader::Serialize (Buffer::Iterator start) const
         WriteVarInt64 (i, m_largestAcknowledged);
         WriteVarInt64 (i, m_ackDelay);
         WriteVarInt64 (i, m_ackBlockCount);
-        WriteVarInt64 (i, m_firstAckBlock);
-        for (uint64_t j = 0; j < m_ackBlockCount; j++)
+        for (uint64_t v : AckWireRanges ())
           {
-            WriteVarInt64 (i, m_gaps[j]);
-            WriteVarInt64 (i, m_additionalAckBlocks[j]);
+            WriteVarInt64 (i, v);
           }
         break;
 
@@ -478,11 +551,9 @@ QuicSubheader::Serialize (Buffer::Iterator start) const
         WriteVarInt64 (i, m_largestAcknowledged);
         WriteVarInt64 (i, m_ackDelay);
         WriteVarInt64 (i, m_ackBlockCount);
-        WriteVarInt64 (i, m_firstAckBlock);
-        for (uint64_t j = 0; j < m_ackBlockCount; j++)
+        for (uint64_t v : AckWireRanges ())
           {
-            WriteVarInt64 (i, m_gaps[j]);
-            WriteVarInt64 (i, m_additionalAckBlocks[j]);
+            WriteVarInt64 (i, v);
           }
         // ECN Counts section (RFC 9000 §19.3.2)
         WriteVarInt64 (i, m_ect0Count);
@@ -539,7 +610,7 @@ QuicSubheader::Deserialize (Buffer::Iterator start)
 
   NS_LOG_FUNCTION (this << (uint64_t)m_frameType);
 
-  NS_ASSERT (m_frameType >= PADDING and m_frameType <= HANDSHAKE_DONE);
+  NS_ASSERT (m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
 
   switch (m_frameType)
     {
@@ -551,14 +622,18 @@ QuicSubheader::Deserialize (Buffer::Iterator start)
       case RESET_STREAM:
 
         m_streamId = ReadVarInt64 (i);
-        m_errorCode = i.ReadU16 ();
+        m_errorCode = (uint16_t) ReadVarInt64 (i);
         m_offset = ReadVarInt64 (i);
         break;
 
       case CONNECTION_CLOSE:
       case CONNECTION_CLOSE_APP:
 
-        m_errorCode = i.ReadU16 ();
+        m_errorCode = (uint16_t) ReadVarInt64 (i);
+        if (m_frameType == CONNECTION_CLOSE)
+          {
+            m_triggerFrameType = ReadVarInt64 (i);
+          }
         m_reasonPhraseLength = ReadVarInt64 (i);
         for (uint64_t j = 0; j < m_reasonPhraseLength; j++)
           {
@@ -585,7 +660,16 @@ QuicSubheader::Deserialize (Buffer::Iterator start)
 
       case PING:
       case HANDSHAKE_DONE:
+      case IMMEDIATE_ACK:
 
+        break;
+
+      case ACK_FREQUENCY:
+
+        m_ackFreqSeq = ReadVarInt64 (i);
+        m_ackFreqThreshold = ReadVarInt64 (i);
+        m_ackFreqMaxDelayUs = ReadVarInt64 (i);
+        m_ackFreqReordering = ReadVarInt64 (i);
         break;
 
       case DATA_BLOCKED:
@@ -608,8 +692,19 @@ QuicSubheader::Deserialize (Buffer::Iterator start)
       case NEW_CONNECTION_ID:
 
         m_sequence = ReadVarInt64 (i);
-        m_connectionId = i.ReadNtohU64 ();
-        //m_statelessResetToken = i.ReadNtohU128();
+        m_retirePriorTo = ReadVarInt64 (i);
+        {
+          // RFC 9000 s19.15: the id comes with its length; this module issues 8-byte ids and keeps the last 8
+          // bytes of a longer one
+          uint8_t cidLength = i.ReadU8 ();
+          m_connectionId = 0;
+          for (uint8_t k = 0; k < cidLength; ++k)
+            {
+              m_connectionId = (m_connectionId << 8) | i.ReadU8 ();
+            }
+        }
+        m_resetTokenHi = i.ReadNtohU64 ();
+        m_resetTokenLo = i.ReadNtohU64 ();
         break;
 
       case RETIRE_CONNECTION_ID:
@@ -620,33 +715,21 @@ QuicSubheader::Deserialize (Buffer::Iterator start)
       case STOP_SENDING:
 
         m_streamId = ReadVarInt64 (i);
-        m_errorCode = i.ReadU16 ();
+        m_errorCode = (uint16_t) ReadVarInt64 (i);
         break;
 
       case ACK:
 
         m_largestAcknowledged = ReadVarInt64 (i);
         m_ackDelay = ReadVarInt64 (i);
-        m_ackBlockCount = ReadVarInt64 (i);
-        m_firstAckBlock = ReadVarInt64 (i);
-        for (uint64_t j = 0; j < m_ackBlockCount; j++)
-          {
-            m_gaps.push_back (ReadVarInt64 (i));
-            m_additionalAckBlocks.push_back (ReadVarInt64 (i));
-          }
+        ReadAckRanges (i);
         break;
 
       case ACK_ECN:
 
         m_largestAcknowledged = ReadVarInt64 (i);
         m_ackDelay = ReadVarInt64 (i);
-        m_ackBlockCount = ReadVarInt64 (i);
-        m_firstAckBlock = ReadVarInt64 (i);
-        for (uint64_t j = 0; j < m_ackBlockCount; j++)
-          {
-            m_gaps.push_back (ReadVarInt64 (i));
-            m_additionalAckBlocks.push_back (ReadVarInt64 (i));
-          }
+        ReadAckRanges (i);
         // ECN Counts section (RFC 9000 §19.3.2)
         m_ect0Count  = ReadVarInt64 (i);
         m_ect1Count  = ReadVarInt64 (i);
@@ -701,7 +784,7 @@ void
 QuicSubheader::Print (std::ostream &os) const
 {
   NS_LOG_FUNCTION (this << (uint64_t) m_frameType);
-  NS_ASSERT (m_frameType >= PADDING and m_frameType <= HANDSHAKE_DONE);
+  NS_ASSERT (m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
 
   os << "|" << FrameTypeToString () << "|\n";
   switch (m_frameType)
@@ -750,7 +833,14 @@ QuicSubheader::Print (std::ostream &os) const
 
       case PING:
       case HANDSHAKE_DONE:
+      case IMMEDIATE_ACK:
 
+        break;
+
+      case ACK_FREQUENCY:
+
+        os << "|Ack Frequency seq " << m_ackFreqSeq << " threshold " << m_ackFreqThreshold
+           << " max delay " << m_ackFreqMaxDelayUs << "us reordering " << m_ackFreqReordering << "|\n";
         break;
 
       case DATA_BLOCKED:
@@ -773,8 +863,9 @@ QuicSubheader::Print (std::ostream &os) const
       case NEW_CONNECTION_ID:
 
         os << "|Sequence " << m_sequence << "|\n";
+        os << "|Retire Prior To " << m_retirePriorTo << "|\n";
         os << "|Connection Id " << m_connectionId << "|\n";
-        //os << "|Stateless Reset Token " << m_statelessResetToken << "|\n";
+        os << "|Stateless Reset Token " << m_resetTokenHi << m_resetTokenLo << "|\n";
         break;
 
       case RETIRE_CONNECTION_ID:
@@ -1157,6 +1248,29 @@ QuicSubheader::CreateNewConnectionId (uint64_t sequence, uint64_t connectionId) 
 }
 
 QuicSubheader
+QuicSubheader::CreateNewConnectionId (uint64_t sequence, uint64_t retirePriorTo, uint64_t connectionId,
+                                      uint64_t tokenHi, uint64_t tokenLo)
+{
+  QuicSubheader sub;
+  sub.SetFrameType (NEW_CONNECTION_ID);
+  sub.SetSequence (sequence);
+  sub.m_retirePriorTo = retirePriorTo;
+  sub.SetConnectionId (connectionId);
+  sub.m_resetTokenHi = tokenHi;
+  sub.m_resetTokenLo = tokenLo;
+  return sub;
+}
+
+QuicSubheader
+QuicSubheader::CreateRetireConnectionId (uint64_t sequence)
+{
+  QuicSubheader sub;
+  sub.SetFrameType (RETIRE_CONNECTION_ID);
+  sub.SetSequence (sequence);
+  return sub;
+}
+
+QuicSubheader
 QuicSubheader::CreateStopSending (uint64_t streamId, uint16_t applicationErrorCode)
 {
   NS_LOG_INFO ("Created StopSending Header");
@@ -1208,6 +1322,39 @@ QuicSubheader::CreatePathResponse (uint64_t data)
   sub.SetData (data);
 
   return sub;
+}
+
+QuicSubheader
+QuicSubheader::CreateAckFrequency (uint64_t sequence, uint64_t ackElicitingThreshold,
+                                   uint64_t maxAckDelayUs, uint64_t reorderingThreshold)
+{
+  QuicSubheader sub;
+  sub.SetFrameType (ACK_FREQUENCY);
+  sub.m_ackFreqSeq = sequence;
+  sub.m_ackFreqThreshold = ackElicitingThreshold;
+  sub.m_ackFreqMaxDelayUs = maxAckDelayUs;
+  sub.m_ackFreqReordering = reorderingThreshold;
+  return sub;
+}
+
+QuicSubheader
+QuicSubheader::CreateImmediateAck (void)
+{
+  QuicSubheader sub;
+  sub.SetFrameType (IMMEDIATE_ACK);
+  return sub;
+}
+
+bool
+QuicSubheader::IsAckFrequency () const
+{
+  return m_frameType == ACK_FREQUENCY;
+}
+
+bool
+QuicSubheader::IsImmediateAck () const
+{
+  return m_frameType == IMMEDIATE_ACK;
 }
 
 QuicSubheader

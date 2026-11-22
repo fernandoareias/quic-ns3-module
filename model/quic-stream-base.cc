@@ -26,6 +26,7 @@
   if (m_node and m_connectionId and (m_streamId >= 0)) { std::clog << " [node " << m_node->GetId () << " socket " << m_connectionId << " stream " << m_streamId << " " << StreamDirectionTypeToString () << "] "; }
 */
 
+#include "quic-stream-id-tag.h"
 #include "ns3/abort.h"
 #include "ns3/node.h"
 #include "ns3/log.h"
@@ -37,6 +38,7 @@
 #include "ns3/pointer.h"
 #include "ns3/trace-source-accessor.h"
 #include "quic-stream-base.h"
+#include "quic-stream-id-tag.h"
 #include "quic-header.h"
 #include "quic-transport-parameters.h"
 
@@ -55,19 +57,28 @@ QuicStreamBase::GetTypeId (void)
     .AddConstructor<QuicStreamBase> ()
     .AddAttribute ("StreamSndBufSize",
                    "QuicStreamBase maximum transmit buffer size (bytes)",
-                   UintegerValue (131072), // 128k
+                   UintegerValue (4194304), // 4 MiB
                    MakeUintegerAccessor (&QuicStreamBase::m_streamTxBufferSize),
                    MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("StreamRcvBufSize",
-                   "QuicStreamBase maximum receive buffer size (bytes)",
-                   UintegerValue (131072), // 128k
+                   "QuicStreamBase receive buffer size (bytes); it grows to hold the receive window the stream advertises",
+                   UintegerValue (4194304), // 4 MiB
                    MakeUintegerAccessor (&QuicStreamBase::m_streamRxBufferSize),
+                   MakeUintegerChecker<uint32_t> ())
+    .AddAttribute ("StreamRecvWindowMax",
+                   "The stream receive window stops doubling once it reaches this size (msquic: the connection flow control window)",
+                   UintegerValue (16777216),
+                   MakeUintegerAccessor (&QuicStreamBase::m_recvWindowMax),
                    MakeUintegerChecker<uint32_t> ())
     .AddAttribute ("MaxDataInterval",
                    "Interval between MAX_DATA frames",
                    UintegerValue (15000),                 // 10 packets
                    MakeUintegerAccessor (&QuicStreamBase::m_maxDataInterval),
                    MakeUintegerChecker<uint32_t> ())
+    .AddTraceSource ("StreamReset",
+                     "A stream was reset: (stream id, error code, by peer)",
+                     MakeTraceSourceAccessor (&QuicStreamBase::m_streamResetTrace),
+                     "ns3::QuicStreamBase::StreamResetTracedCallback")
   ;
   return tid;
 }
@@ -83,6 +94,11 @@ QuicStreamBase::QuicStreamBase (void)
   m_streamId (0),
   m_quicl5 (0),
   m_maxStreamData (0),
+  m_maxAllowedRecvOffset (0),
+  m_recvWindow (0),
+  m_recvWindowMax (6291456),
+  m_lastWindowUpdate (Seconds (0)),
+  m_deliveredReported (0),
   m_maxAdvertisedData (0),
   m_sentSize (0),
   m_recvSize (0),
@@ -118,18 +134,27 @@ QuicStreamBase::Send (Ptr<Packet> frame)
   if (m_streamStateSend == OPEN or m_streamStateSend == SEND)
     {
       int sent = AppendingTx (frame);
+      if (sent >= 0 && !IsHandshake ())
+        {
+          m_quicl5->NotifyStreamBacklog (m_streamId, true);
+        }
 
 
       NS_LOG_LOGIC ("Sending packets in stream. TxBufSize = " << m_txBuffer->AppSize () << " AvailableWindow = " << AvailableWindow () << " state " << QuicStreamStateName[m_streamStateSend]);
 
       if ((m_streamStateSend == OPEN or m_streamStateSend == SEND) and AvailableWindow () > 0)
         {
-          if (!m_streamSendPendingDataEvent.IsRunning ())
+          if (!m_streamSendPendingDataEvent.IsPending ())
             {
               m_streamSendPendingDataEvent = Simulator::Schedule (TimeStep (1), &QuicStreamBase::SendPendingData, this);
             }
         }
       return sent;
+    }
+  else if (m_streamStateSend == RESET_SENT or m_streamStateSend == RESET_RECVD)
+    {
+      NS_LOG_WARN ("Write on a reset stream discarded");
+      return -1;
     }
   else
     {
@@ -170,6 +195,10 @@ QuicStreamBase::SendPendingData (void)
   if (m_txBuffer->AppSize () == 0)
     {
       NS_LOG_INFO ("Nothing to send");
+      if (!IsHandshake ())
+        {
+          m_quicl5->NotifyStreamBacklog (m_streamId, false);
+        }
       return false;
     }
 
@@ -218,6 +247,27 @@ QuicStreamBase::SendPendingData (void)
 
     }
 
+  if (m_txBuffer->AppSize () > 0 && !IsHandshake ())
+    {
+      // RFC 9000 s4.1: tell the peer when flow control, not congestion control, stops us
+      if (m_sentSize >= m_maxStreamData && m_blockedReportedAt != m_maxStreamData)
+        {
+          m_blockedReportedAt = m_maxStreamData;
+          Ptr<Packet> p = Create<Packet> (0);
+          p->AddHeader (QuicSubheader::CreateStreamBlocked (m_streamId, m_maxStreamData));
+          m_quicl5->Send (p);
+        }
+      else if (m_sentSize < m_maxStreamData)
+        {
+          m_quicl5->ReportConnectionBlockedIfNeeded ();
+        }
+    }
+
+  if (!IsHandshake () && m_txBuffer->AppSize () == 0)
+    {
+      m_quicl5->NotifyStreamBacklog (m_streamId, false);
+    }
+
   if (nFrameSent > 0)
     {
       NS_LOG_INFO ("SendPendingData sent " << nFrameSent << " frames");
@@ -244,8 +294,15 @@ QuicStreamBase::SendDataFrame (SequenceNumber32 seq, uint32_t maxSize)
 
   bool lengthBit = true;
 
-  QuicSubheader sub = QuicSubheader::CreateStreamSubHeader (m_streamId, (uint64_t)seq.GetValue (), frame->GetSize (), m_sentSize != 0, lengthBit, m_fin);
+  // the FIN goes with the last bytes of a stream the application finished
+  bool finBit = m_finQueued && m_txBuffer->AppSize () == 0;
+  QuicSubheader sub = QuicSubheader::CreateStreamSubHeader (m_streamId, (uint64_t)seq.GetValue (), frame->GetSize (), m_sentSize != 0, lengthBit, finBit);
   m_sentSize += frame->GetSize ();
+  uint32_t dataSize = frame->GetSize ();
+  if (!IsHandshake ())
+    {
+      m_quicl5->OnNewDataSent (dataSize);
+    }
 
   frame->AddHeader (sub);
   int size = m_quicl5->Send (frame);
@@ -254,9 +311,14 @@ QuicStreamBase::SendDataFrame (SequenceNumber32 seq, uint32_t maxSize)
       frame->RemoveHeader (sub);
       m_txBuffer->Rejected (frame);
       NS_LOG_WARN ("Sending error - could not append packet to socket buffer. Putting packet back in stream buffer");
+      m_quicl5->NotifySocketTxFull (); // the socket wakes the stream again when it has sent packets
       m_sentSize -= frame->GetSize ();
+      if (!IsHandshake ())
+        {
+          m_quicl5->OnNewDataSent (-(int64_t) dataSize);
+        }
     }
-  else if (m_streamStateSend == SEND and m_fin and (m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL))
+  else if (m_streamStateSend == SEND and finBit and (m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL))
     {
       SetStreamStateSend (DATA_SENT);
     }
@@ -268,7 +330,7 @@ uint32_t
 QuicStreamBase::AvailableWindow () const
 {
   NS_LOG_FUNCTION (this);
-  uint32_t streamRWnd = (m_streamId != 0) ? StreamWindow () : m_maxStreamData;
+  uint32_t streamRWnd = (!IsHandshake ()) ? StreamWindow () : UINT32_MAX;
   return streamRWnd;
 }
 
@@ -276,9 +338,9 @@ uint32_t
 QuicStreamBase::StreamWindow () const
 {
   NS_LOG_FUNCTION (this);
-  uint32_t inFlight = m_txBuffer->BytesInFlight ();
-
-  return (inFlight > m_maxStreamData) ? 0 : m_maxStreamData - inFlight;
+  uint64_t streamWin = (m_maxStreamData > m_sentSize) ? m_maxStreamData - m_sentSize : 0;
+  uint64_t connWin = (!IsHandshake ()) ? m_quicl5->ConnectionSendWindow () : UINT64_MAX;
+  return (uint32_t) std::min<uint64_t> (std::min (streamWin, connWin), UINT32_MAX);
 }
 
 int
@@ -292,8 +354,7 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
     {
 
     case QuicSubheader::RESET_STREAM:
-      // TODO reset and close this stream
-      if (m_streamId == 0)
+      if (IsHandshake ())
         {
           m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
                                            "Received RST_STREAM in Stream 0");
@@ -321,7 +382,50 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
           return -1;
         }
 
-      SetStreamStateRecvIf (m_streamStateRecv == RECV or m_streamStateSend == SIZE_KNOWN or m_streamStateSend == DATA_RECVD, RESET_RECVD);
+      if (m_streamStateRecv == RESET_RECVD)
+        {
+          break;     // duplicate (retransmission)
+        }
+
+      if (sub.GetOffset () < m_highestRecvOffset)
+        {
+          m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::FINAL_SIZE_ERROR,
+                                           "RESET_STREAM final size below data already received");
+          return -1;
+        }
+      if (sub.GetOffset () > m_maxAllowedRecvOffset)
+        {
+          m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
+                                           "RESET_STREAM final size above Max Stream Data limit");
+          return -1;
+        }
+
+      // The final size counts against connection flow control even though the data is never
+      // delivered: account for it and give the credit back (RFC 9000 s4.5)
+      if (sub.GetOffset () > m_highestRecvOffset)
+        {
+          uint64_t delta = sub.GetOffset () - m_highestRecvOffset;
+          m_highestRecvOffset = sub.GetOffset ();
+          if (!m_quicl5->OnBytesReceivedAtOffset (delta))
+            {
+              m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
+                                               "Received more data w.r.t. Max Data limit");
+              return -1;
+            }
+        }
+      if (sub.GetOffset () > m_deliveredReported)
+        {
+          m_quicl5->OnBytesDelivered (sub.GetOffset () - m_deliveredReported);
+          m_deliveredReported = sub.GetOffset ();
+        }
+
+      SetStreamStateRecv (RESET_RECVD);
+      m_rxBuffer = CreateObject<QuicStreamRxBuffer> ();
+      m_rxBuffer->SetMaxBufferSize (GetStreamRcvBufSize ());
+      NS_LOG_INFO ("Stream " << m_streamId << " reset by peer, error " << sub.GetErrorCode ());
+      m_streamResetTrace (m_streamId, sub.GetErrorCode (), true);
+      SetStreamStateRecv (RESET_READ);
+      CheckClosed ();
 
       break;
 
@@ -341,24 +445,33 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
       break;
 
     case QuicSubheader::STREAM_DATA_BLOCKED:
-      // TODO block the stream
       if (!(m_streamDirectionType == RECEIVER or m_streamDirectionType == BIDIRECTIONAL))
         {
           m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
                                            "Received STREAM_BLOCKED in send-only Stream");
           return -1;
         }
+      if (!IsHandshake ())
+        {
+          // The peer may have missed our last credit: repeat it
+          QuicSubheader msd = QuicSubheader::CreateMaxStreamData (m_streamId, m_maxAllowedRecvOffset);
+          Ptr<Packet> p = Create<Packet> (0);
+          p->AddHeader (msd);
+          m_quicl5->Send (p);
+        }
 
       break;
 
     case QuicSubheader::STOP_SENDING:
-      // TODO implement a mechanism to stop sending data
       if (!(m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL))
         {
           m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
                                            "Received STOP_SENDING in receive-only Stream");
           return -1;
         }
+
+      // RFC 9000 s3.5: respond with RESET_STREAM using the requested error code
+      Reset (sub.GetErrorCode ());
 
       break;
 
@@ -370,13 +483,19 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
     case QuicSubheader::STREAM_OFF_FIN:
     case QuicSubheader::STREAM_OFF_LEN:
     case QuicSubheader::STREAM_OFF_LEN_FIN:
-
+    {
 
       if (!(m_streamDirectionType == RECEIVER or m_streamDirectionType == BIDIRECTIONAL))
         {
           m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
                                            "Received STREAM in send-only Stream");
           return -1;
+        }
+
+      if (m_streamStateRecv == RESET_RECVD or m_streamStateRecv == RESET_READ)
+        {
+          NS_LOG_INFO ("Discarding STREAM frame on a reset stream");
+          break;
         }
 
       if (!(m_streamStateRecv == IDLE or m_streamStateRecv == RECV or m_streamStateRecv == SIZE_KNOWN))
@@ -386,16 +505,36 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
           return -1;
         }
 
-      if (m_rxBuffer->Size () + sub.GetLength () > m_maxStreamData)
+      if (!IsHandshake ()
+          && sub.GetOffset () + std::max<uint64_t> (sub.GetLength (), frame->GetSize ()) > m_maxAllowedRecvOffset)
         {
+          NS_LOG_WARN ("stream " << m_streamId << " received up to "
+                       << sub.GetOffset () + std::max<uint64_t> (sub.GetLength (), frame->GetSize ())
+                       << " but the advertised limit is " << m_maxAllowedRecvOffset);
           m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
                                            "Received more data w.r.t. Max Stream Data limit");
           return -1;
         }
 
+      if (!IsHandshake ())
+        {
+          uint64_t endOffset = sub.GetOffset () + std::max<uint64_t> (sub.GetLength (), frame->GetSize ());
+          if (endOffset > m_highestRecvOffset)
+            {
+              uint64_t delta = endOffset - m_highestRecvOffset;
+              m_highestRecvOffset = endOffset;
+              if (!m_quicl5->OnBytesReceivedAtOffset (delta))
+                {
+                  m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
+                                                   "Received more data w.r.t. Max Data limit");
+                  return -1;
+                }
+            }
+        }
+
       SetStreamStateRecvIf (m_streamStateRecv == IDLE, RECV);
 
-      if (m_quicl5->ContainsTransportParameters () and m_streamId == 0)
+      if (m_quicl5->ContainsTransportParameters () and IsHandshake ())
         {
           QuicTransportParameters transport;
           frame->RemoveHeader (transport);
@@ -411,7 +550,7 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
 
       m_fin = sub.IsStreamFin ();
 
-      if (m_fin && m_streamId == 0)
+      if (m_fin && IsHandshake ())
         {
           m_quicl5->SignalAbortConnection (QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
                                            "Received Stream FIN in Stream 0");
@@ -420,44 +559,56 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
 
       SetStreamStateRecvIf (m_streamStateRecv == RECV and m_fin, SIZE_KNOWN);
 
-      if (m_recvSize == sub.GetOffset ())
+      // Retransmissions may be re-segmented by the sender, so a frame can overlap data
+      // already delivered (RFC 9000 s2.2, s13.3): drop or trim the delivered prefix.
+      uint64_t frameOffset = sub.GetOffset ();
+      uint64_t frameLen = (!IsHandshake ()) ? frame->GetSize () : sub.GetLength ();
+      bool staleFrame = false;
+      if (!IsHandshake () && frameLen > 0 && frameOffset < m_recvSize)
+        {
+          if (frameOffset + frameLen <= m_recvSize)
+            {
+              staleFrame = true;
+            }
+          else
+            {
+              frame->RemoveAtStart (m_recvSize - frameOffset);
+              frameLen = frame->GetSize ();
+              frameOffset = m_recvSize;
+            }
+        }
+
+      if (staleFrame)
+        {
+          NS_LOG_INFO ("Discarding stale frame - offset " << sub.GetOffset () << " < " << m_recvSize);
+        }
+      else if (m_recvSize == frameOffset)
         {
 
-          NS_LOG_INFO ("Received a frame with the correct order of size " << sub.GetLength ());
-          m_recvSize += sub.GetLength ();
-
-          if (m_maxAdvertisedData == 0 || m_recvSize + m_rxBuffer->Available () > m_maxAdvertisedData + m_maxDataInterval)
-            {
-              m_maxAdvertisedData = m_recvSize + m_rxBuffer->Available ();
-              QuicSubheader sub = QuicSubheader::CreateMaxData (m_recvSize + m_rxBuffer->Available ());
-              // build empty packet
-              Ptr<Packet> maxStream = Create<Packet> (0);
-              maxStream->AddHeader (sub);
-              m_quicl5->Send (maxStream);
-            }
+          NS_LOG_INFO ("Received a frame with the correct order of size " << frameLen);
+          m_recvSize += frameLen;
 
           NS_LOG_LOGIC ("Try to Flush RxBuffer if Available - offset " << m_recvSize);
           // check if the packets in the RX buffer can be released (in order release)
-          std::pair<uint64_t, uint64_t> offSetLength = m_rxBuffer->GetDeliverable (m_recvSize);
-          NS_LOG_LOGIC ("Extracting " << offSetLength.second << " bytes from RxBuffer");
-          if (offSetLength.second > 0)
+          Ptr<Packet> payload = m_rxBuffer->ExtractInOrder (m_recvSize);
+          if (payload != nullptr && payload->GetSize () > 0)
             {
-              Ptr<Packet> payload = m_rxBuffer->Extract (offSetLength.second);
-              m_recvSize += offSetLength.second;
+              NS_LOG_LOGIC ("Extracting " << payload->GetSize () << " bytes from RxBuffer");
+              m_recvSize += payload->GetSize ();
               frame->AddAtEnd (payload);
             }
           NS_LOG_LOGIC ("Flushed RxBuffer - new offset " << m_recvSize << ", " << m_rxBuffer->Available () << "bytes available");
 
           SetStreamStateRecvIf (m_streamStateRecv == SIZE_KNOWN and m_rxBuffer->Size () == 0, DATA_RECVD);
+          OnDelivered ();
 
-          if (m_streamId != 0 )
+          if (!IsHandshake () )
             {
-              if (sub.GetMaxStreamData () > 0)
+              if (frame->GetSize () > 0)
                 {
-                  SetMaxStreamData (sub.GetMaxStreamData ());
-                  NS_LOG_LOGIC ("Received window set to offset " << sub.GetMaxStreamData ());
+                  frame->AddByteTag (QuicStreamIdTag (m_streamId), 0, frame->GetSize ());
+                  m_quicl5->Recv (frame, address);
                 }
-              m_quicl5->Recv (frame, address);
             }
           else
             {
@@ -465,17 +616,15 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
             }
 
           SetStreamStateRecvIf (m_streamStateRecv == DATA_RECVD, DATA_READ);
+          CheckClosed ();
 
         }
       else
         {
-          if (m_streamId != 0 && sub.GetMaxStreamData () > 0)
-            {
-              SetMaxStreamData (sub.GetMaxStreamData ());
-              NS_LOG_LOGIC ("Received window set to offset " << sub.GetMaxStreamData ());
-            }
-          NS_LOG_INFO ("Buffering unordered received frame - offset " << m_recvSize << ", frame offset " << sub.GetOffset ());
-          if (!m_rxBuffer->Add (frame, sub) && frame->GetSize () > 0)
+          NS_LOG_INFO ("Buffering unordered received frame - offset " << m_recvSize << ", frame offset " << frameOffset);
+          QuicSubheader bufSub = sub;
+          bufSub.SetOffset (frameOffset);
+          if (!m_rxBuffer->Add (frame, bufSub) && frame->GetSize () > 0)
             {
               // Insert failed: No or duplicate data, or RX buffer full
               NS_LOG_WARN ("Dropping packet as it could not be inserted in RX buffer");
@@ -487,6 +636,7 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
         }
 
       break;
+    }
 
     default:
 
@@ -497,49 +647,6 @@ QuicStreamBase::Recv (Ptr<Packet> frame, const QuicSubheader& sub, Address &addr
   return 0;
 }
 
-// void
-// QuicStreamBase::CommandFlow (uint8_t type)
-// {
-//   NS_LOG_FUNCTION (this);
-
-//   switch (type)
-//     {
-
-//     case QuicSubheader::RESET_STREAM:
-//       // TODO
-//       NS_ABORT_MSG_IF (!(m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL), " Sending RstStream Frames in Receiver Stream");
-//       NS_ABORT_MSG_IF ((m_streamStateRecv == DATA_READ or m_streamStateRecv == RESET_READ or m_streamStateRecv == RESET_SENT), " Sending RstStream Frames in " << QuicStreamStateName[m_streamStateRecv] << " State");
-
-//       SetStreamStateSendIf (m_streamStateSend == OPEN or m_streamStateSend == SEND or m_streamStateSend == DATA_SENT, RESET_SENT);
-//       //	if((m_streamStateSend = OPEN or m_streamStateSend == SEND or m_streamStateSend == DATA_SENT)){SetStreamStateSend(RESET_SENT);}
-
-//       break;
-
-//     case QuicSubheader::MAX_STREAM_DATA:
-//       // TODO
-//       NS_ABORT_MSG_IF (!(m_streamDirectionType == RECEIVER or m_streamDirectionType == BIDIRECTIONAL), " Sending MaxStreamData Frame in Sender Stream");
-
-//       break;
-
-//     case QuicSubheader::STREAM_DATA_BLOCKED:
-//       // TODO
-//       NS_ABORT_MSG_IF (!(m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL), " Sending StreamBlocked Frame in Receiver Stream");
-
-//       break;
-
-//     case QuicSubheader::STOP_SENDING:
-//       // TODO
-//       NS_ABORT_MSG_IF (!(m_streamDirectionType == RECEIVER or m_streamDirectionType == BIDIRECTIONAL), " Sending StopSending Frame in Sender Stream");
-
-//       break;
-
-//     default:
-//       NS_ABORT_MSG ("Received Corrupted Command");
-//       break;
-
-//     }
-
-// }
 
 uint32_t
 QuicStreamBase::SendMaxStreamData ()
@@ -548,14 +655,216 @@ QuicStreamBase::SendMaxStreamData ()
 }
 
 void
-QuicStreamBase::SetMaxStreamData (uint32_t maxStreamData)
+QuicStreamBase::SetMaxStreamData (uint64_t maxStreamData)
 {
   NS_LOG_FUNCTION (this << maxStreamData);
-  NS_LOG_DEBUG ("Update max stream data from " << m_maxStreamData << " to " << maxStreamData);
+  if (maxStreamData <= m_maxStreamData)
+    {
+      return;
+    }
   m_maxStreamData = maxStreamData;
+  if (m_txBuffer->AppSize () > 0 && !m_streamSendPendingDataEvent.IsPending ())
+    {
+      m_streamSendPendingDataEvent = Simulator::Schedule (TimeStep (1), &QuicStreamBase::SendPendingData, this);
+    }
 }
 
-uint32_t
+bool
+QuicStreamBase::Finish (void)
+{
+  NS_LOG_FUNCTION (this);
+  if (IsHandshake () || m_finQueued
+      || !(m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL)
+      || m_streamStateSend == RESET_SENT || m_streamStateSend == RESET_RECVD
+      || m_streamStateSend == DATA_SENT || m_streamStateSend == DATA_RECVD)
+    {
+      return false;
+    }
+  SetStreamStateSendIf (m_streamStateSend == IDLE, OPEN);
+  m_finQueued = true;
+  if (m_txBuffer->AppSize () == 0)
+    {
+      // nothing left to carry the FIN: send it alone, at the final offset
+      QuicSubheader sub = QuicSubheader::CreateStreamSubHeader (m_streamId, m_sentSize, 0, m_sentSize != 0, true, true);
+      Ptr<Packet> frame = Create<Packet> (0);
+      frame->AddHeader (sub);
+      m_quicl5->Send (frame);
+      SetStreamStateSend (DATA_SENT);
+    }
+  else
+    {
+      WakeUp ();
+    }
+  return true;
+}
+
+void
+QuicStreamBase::CheckClosed (void)
+{
+  if (m_closedReported || IsHandshake ())
+    {
+      return;
+    }
+  bool recvDone = m_streamDirectionType == SENDER
+    || m_streamStateRecv == DATA_READ || m_streamStateRecv == RESET_READ;
+  bool sendDone = m_streamDirectionType == RECEIVER || m_streamStateSend == IDLE
+    || m_streamStateSend == DATA_SENT || m_streamStateSend == DATA_RECVD
+    || m_streamStateSend == RESET_SENT || m_streamStateSend == RESET_RECVD;
+  if (recvDone && sendDone)
+    {
+      m_closedReported = true;
+      m_quicl5->OnStreamClosed (this);
+    }
+}
+
+bool
+QuicStreamBase::Reset (uint16_t errorCode)
+{
+  NS_LOG_FUNCTION (this << errorCode);
+  if (IsHandshake ()
+      || !(m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL)
+      || m_streamStateSend == RESET_SENT || m_streamStateSend == RESET_RECVD
+      || m_streamStateSend == DATA_RECVD)
+    {
+      return false;
+    }
+
+  m_txBuffer->DiscardAppData ();
+  m_quicl5->NotifyStreamBacklog (m_streamId, false);
+  if (m_streamSendPendingDataEvent.IsPending ())
+    {
+      m_streamSendPendingDataEvent.Cancel ();
+    }
+
+  Ptr<Packet> p = Create<Packet> (0);
+  p->AddHeader (QuicSubheader::CreateRstStream (m_streamId, errorCode, m_sentSize));
+  m_quicl5->Send (p);
+  SetStreamStateSend (RESET_SENT);
+  m_streamResetTrace (m_streamId, errorCode, false);
+  return true;
+}
+
+bool
+QuicStreamBase::StopSending (uint16_t errorCode)
+{
+  NS_LOG_FUNCTION (this << errorCode);
+  if (IsHandshake ()
+      || !(m_streamDirectionType == RECEIVER or m_streamDirectionType == BIDIRECTIONAL)
+      || m_stopSendingSent
+      || m_streamStateRecv == DATA_RECVD || m_streamStateRecv == DATA_READ
+      || m_streamStateRecv == RESET_RECVD || m_streamStateRecv == RESET_READ)
+    {
+      return false;
+    }
+  m_stopSendingSent = true;
+  Ptr<Packet> p = Create<Packet> (0);
+  p->AddHeader (QuicSubheader::CreateStopSending (m_streamId, errorCode));
+  m_quicl5->Send (p);
+  return true;
+}
+
+bool
+QuicStreamBase::IsReset (void) const
+{
+  return m_streamStateSend == RESET_SENT or m_streamStateSend == RESET_RECVD
+         or m_streamStateRecv == RESET_RECVD or m_streamStateRecv == RESET_READ;
+}
+
+bool
+QuicStreamBase::HasPendingData (void) const
+{
+  return m_txBuffer->AppSize () > 0;
+}
+
+void
+QuicStreamBase::WakeUp (void)
+{
+  if (m_txBuffer->AppSize () > 0 && !m_streamSendPendingDataEvent.IsPending ())
+    {
+      m_streamSendPendingDataEvent = Simulator::Schedule (TimeStep (1), &QuicStreamBase::SendPendingData, this);
+    }
+}
+
+void
+QuicStreamBase::InitRecvWindow (uint32_t initialWindow)
+{
+  m_recvWindow = initialWindow;
+  m_maxAllowedRecvOffset = (IsHandshake ()) ? UINT64_MAX : initialWindow;
+  m_lastWindowUpdate = Simulator::Now ();
+  if (!IsHandshake ())
+    {
+      GrowRxBuffer (m_recvWindow);
+    }
+}
+
+void
+QuicStreamBase::GrowRxBuffer (uint32_t window)
+{
+  if (m_rxBuffer->GetMaxBufferSize () < window)
+    {
+      m_rxBuffer->SetMaxBufferSize (window);
+    }
+}
+
+uint64_t
+QuicStreamBase::GetMaxAllowedRecvOffset () const
+{
+  return m_maxAllowedRecvOffset;
+}
+
+void
+QuicStreamBase::OnDelivered ()
+{
+  if (m_recvSize > m_deliveredReported)
+    {
+      m_quicl5->OnBytesDelivered (m_recvSize - m_deliveredReported);
+      m_deliveredReported = m_recvSize;
+    }
+  if (IsHandshake () || m_recvWindow == 0)
+    {
+      return;
+    }
+  // msquic QuicStreamOnBytesDelivered: a window update is due once 1/4 of the window was consumed;
+  // the window doubles when that happens within about one RTT (up to the connection window).
+  // Without it, the credit is still advanced when an ACK is about to be sent anyway.
+  Time now = Simulator::Now ();
+  m_windowBytesDelivered += m_recvSize - m_windowBase;
+  m_windowBase = m_recvSize;
+  uint64_t threshold = std::max<uint64_t> (m_recvWindow / 4, 1);
+  if (m_windowBytesDelivered >= threshold)
+    {
+      Time srtt = m_quicl5->GetSmoothedRtt ();
+      if (m_recvWindow < m_recvWindowMax && srtt > Seconds (0))
+        {
+          Time timeThreshold = Time (srtt.GetTimeStep () * (int64_t) (m_windowBytesDelivered * 1000 / threshold) / 1000);
+          if (now - m_lastWindowUpdate <= timeThreshold)
+            {
+              m_recvWindow = (uint32_t) std::min<uint64_t> ((uint64_t) m_recvWindow * 2, UINT32_MAX);
+              GrowRxBuffer (m_recvWindow);
+            }
+        }
+      m_lastWindowUpdate = now;
+      m_windowBytesDelivered = 0;
+    }
+  else
+    {
+      // msquic also advances the credit when an ACK is about to go out, because it rides in the same
+      // packet. Here a window update is a packet of its own, so it waits for the threshold.
+      return;
+    }
+  uint64_t newMax = m_recvSize + m_recvWindow;
+  if (newMax <= m_maxAllowedRecvOffset)
+    {
+      return;
+    }
+  m_maxAllowedRecvOffset = newMax;
+  QuicSubheader msd = QuicSubheader::CreateMaxStreamData (m_streamId, m_maxAllowedRecvOffset);
+  Ptr<Packet> p = Create<Packet> (0);
+  p->AddHeader (msd);
+  m_quicl5->Send (p);
+}
+
+uint64_t
 QuicStreamBase::GetMaxStreamData () const
 {
   return m_maxStreamData;
@@ -656,6 +965,11 @@ QuicStreamBase::SetStreamId (uint64_t streamId)
 {
   NS_LOG_FUNCTION (this);
   m_streamId = streamId;
+  if (streamId == HANDSHAKE_STREAM_ID)
+    {
+      SetStreamType (QuicStream::CLIENT_INITIATED_BIDIRECTIONAL);
+      return;
+    }
 
   uint64_t mask = 0x00000003;
 

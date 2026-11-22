@@ -39,7 +39,7 @@ QuicTransportParameters::QuicTransportParameters ()
   : m_initial_max_stream_data (0),
   m_initial_max_data (0),
   m_initial_max_stream_id_bidi (0),
-  m_idleTimeout (300),
+  m_idleTimeout (300000),                     // RFC 9000 s18.2: milliseconds; 0 disables the idle timeout
   m_omit_connection (false),
   m_max_packet_size (65527),
   m_stateless_reset_token_hi (0),
@@ -48,9 +48,10 @@ QuicTransportParameters::QuicTransportParameters ()
   m_initial_max_stream_id_uni (0),
   m_initial_max_stream_data_bidi_remote (0),  // RFC 9000 §18.2, 0x06
   m_initial_max_stream_data_uni (0),          // RFC 9000 §18.2, 0x07
+  m_min_ack_delay (0),
   m_max_ack_delay (25),                       // RFC 9000 §18.2, 0x0b: default 25 ms
   m_active_connection_id_limit (2),           // RFC 9000 §18.2: MUST be ≥2
-  m_disable_active_migration (1),             // RFC 9000 §18.2: simulation does not support migration
+  m_disable_active_migration (0),             // RFC 9000 §18.2: active migration is supported (msquic default)
   m_initial_source_connection_id (0),
   m_original_destination_connection_id (0)
 {
@@ -94,13 +95,14 @@ QuicTransportParameters::CalculateHeaderLength () const
   //   uint32 ×6: initial_max_stream_data(0x05), initial_max_data(0x01),
   //              initial_max_stream_id_bidi(0x08), initial_max_stream_id_uni(0x09),
   //              initial_max_stream_data_bidi_remote(0x06), initial_max_stream_data_uni(0x07)
-  //   uint16 ×3: idleTimeout(0x01), max_packet_size(0x03), max_ack_delay(0x0b)
+  //   uint16 ×2: max_packet_size(0x03), max_ack_delay(0x0b)
   //   uint8  ×4: omit_connection, ack_delay_exponent(0x0a),
   //              active_connection_id_limit(0x0e), disable_active_migration(0x0c)
+  //   uint32 ×2: max_idle_timeout (ms, 0x01), min_ack_delay (us), ack-frequency draft (msquic 0xFF04DE1B)
   //   uint64 ×4: stateless_reset_token_hi+lo(0x02), initial_source_cid(0x0f),
   //              original_destination_cid(0x00)
-  // Total: 6*32 + 3*16 + 4*8 + 4*64 = 192+48+32+256 = 528 bits = 66 bytes
-  uint32_t len = 32 * 6 + 16 * 3 + 8 * 4 + 64 * 4;
+  // Total: 8*32 + 2*16 + 4*8 + 4*64 = 256+32+32+256 = 576 bits = 72 bytes
+  uint32_t len = 32 * 8 + 16 * 2 + 8 * 4 + 64 * 4;
 
   return len / 8;
 }
@@ -120,7 +122,8 @@ QuicTransportParameters::Serialize (Buffer::Iterator start) const
   i.WriteHtonU32 (m_initial_max_stream_id_uni);            // 0x09 initial_max_streams_uni
   i.WriteHtonU32 (m_initial_max_stream_data_bidi_remote);  // 0x06 initial_max_stream_data_bidi_remote
   i.WriteHtonU32 (m_initial_max_stream_data_uni);          // 0x07 initial_max_stream_data_uni
-  i.WriteHtonU16 (m_idleTimeout);
+  i.WriteHtonU32 (m_min_ack_delay);                        // ack-frequency min_ack_delay (us)
+  i.WriteHtonU32 (m_idleTimeout);                           // 0x01 max_idle_timeout (ms)
   i.WriteHtonU16 (m_max_packet_size);
   i.WriteHtonU16 (m_max_ack_delay);                        // 0x0b max_ack_delay (ms)
   i.WriteU8 (m_omit_connection);
@@ -147,7 +150,8 @@ QuicTransportParameters::Deserialize (Buffer::Iterator start)
   m_initial_max_stream_id_uni = i.ReadNtohU32 ();
   m_initial_max_stream_data_bidi_remote = i.ReadNtohU32 ();  // 0x06
   m_initial_max_stream_data_uni = i.ReadNtohU32 ();          // 0x07
-  m_idleTimeout = i.ReadNtohU16 ();
+  m_min_ack_delay = i.ReadNtohU32 ();
+  m_idleTimeout = i.ReadNtohU32 ();
   m_max_packet_size = i.ReadNtohU16 ();
   m_max_ack_delay = i.ReadNtohU16 ();                        // 0x0b
   m_omit_connection = i.ReadU8 ();
@@ -186,7 +190,7 @@ QuicTransportParameters::Print (std::ostream &os) const
 }
 
 QuicTransportParameters
-QuicTransportParameters::CreateTransportParameters (uint32_t initial_max_stream_data, uint32_t initial_max_data, uint32_t initial_max_stream_id_bidi, uint16_t idleTimeout,
+QuicTransportParameters::CreateTransportParameters (uint32_t initial_max_stream_data, uint32_t initial_max_data, uint32_t initial_max_stream_id_bidi, uint32_t idleTimeout,
                                                     uint8_t omit_connection, uint16_t max_packet_size, /*uint128_t stateless_reset_token,*/ uint8_t ack_delay_exponent, uint32_t initial_max_stream_id_uni)
 {
   NS_LOG_INFO ("Create Transport Parameters Helper called");
@@ -247,12 +251,12 @@ void QuicTransportParameters::SetAckDelayExponent (uint8_t ackDelayExponent)
   m_ack_delay_exponent = ackDelayExponent;
 }
 
-uint16_t QuicTransportParameters::GetIdleTimeout () const
+uint32_t QuicTransportParameters::GetIdleTimeout () const
 {
   return m_idleTimeout;
 }
 
-void QuicTransportParameters::SetIdleTimeout (uint16_t idleTimeout)
+void QuicTransportParameters::SetIdleTimeout (uint32_t idleTimeout)
 {
   m_idleTimeout = idleTimeout;
 }
@@ -401,6 +405,16 @@ uint16_t QuicTransportParameters::GetMaxAckDelay () const
 void QuicTransportParameters::SetMaxAckDelay (uint16_t val)
 {
   m_max_ack_delay = val;
+}
+
+uint32_t QuicTransportParameters::GetMinAckDelay () const
+{
+  return m_min_ack_delay;
+}
+
+void QuicTransportParameters::SetMinAckDelay (uint32_t val)
+{
+  m_min_ack_delay = val;
 }
 
 } // namespace ns3

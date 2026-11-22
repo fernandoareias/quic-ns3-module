@@ -134,6 +134,15 @@ public:
   std::pair<uint64_t, uint64_t> GetDeliverable (uint64_t currRecvOffset);
 
   /**
+   * \brief Extract the contiguous in-order bytes starting at the given offset.
+   * Buffered frames that overlap data already delivered, or each other (as a
+   * result of re-segmented retransmissions), are trimmed or discarded.
+   * \param recvOffset next in-order stream offset expected by the receiver
+   * \return the deliverable bytes, or null if none
+   */
+  Ptr<Packet> ExtractInOrder (uint64_t recvOffset);
+
+  /**
    * Add a packet to the receive buffer
    *
    * \param p a smart pointer to a packet

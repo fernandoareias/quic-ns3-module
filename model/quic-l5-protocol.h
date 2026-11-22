@@ -170,20 +170,21 @@ public:
   Ptr<QuicStreamBase> SearchStream (uint64_t streamId);
 
   /**
-   * \brief Create a stream with ID equal to the number of already created streams
-   *
-   * \param streamDirectionType the stream direction
+   * \brief Create the stream that carries the handshake (internal id QuicStream::HANDSHAKE_STREAM_ID)
    */
-  void CreateStream (const QuicStream::QuicStreamDirectionTypes_t streamDirectionType);
+  void CreateHandshakeStream (void);
 
   /**
-   * \brief create streamNum streams to be associated to this L5 object
-   *
-   * \param streamDirectionType the QUIC stream direction type,
-   *   i.e., unidirectional or bidirectional
-   * \param the number of streams to be created
+   * \brief Apply the stream data limits the peer announced to the streams that already exist
    */
-  void CreateStream (const QuicStream::QuicStreamDirectionTypes_t streamDirectionType, uint64_t streamNum);
+  void UpdateInitialMaxStreamData (void);
+
+  /**
+   * \brief A peer-initiated stream finished in both directions: give the peer a new stream credit
+   * (msquic QuicStreamSetReleaseStream) with a MAX_STREAMS frame
+   * \param stream the stream
+   */
+  void OnStreamClosed (Ptr<QuicStreamBase> stream);
 
   /**
    * \brief Get the maximum packet size from the underlying socket
@@ -219,7 +220,7 @@ public:
    *
    * \param newMaxStreamData the updated value
    */
-  void UpdateInitialMaxStreamData (uint32_t newMaxStreamData);
+
 
   /**
    * \brief Return MAX_DATA for flow control (i.e., the sum of MAX_STREAM_DATA for all streams)
@@ -228,11 +229,144 @@ public:
    */
   uint64_t GetMaxData ();
 
+  /**
+   * \brief Connection-level send credit: peer MAX_DATA minus new stream data already sent
+   * \return bytes that may still be sent
+   */
+  uint64_t ConnectionSendWindow () const;
+
+  /**
+   * \brief Account for new (non-retransmitted) stream data handed to the socket
+   * \param bytes amount sent (negative to undo)
+   */
+  void OnNewDataSent (int64_t bytes);
+
+  /**
+   * \brief Account for in-order bytes delivered on any stream; sends MAX_DATA when due
+   * \param bytes bytes delivered
+   */
+  void OnBytesDelivered (uint64_t bytes);
+
+  /**
+   * \brief The peer raised the connection limit: wake up blocked streams
+   */
+  void OnConnectionWindowUpdate ();
+
+  /**
+   * \brief A stream could not hand a frame to the socket because the socket transmit buffer was full
+   */
+  void NotifySocketTxFull ();
+
+  /**
+   * \brief The socket sent packets and so made room in its transmit buffer: streams that a full buffer
+   * turned away try again. Nothing else wakes them once the application has written everything and no
+   * window update is due.
+   */
+  void OnSocketTxSpace ();
+
+  /**
+   * \brief Reset the sending side of a stream (RESET_STREAM)
+   * \param streamId the stream
+   * \param errorCode application error code
+   * \return true if the reset was issued
+   */
+  bool ResetStream (uint64_t streamId, uint16_t errorCode);
+
+  /**
+   * \brief Report that a stream has (or no longer has) unsent data in its own buffer
+   * \param streamId the stream
+   * \param backlogged true while data remains
+   */
+  void NotifyStreamBacklog (uint64_t streamId, bool backlogged);
+
+  /**
+   * \brief Whether the socket is about to send an ACK
+   * \return true if an ACK is queued or its delay timer runs
+   */
+  bool IsAckPending () const;
+
+  /**
+   * \brief Ask the peer to stop sending on a stream (STOP_SENDING)
+   * \param streamId the stream
+   * \param errorCode application error code
+   * \return true if the request was issued
+   */
+  bool StopSendingOnStream (uint64_t streamId, uint16_t errorCode);
+
+  /**
+   * \\brief Finish the sending side of a stream (FIN)
+   * \\param streamId the stream
+   * \\return true if the FIN was queued
+   */
+  bool FinishStream (uint64_t streamId);
+
+  /**
+   * \brief Smoothed RTT of the connection
+   * \return the smoothed RTT
+   */
+  Time GetSmoothedRtt () const;
+
+  /**
+   * \brief Send DATA_BLOCKED once per limit when the connection limit stops new data
+   */
+  void ReportConnectionBlockedIfNeeded ();
+
+  /**
+   * \brief Whether any stream still holds application data not yet handed to the socket
+   * \return true if data is pending
+   */
+  bool HasPendingStreamData () const;
+
+  /**
+   * \brief Account for new highest stream offsets received
+   * \param bytes growth of the sum of highest received offsets
+   * \return false if the connection-level limit we advertised was exceeded
+   */
+  bool OnBytesReceivedAtOffset (uint64_t bytes);
+
 private:
+  uint64_t m_connSent {0};                      //!< New stream data sent on the connection
+  uint64_t m_connDeliveredAccumulator {0};  //!< Bytes delivered since the last MAX_DATA
+  uint64_t m_connDelivered {0};                 //!< In-order bytes delivered on the connection
+  uint64_t m_connBlockedReportedAt {UINT64_MAX}; //!< Connection limit for which DATA_BLOCKED was last sent
+  uint64_t m_connRecvTotal {0};                 //!< Sum of highest received stream offsets
+  uint64_t m_connMaxAllowed {0};                //!< Advertised MAX_DATA (0: not yet initialised)
+  bool m_socketTxFull {false};                  //!< A stream was refused by the full socket buffer and waits for room
   Ptr<QuicSocketBase> m_socket;                 //!< The Quic socket this stack is associated with
   Ptr<Node> m_node;                             //!< The node this stack is associated with
   uint64_t m_connectionId;                      //!< The connection id this stack is associated with
-  std::vector<Ptr<QuicStreamBase> > m_streams;  //!< The streams this stack is associated with
+  std::vector<Ptr<QuicStreamBase> > m_streams;  //!< The streams this stack is associated with (handshake first)
+  std::map<uint64_t, Ptr<QuicStreamBase> > m_streamById;  //!< The streams by RFC 9000 stream id
+  uint64_t m_streamsCreated[4] {0, 0, 0, 0};    //!< Streams created per type (id & 3)
+
+  /**
+   * \brief Create a stream with the given id and the limits of its type
+   * \param streamId the id
+   * \return the stream
+   */
+  Ptr<QuicStreamBase> AddStream (uint64_t streamId);
+
+  /**
+   * \brief Whether the stream was initiated by this endpoint
+   * \param streamId the id
+   * \return true if locally initiated
+   */
+  bool IsLocallyInitiated (uint64_t streamId) const;
+
+  /**
+   * \brief Find or open a stream this endpoint initiates (RFC 9000 s3.2, s4.6)
+   * \param streamId the id
+   * \return the stream, or null if the peer's stream limit does not allow it yet
+   */
+  Ptr<QuicStreamBase> OpenLocalStream (uint64_t streamId);
+
+  /**
+   * \brief Find or create a stream the peer initiates (msquic QuicStreamSetGetStreamForPeer)
+   * \param streamId the id
+   * \param fatal set when the frame is a protocol violation and the connection was aborted
+   * \return the stream or null
+   */
+  Ptr<QuicStreamBase> GetStreamForPeer (uint64_t streamId, bool &fatal);
 };
 
 } // namespace ns3

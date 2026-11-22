@@ -136,9 +136,11 @@ public:
    * Add a packet in the buffer
    *
    * \param p a pointer to the packet
+   * \param force store the packet even when it does not fit: data that was already acknowledged and counted
+   *        by flow control must not be dropped
    * \return true if the insertion was successful
    */
-  bool Add (Ptr<Packet> p);
+  bool Add (Ptr<Packet> p, bool force = false);
 
   /**
    * Try to extract maxSize bytes from the buffer

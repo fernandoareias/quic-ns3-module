@@ -36,6 +36,18 @@ namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE ("QuicStreamTxBuffer");
 
+NS_OBJECT_ENSURE_REGISTERED (QuicStreamTxItem);
+
+TypeId
+QuicStreamTxItem::GetTypeId (void)
+{
+  static TypeId tid = TypeId ("ns3::QuicStreamTxItem")
+    .SetParent<Object> ()
+    .SetGroupName ("Internet")
+  ;
+  return tid;
+}
+
 QuicStreamTxItem::QuicStreamTxItem ()
   : m_packetNumberSequence (0),
     m_packet (0),
@@ -97,7 +109,7 @@ QuicStreamTxBuffer::GetTypeId (void)
 }
 
 QuicStreamTxBuffer::QuicStreamTxBuffer ()
-  : m_maxBuffer (131072),
+  : m_maxBuffer (1048576),
     m_appSize (0),
     m_sentSize (0)
 {
@@ -167,9 +179,7 @@ bool
 QuicStreamTxBuffer::Rejected (Ptr<Packet> p)
 {
   NS_LOG_FUNCTION (this << p);
-  QuicSubheader qsb;
-  p->PeekHeader (qsb);
-  NS_LOG_INFO ("Packet of size " << p->GetSize () << " bytes rejected, reappending. Offset " << qsb.GetOffset ());
+  NS_LOG_INFO ("Packet of size " << p->GetSize () << " bytes rejected, reappending");
 
   if (p->GetSize () <= Available ())
     {
@@ -181,9 +191,7 @@ QuicStreamTxBuffer::Rejected (Ptr<Packet> p)
           m_appSize += p->GetSize ();
           m_sentList.pop_back ();
           m_sentSize -= p->GetSize ();
-          Ptr<Packet> added = (*m_appList.begin ())->m_packet;
-          added->PeekHeader (qsb);
-          NS_LOG_INFO ("Update: Application Size = " << m_appSize << " added packet with offset " << qsb.GetOffset ());
+          NS_LOG_INFO ("Update: Application Size = " << m_appSize);
           return true;
         }
       else
@@ -421,5 +429,14 @@ QuicStreamTxBuffer::BytesInFlight () const
 
 }
 
+
+uint32_t
+QuicStreamTxBuffer::DiscardAppData (void)
+{
+  uint32_t discarded = m_appSize;
+  m_appList.clear ();
+  m_appSize = 0;
+  return discarded;
+}
 
 }

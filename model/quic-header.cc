@@ -183,16 +183,19 @@ QuicHeader::Serialize (Buffer::Iterator start) const
       uint8_t t;
       if (IsVersionNegotiation ())
         {
-          t = 0x80;
+          // RFC 9000 s17.2.1: the bits after the form bit are unused; the Fixed Bit is set, as RFC 9287 asks
+          t = 0xC0;
         }
       else
         {
           // Map ns-3 types to RFC 9000 bits [4:5]: INITIAL=0x00,ZRTT=0x10,HANDSHAKE=0x20,RETRY=0x30
+          // The two low bits are the packet number length minus one: this module always writes 4 bytes (0x03)
           static const uint8_t ns3ToRfcTypeBits[5] = { 0x00, 0x00, 0x30, 0x20, 0x10 };
-          t = 0xC0 | ns3ToRfcTypeBits[m_type & 0x07];
+          t = 0xC0 | ns3ToRfcTypeBits[m_type & 0x07] | 0x03;
         }
       i.WriteU8 (t);
-      i.WriteHtonU32 (m_version);           // RFC 9000: version at offset 1
+      // RFC 9000 s17.2.1: a Version Negotiation packet is the one whose version is 0
+      i.WriteHtonU32 (IsVersionNegotiation () ? 0 : m_version);
       i.WriteU8 (8);                        // DCIL = 8 bytes
       i.WriteHtonU64 (m_connectionId);      // DCID (8 bytes)
       i.WriteU8 (0);                        // SCIL = 0 (no source CID)
@@ -203,9 +206,11 @@ QuicHeader::Serialize (Buffer::Iterator start) const
     }
   else
     {
-      // Short header: form=0, C-bit, spin, key-phase, then packet-number type
-      uint8_t t = m_type;
-      t += (m_c << 6) + (m_spinBit << 5) + (m_k << 4);
+      // RFC 9000 s17.3.1: 0 | Fixed Bit (1) | Spin Bit | Reserved (00) | Key Phase | Packet Number Length (2).
+      // The connection id is always written (8 bytes) unless OmitConnectionId was negotiated, which this module
+      // flags with the first reserved bit: a header with the id is a valid RFC 9000 short header
+      uint8_t pnBits = (m_type == FOUR_OCTECTS) ? 0x3 : m_type;      // 00: 1 byte, 01: 2 bytes, 11: 4 bytes
+      uint8_t t = 0x40 | (m_spinBit << 5) | (m_k << 2) | pnBits | (m_c ? 0x00 : 0x08);
       i.WriteU8 (t);
 
       if (m_c)
@@ -241,16 +246,19 @@ QuicHeader::Deserialize (Buffer::Iterator start)
 
   if (IsShort ())
     {
-      m_c = (t & 0x40) >> 6;
+      // RFC 9000 s17.3.1 (see Serialize)
+      m_c = !(t & 0x08);
       m_spinBit = (t & 0x20) >> 5;
-      m_k = (t & 0x10) >> 4;
-      SetTypeByte (t & 0x0F);
+      m_k = (t & 0x04) >> 2;
+      static const uint8_t pnLength[4] = { ONE_OCTECT, TWO_OCTECTS, FOUR_OCTECTS, FOUR_OCTECTS };
+      SetTypeByte (pnLength[t & 0x03]);
     }
   else
     {
-      // RFC 9000 §17.2: if Fixed Bit (bit 6) = 0 → VERSION_NEGOTIATION
-      // Otherwise bits [5:4] encode type: 00=INITIAL,01=0-RTT,10=HANDSHAKE,11=RETRY
-      if (!(t & 0x40))
+      // RFC 9000 s17.2: the version follows the first byte; version 0 marks a Version Negotiation packet,
+      // otherwise bits [5:4] encode the type: 00=INITIAL,01=0-RTT,10=HANDSHAKE,11=RETRY
+      uint32_t version = i.ReadNtohU32 ();
+      if (version == 0)
         {
           SetTypeByte (VERSION_NEGOTIATION);
         }
@@ -259,13 +267,13 @@ QuicHeader::Deserialize (Buffer::Iterator start)
           static const uint8_t rfcToNs3Type[4] = { INITIAL, ZRTT_PROTECTED, HANDSHAKE, RETRY };
           SetTypeByte (rfcToNs3Type[(t >> 4) & 0x03]);
         }
+      SetVersion (version);
     }
   NS_ASSERT (m_type != NONE or m_form == SHORT);
 
   if (IsLong ())
     {
-      // RFC 9000 Long Header: version | DCIL | DCID | SCIL | SCID | ...
-      SetVersion (i.ReadNtohU32 ());
+      // RFC 9000 Long Header: version (read above) | DCIL | DCID | SCIL | SCID | ...
       uint8_t dcil = i.ReadU8 ();
       if (dcil == 8)
         {
