@@ -1829,11 +1829,14 @@ QuicSocketBase::DoRetransmit (std::vector<Ptr<QuicSocketTxItem> > lostPackets, b
         {
           break;
         }
-      uint32_t sendSize = std::min (remaining, GetSegSize ());
+      // the ACK frame that goes with the packet takes room of its own: counted in the budget, a big ACK frame
+      // would leave no room for the frames being retransmitted
+      uint32_t dataBudget = remaining;
       if (win > 0 && !exempt)
         {
-          sendSize = std::min (sendSize, win);
+          dataBudget = std::min (dataBudget, win);
         }
+      uint32_t sendSize = std::min (dataBudget + PendingAckFrameSize (m_connected), GetSegSize ());
       SequenceNumber32 pn = next;
       if (!first)
         {
@@ -4256,6 +4259,16 @@ QuicSocketBase::OnMtuProbeAcked (void)
       return;
     }
   StartMtuDiscovery ();
+}
+
+uint32_t
+QuicSocketBase::PendingAckFrameSize (bool withAck)
+{
+  if (!withAck || m_receivedPacketNumbers.Empty ())
+    {
+      return 0;
+    }
+  return OnSendingAckFrame ()->GetSize ();
 }
 
 void

@@ -1284,6 +1284,13 @@ protected:
 
   /** Lower the ACK tolerance asked of the peer when the window no longer holds that many packets */
   void ClampPeerAckTolerance ();
+
+  /**
+   * Size of the ACK frame that the next packet would carry
+   * \param withAck whether the next packet carries an ACK frame
+   * \return the size in bytes, 0 when there is nothing to acknowledge
+   */
+  uint32_t PendingAckFrameSize (bool withAck);
   uint32_t m_latestRecvPn {0};        //!< Packet number of the last packet received
   uint32_t m_largestPnAckedByUs {0};  //!< Largest packet number reported in an ACK frame we sent
 
