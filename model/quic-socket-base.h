@@ -1171,6 +1171,8 @@ protected:
   void OnMtuProbeTimeout (void);
   void OnMtuProbeAcked (void);
   bool m_closeNotified {false};       //!< The application was already told that the connection ended
+  bool m_closePacketSent {false};     //!< A CONNECTION_CLOSE left after a local close: the closing state of RFC 9000 s10.2.1
+  uint32_t m_closingPacketsReceived {0};   //!< Packets received while closing, to pace the repeats of CONNECTION_CLOSE
   EventId m_handshakeResendEvent;             //!< Client: repeats the Handshake packet until HANDSHAKE_DONE arrives
   uint32_t m_handshakeResendCount {0};        //!< Client: times the Handshake packet was repeated (the backoff exponent)
   bool m_handshakeResendPending {false};      //!< The next packet sent carries a Handshake header

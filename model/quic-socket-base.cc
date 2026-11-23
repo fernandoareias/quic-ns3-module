@@ -2187,6 +2187,8 @@ QuicSocketBase::ScheduleCloseAndSendConnectionClosePacket ()
   NS_LOG_LOGIC (this << " Close Schedule DoClose at time " << Simulator::Now ().GetSeconds () << " to expire at time " << (Simulator::Now () + m_drainingPeriodTimeout.Get ()).GetSeconds ());
   m_drainingPeriodEvent = Simulator::Schedule (m_drainingPeriodTimeout, &QuicSocketBase::DoClose, this);
   SendConnectionClosePacket (0, "Scheduled connection close - no error");
+  m_closePacketSent = true;
+  m_closingPacketsReceived = 0;
 }
 
 
@@ -3462,6 +3464,17 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
     }
   else   // If the socket is in Draining Period, discard the packets
     {
+      // RFC 9000 s10.2.1: a closing endpoint answers the packets it still receives with CONNECTION_CLOSE, so that a
+      // peer that missed the first one learns of the close; the answers thin out as the packets keep coming
+      // (the 1st, 2nd, 4th, 8th, ...)
+      if (m_closePacketSent && m_socketState == CLOSING)
+        {
+          ++m_closingPacketsReceived;
+          if ((m_closingPacketsReceived & (m_closingPacketsReceived - 1)) == 0)
+            {
+              SendConnectionClosePacket (0, "Scheduled connection close - no error");
+            }
+        }
       return;
     }
 

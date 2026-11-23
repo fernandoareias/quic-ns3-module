@@ -1622,6 +1622,65 @@ private:
 };
 
 /**
+ * RFC 9000 s10.2.1: an endpoint that closed the connection answers the packets it still receives with CONNECTION_CLOSE.
+ * The first CONNECTION_CLOSE is lost here; without the repeat the peer learns of the close only when its idle timer
+ * expires.
+ */
+class FeatClosingRepeatTest : public TestCase
+{
+public:
+  FeatClosingRepeatTest () : TestCase ("a lost CONNECTION_CLOSE is repeated to the peer's packets (RFC 9000 s10.2.1)") {}
+private:
+  void DoRun () override
+  {
+    FeatRig r;
+    r.serverStreams = 1;
+    r.serverBytesPerStream = 20000;
+    r.serverCloses = true;
+    r.stopAt = Seconds (8);
+    r.onAccept = [this] (Ptr<Socket> s) {
+      FeatQuic (s)->TraceConnectWithoutContext ("Tx", MakeCallback (&FeatClosingRepeatTest::OnServerTx, this));
+      FeatRig::SendPattern (s, ServerStreamId (1), 20000);
+      s->Close ();
+    };
+    r.Build ();
+    r.clients[0]->SetCloseCallbacks (MakeCallback (&FeatClosingRepeatTest::OnClientClosed, this),
+                                     MakeCallback (&FeatClosingRepeatTest::OnClientClosed, this));
+    m_em = CreateObject<RateErrorModel> ();
+    m_em->SetAttribute ("ErrorRate", DoubleValue (1.0));
+    m_em->SetAttribute ("ErrorUnit", StringValue ("ERROR_UNIT_PACKET"));
+    m_em->Disable ();
+    r.dev.Get (1)->SetAttribute ("ReceiveErrorModel", PointerValue (m_em));
+    r.Run ();
+    NS_TEST_ASSERT_MSG_EQ (r.rx[0][1].bytes, 20000u, "delivered");
+    NS_TEST_ASSERT_MSG_GT (m_closeSent, 1u, "CONNECTION_CLOSE was sent " << m_closeSent << " time(s)");
+    NS_TEST_ASSERT_MSG_EQ (m_closed, true, "the client learned of the close");
+    NS_TEST_ASSERT_MSG_LT (m_closedAt.GetSeconds (), 3.0, "the client learned of the close at " << m_closedAt.GetSeconds () << " s");
+  }
+  void OnServerTx (Ptr<const Packet> p, const QuicHeader &h, Ptr<const QuicSocketBase>)
+  {
+    if (FeatFirstFrame (p, h) == QuicSubheader::CONNECTION_CLOSE)
+      {
+        if (m_closeSent++ == 0)
+          {
+            // the first one never reaches the client
+            m_em->Enable ();
+            Simulator::Schedule (MilliSeconds (30), &ErrorModel::Disable, m_em);
+          }
+      }
+  }
+  void OnClientClosed (Ptr<Socket>)
+  {
+    m_closed = true;
+    m_closedAt = Simulator::Now ();
+  }
+  Ptr<RateErrorModel> m_em;
+  uint32_t m_closeSent {0};
+  bool m_closed {false};
+  Time m_closedAt {Seconds (0)};
+};
+
+/**
  * Drops the packet at a given arrival index; the index is chosen while the packet is still on the wire, so a
  * test can aim at a packet it saw leave the sender
  */
@@ -1818,6 +1877,7 @@ public:
     AddTestCase (new FeatDrainingTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatHandshakeDoneRetransmitTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
+    AddTestCase (new FeatClosingRepeatTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatVersionNegotiationTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatTransportParameterRangeTest (20, true), TestCase::Duration::QUICK);
     AddTestCase (new FeatTransportParameterRangeTest (25, false), TestCase::Duration::QUICK);
