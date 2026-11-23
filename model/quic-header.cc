@@ -561,31 +561,36 @@ bool QuicHeader::IsShort () const
 bool
 QuicHeader::IsVersionNegotiation () const
 {
-  return m_type == VERSION_NEGOTIATION;
+  // a short header keeps its packet number length in m_type, which shares values with the long types
+  return IsLong () && m_type == VERSION_NEGOTIATION;
 }
 
 bool
 QuicHeader::IsInitial () const
 {
-  return m_type == INITIAL;
+  // a short header keeps its packet number length in m_type, which shares values with the long types
+  return IsLong () && m_type == INITIAL;
 }
 
 bool
 QuicHeader::IsRetry () const
 {
-  return m_type == RETRY;
+  // a short header keeps its packet number length in m_type, which shares values with the long types
+  return IsLong () && m_type == RETRY;
 }
 
 bool
 QuicHeader::IsHandshake () const
 {
-  return m_type == HANDSHAKE;
+  // a short header keeps its packet number length in m_type, which shares values with the long types
+  return IsLong () && m_type == HANDSHAKE;
 }
 
 bool
 QuicHeader::IsORTT () const
 {
-  return m_type == ZRTT_PROTECTED;
+  // a short header keeps its packet number length in m_type, which shares values with the long types
+  return IsLong () && m_type == ZRTT_PROTECTED;
 }
 
 bool QuicHeader::HasVersion () const

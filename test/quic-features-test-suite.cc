@@ -283,6 +283,14 @@ private:
     NS_TEST_ASSERT_MSG_EQ (RoundTrip (vn).IsVersionNegotiation (), true, "version 0 is a Version Negotiation packet");
     NS_TEST_ASSERT_MSG_EQ (RoundTrip (QuicHeader::CreateInitial (cid, QUIC_VERSION, SequenceNumber32 (1))).IsInitial (), true,
                            "an Initial is not mistaken for one");
+    // a short header keeps its packet number length where the long types live: it must never read as one of them
+    for (uint32_t pn : {5u, 300u, 70000u})
+      {
+        QuicHeader sh = RoundTrip (QuicHeader::CreateShort (cid, SequenceNumber32 (pn), true, false, false));
+        NS_TEST_ASSERT_MSG_EQ (sh.IsShort (), true, "short header, packet number " << pn);
+        NS_TEST_ASSERT_MSG_EQ ((sh.IsInitial () || sh.IsRetry () || sh.IsHandshake () || sh.IsORTT () || sh.IsVersionNegotiation ()), false,
+                               "a short header is not a long one, packet number " << pn);
+      }
     // reserved versions: 0x?a?a?a?a only
     Ptr<QuicSocketBase> any = CreateObject<QuicSocketBase> ();
     NS_TEST_ASSERT_MSG_EQ (any->CheckVersionNegotiation (0x1a2a3a4a), true, "reserved version");
