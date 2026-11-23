@@ -19,3 +19,14 @@ build_lib_example(
                       ${libpoint-to-point}
                       ${libapplications}
 )
+
+build_lib_example(
+    NAME quic-loss-stress
+    SOURCE_FILES quic-loss-stress.cc
+    LIBRARIES_TO_LINK ${libquic}
+                      ${libcore}
+                      ${libnetwork}
+                      ${libinternet}
+                      ${libpoint-to-point}
+                      ${libapplications}
+)

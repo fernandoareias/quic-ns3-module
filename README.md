@@ -28,7 +28,7 @@ contrib/quic/
 ├── model/       # protocol stack: sockets, L4/L5 protocols, streams, headers and frames,
 │                #   transport parameters, buffers, stream schedulers, NewReno / CUBIC / BBR
 ├── helper/      # QuicHelper (InstallQuic)
-├── examples/    # quic-example, quic-video-streaming
+├── examples/    # quic-example, quic-video-streaming, quic-loss-stress
 ├── scripts/     # streaming_experiment.py
 ├── results/     # streaming-loss.csv
 └── test/        # two ns-3 suites, "quic" and "quic-features" (see test/TESTS.md)
@@ -64,6 +64,14 @@ Ptr<Socket> socket = Socket::CreateSocket(node, QuicSocketFactory::GetTypeId());
 - **Stream limits.** Like msquic, the module lets the peer open no stream until the application allows some: `MaxStreamIdBidi` and `MaxStreamIdUni` default to 0. An application that never raises them hangs after the handshake (`STREAMS_BLOCKED`). Set them with `Config::SetDefault("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue(n))` or per socket with `SetAttribute`, on both ends.
 - **Default stream.** `Socket::Send(packet)` writes on the first bidirectional stream the endpoint opens: stream 0 on the client and stream 1 on the server (RFC 9000 stream ids), so both ends need a stream allowance. `Socket::Send(packet, streamId)` picks the stream.
 - **0-RTT.** A client that already knows a server still gets a full handshake. Set `ns3::QuicL4Protocol::0RTT-Handshake` on the client's `QuicL4Protocol` to connect with 0-RTT; the server accepts it from addresses it has authenticated.
+
+## Loss stress test
+
+`examples/quic-loss-stress.cc` moves `--bytes` bytes on each of `--nstreams` streams in both directions over a link with random loss and exits with 0 only if every byte arrives. Looping it over `--run`, `--loss`, `--rate`, `--delay`, `--cc` (`ns3::QuicCubic`, `ns3::QuicBbr`, `ns3::QuicCongestionControl`), `--msd` and `--md` (the flow-control windows) exercises the loss recovery and the connection set-up: uniform loss up to 15 %, 1 to 4 streams, several links and all three congestion controls complete in every run. `--burst` uses the ns-3 `BurstErrorModel`, which counts packets and not time, so with few packets on the link one burst can last for seconds and a failure at a high burst rate does not point at the protocol.
+
+```bash
+./ns3 run "quic-loss-stress --loss=0.05 --run=7 --nstreams=3 --bytes=200000 --cc=ns3::QuicBbr"
+```
 
 ## Streaming experiment
 
