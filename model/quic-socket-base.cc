@@ -1764,28 +1764,28 @@ QuicSocketBase::CheckSpuriousLosses (uint32_t largest, const std::vector<uint32_
     {
       return;
     }
-  std::vector<uint32_t> ups = blocks;
-  ups.insert (ups.begin (), largest);
-  Ptr<QuicCongestionOps> cc = DynamicCast<QuicCongestionOps> (m_congestionControl);
-  for (auto it = m_declaredLost.begin (); it != m_declaredLost.end ();)
+  // look the acknowledged ranges up in the set of declared-lost packets instead of testing each of them (up to 1024)
+  // against every range at every ACK; range i holds [lowest, highest], the first one ends at the largest acknowledged
+  std::vector<uint32_t> spurious;
+  const size_t ranges = blocks.size () + 1;
+  for (size_t i = 0; i < ranges; ++i)
     {
-      bool acked = false;
-      for (size_t i = 0; i < ups.size () && !acked; ++i)
+      uint32_t highest = (i == 0) ? largest : blocks[i - 1];
+      uint32_t lowest = (i < gaps.size ()) ? gaps[i] + 1 : ackFloor;
+      for (auto it = m_declaredLost.lower_bound (lowest); it != m_declaredLost.end () && *it <= highest;
+           it = m_declaredLost.erase (it))
         {
-          bool aboveGap = (i >= gaps.size ()) ? (*it >= ackFloor) : (*it > gaps[i]);
-          acked = (*it <= ups[i]) && aboveGap;
+          spurious.push_back (*it);
         }
-      if (acked)
-        {
-          NS_LOG_INFO ("Packet " << *it << " declared lost was acknowledged (spurious)");
-          m_spuriousLossTrace (*it);
-          cc->OnSpuriousLoss (m_tcb, SequenceNumber32 (*it));
-          it = m_declaredLost.erase (it);
-        }
-      else
-        {
-          ++it;
-        }
+    }
+  // reported in packet number order, as when the whole set was walked
+  std::sort (spurious.begin (), spurious.end ());
+  Ptr<QuicCongestionOps> cc = DynamicCast<QuicCongestionOps> (m_congestionControl);
+  for (uint32_t pn : spurious)
+    {
+      NS_LOG_INFO ("Packet " << pn << " declared lost was acknowledged (spurious)");
+      m_spuriousLossTrace (pn);
+      cc->OnSpuriousLoss (m_tcb, SequenceNumber32 (pn));
     }
 }
 

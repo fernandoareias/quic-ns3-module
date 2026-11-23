@@ -420,40 +420,41 @@ std::vector<Ptr<QuicSocketTxItem> > QuicSocketTxBuffer::OnAckUpdate (
     }
 #endif
 
-  // Iterate over the ACK blocks and gaps
+  // Iterate over the ACK blocks and gaps. The blocks go from the newest to the oldest, as does the walk over the sent
+  // list, so each block goes on from where the previous one stopped (the packets it skips are newer than the block)
+  auto scan_it = m_sentList.rbegin ();
   for (uint32_t numAckBlockAnalyzed = 0; numAckBlockAnalyzed < ackBlockCount;
        ++numAckBlockAnalyzed, ++ack_it, ++gap_it)
     {
-      for (auto sent_it = m_sentList.rbegin ();
-           sent_it != m_sentList.rend () and !m_sentList.empty (); ++sent_it)                    // Visit sentList in reverse Order for optimization
+      for (; scan_it != m_sentList.rend () and !m_sentList.empty (); ++scan_it)                    // Visit sentList in reverse Order for optimization
         {
           NS_LOG_LOGIC (
-            "Consider packet " << (*sent_it)->m_packetNumber << " (ACK block " << SequenceNumber32 ((*ack_it)) << ")");
+            "Consider packet " << (*scan_it)->m_packetNumber << " (ACK block " << SequenceNumber32 ((*ack_it)) << ")");
           // The packet is in the next gap
           bool inGap = (gap_it < compGaps.end ())
-            && ((*sent_it)->m_packetNumber
+            && ((*scan_it)->m_packetNumber
                 <= SequenceNumber32 ((*gap_it)));
           if (inGap)               // Just for optimization we suppose All is perfectly ordered
             {
               NS_LOG_LOGIC (
-                "Packet " << (*sent_it)->m_packetNumber << " missing");
+                "Packet " << (*scan_it)->m_packetNumber << " missing");
               break;
             }
           // The packet is in the current block: ACK it
-          NS_LOG_LOGIC ("Packet " << (*sent_it)->m_packetNumber << " ACKed");
+          NS_LOG_LOGIC ("Packet " << (*scan_it)->m_packetNumber << " ACKed");
           // the oldest range only reaches down to the ACK floor; older ranges may have been left out
           bool notInGap = (gap_it >= compGaps.end ())
-            ? ((*sent_it)->m_packetNumber >= SequenceNumber32 (m_ackFloor))
-            : ((*sent_it)->m_packetNumber > SequenceNumber32 ((*gap_it)));
+            ? ((*scan_it)->m_packetNumber >= SequenceNumber32 (m_ackFloor))
+            : ((*scan_it)->m_packetNumber > SequenceNumber32 ((*gap_it)));
 
-          if ((*sent_it)->m_packetNumber <= SequenceNumber32 ((*ack_it))
-              and notInGap and (*sent_it)->m_sacked == false)
+          if ((*scan_it)->m_packetNumber <= SequenceNumber32 ((*ack_it))
+              and notInGap and (*scan_it)->m_sacked == false)
             {
-              (*sent_it)->m_sacked = true;
+              (*scan_it)->m_sacked = true;
               m_inFlightValid = false;
-              (*sent_it)->m_ackTime = Now ();
-              newlyAcked.push_back ((*sent_it));
-              UpdateRateSample ((*sent_it));
+              (*scan_it)->m_ackTime = Now ();
+              newlyAcked.push_back ((*scan_it));
+              UpdateRateSample ((*scan_it));
             }
 
         }
