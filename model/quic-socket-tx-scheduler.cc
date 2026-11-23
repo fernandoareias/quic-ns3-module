@@ -266,6 +266,17 @@ QuicSocketTxScheduler::GetNewSegment (uint32_t numBytes)
           QuicSubheader qsb;
           currentPacket->PeekHeader (qsb);
 
+          // Only a STREAM frame with data can be cut in two; a control frame, or a STREAM frame that carries
+          // nothing but FIN, waits for the next packet
+          if (!qsb.IsStream () || currentPacket->GetSize () <= qsb.GetSerializedSize ())
+            {
+              NS_LOG_INFO ("Frame without data does not fit in " << numBytes - outItemSize << " bytes, kept for the next packet");
+              m_appList.push (scheduleItem);
+              m_appSize += currentPacket->GetSize ();
+              OnQueued (scheduleItem->GetStreamId (), currentPacket->GetSize ());
+              break;
+            }
+
           // new packet size
           // The header of the part sent now always carries a LENGTH field, so size it from that header
           // (the stored one may lack the bit) and not from the header of the frame being split

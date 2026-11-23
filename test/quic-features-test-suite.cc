@@ -406,6 +406,45 @@ private:
   }
 };
 
+/**
+ * A frame that carries no data (a control frame, or a STREAM frame with only FIN) cannot be cut in two. When it does
+ * not fit in the room left after the ACK frame, it waits for the next packet; splitting it used to read a byte from an
+ * empty payload and crash the retransmission of a lost MAX_DATA.
+ */
+class FeatSchedulerDataLessFrameTest : public TestCase
+{
+public:
+  FeatSchedulerDataLessFrameTest () : TestCase ("schedulers: a frame without data that does not fit waits for the next packet") {}
+private:
+  static Ptr<QuicSocketTxItem> Frame (const QuicSubheader &sub)
+  {
+    Ptr<QuicSocketTxItem> it = CreateObject<QuicSocketTxItem> ();
+    it->m_packet = Create<Packet> ();
+    it->m_packet->AddHeader (sub);
+    it->m_isStream = true;
+    return it;
+  }
+  void Check (Ptr<QuicSocketTxScheduler> s, Ptr<QuicSocketTxItem> frame, const char *name)
+  {
+    uint32_t size = frame->m_packet->GetSize ();
+    NS_TEST_ASSERT_MSG_GT (size, 4u, name << ": the frame is larger than the room offered");
+    s->Add (frame, true);
+    Ptr<QuicSocketTxItem> out = s->GetNewSegment (4);
+    NS_TEST_ASSERT_MSG_NE (out, nullptr, name << ": a segment is returned");
+    NS_TEST_ASSERT_MSG_EQ (out->m_packet->GetSize (), 0u, name << ": nothing fits in 4 bytes");
+    NS_TEST_ASSERT_MSG_EQ (s->AppSize (), size, name << ": the frame is still queued");
+    out = s->GetNewSegment (1459);
+    NS_TEST_ASSERT_MSG_EQ (out->m_packet->GetSize (), size, name << ": it goes out whole in the next packet");
+    NS_TEST_ASSERT_MSG_EQ (s->AppSize (), 0u, name << ": the queue is empty");
+  }
+  void DoRun () override
+  {
+    Check (CreateObject<QuicSocketTxScheduler> (), Frame (QuicSubheader::CreateMaxData (1 << 24)), "MAX_DATA");
+    Check (CreateObject<QuicSocketTxScheduler> (),
+           Frame (QuicSubheader::CreateStreamSubHeader (4000, 123456, 0, true, true, true)), "STREAM with FIN only");
+  }
+};
+
 class FeatRoundRobinFairnessTest : public TestCase
 {
 public:
@@ -1730,6 +1769,7 @@ public:
     AddTestCase (new FeatTransportParametersTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatCongestionDefaultsTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatSchedulerConservationTest, TestCase::Duration::QUICK);
+    AddTestCase (new FeatSchedulerDataLessFrameTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatRoundRobinFairnessTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatStreamFifoUnfairnessTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatTransferTest ("end-to-end: CUBIC, no loss", "ns3::QuicCubic", 0, 0), TestCase::Duration::QUICK);
