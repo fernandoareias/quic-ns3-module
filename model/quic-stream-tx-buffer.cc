@@ -273,9 +273,9 @@ QuicStreamTxBuffer::GetNewSegment (uint32_t numBytes)
 
           m_appList.push_front (toBeBuffered);
 
+          // The segment is full and the iterator went with the erased item
+          break;
         }
-
-      it++;
     }
 
   if (toInsert)
