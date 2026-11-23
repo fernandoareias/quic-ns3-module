@@ -793,16 +793,29 @@ uint32_t QuicSocketTxBuffer::BytesInFlight () const
       return m_inFlightCache;
     }
   uint32_t inFlight = 0;
+  bool unacked = false;
   for (const auto &item : m_sentList)
     {
-      if (!item->m_isStream0 && item->m_isStream && !item->m_sacked)
+      if (item->m_sacked)
+        {
+          continue;
+        }
+      unacked = true;
+      if (!item->m_isStream0 && item->m_isStream)
         {
           inFlight += item->m_packet->GetSize ();
         }
     }
   m_inFlightCache = inFlight;
+  m_hasUnacked = unacked;
   m_inFlightValid = true;
   return inFlight;
+}
+
+bool QuicSocketTxBuffer::HasUnackedPackets () const
+{
+  BytesInFlight ();
+  return m_hasUnacked;
 }
 
 void QuicSocketTxBuffer::SetQuicSocketState (Ptr<QuicSocketState> tcb)

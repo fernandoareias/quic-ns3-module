@@ -242,6 +242,14 @@ public:
   uint32_t BytesInFlight () const;
 
   /**
+   * Whether any packet sent is still waiting for an acknowledgment. BytesInFlight () leaves out the packets
+   * that carry only control frames (MAX_STREAM_DATA, MAX_DATA, ...), which the congestion window does not
+   * count but which the loss recovery timer has to cover: the peer may be blocked until one of them arrives.
+   * \return true if a sent packet is neither acknowledged nor removed
+   */
+  bool HasUnackedPackets () const;
+
+  /**
    * Return the number of frames for stream 0 is in the buffer
    *
    * \return the number of frames for stream 0 is in the buffer
@@ -396,6 +404,7 @@ private:
 
   mutable uint32_t m_inFlightCache {0};                       //!< Cached BytesInFlight ()
   mutable bool m_inFlightValid {false};                       //!< The cache is up to date
+  mutable bool m_hasUnacked {false};                          //!< Cached HasUnackedPackets ()
   uint32_t m_ackFloor {0};                                    //!< Lower bound of the last range of the current ACK
   Ptr<QuicSocketTxScheduler> m_scheduler { nullptr };         //!< Scheduler
   Ptr<QuicSocketState> m_tcb { nullptr };

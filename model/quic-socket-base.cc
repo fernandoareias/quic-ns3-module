@@ -1653,7 +1653,7 @@ QuicSocketBase::SetReTxTimeout ()
 
   // RFC 9002 §5.4 #24: client SHOULD arm PTO even when no in-flight if handshake unconfirmed.
   // Cancel the alarm only when there is nothing in flight AND handshake is already confirmed.
-  if (BytesInFlight () == 0 && m_tcb->m_handshakeConfirmed)
+  if (BytesInFlight () == 0 && !m_txBuffer->HasUnackedPackets () && m_tcb->m_handshakeConfirmed)
     {
       NS_LOG_INFO ("No in-flight bytes and handshake confirmed; cancelling loss alarm");
       m_tcb->m_lossDetectionAlarm.Cancel ();
