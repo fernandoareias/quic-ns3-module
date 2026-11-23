@@ -750,6 +750,7 @@ QuicSocketBase::~QuicSocketBase (void)
   m_quicl4 = 0;
   //CancelAllTimers ();
   m_pacingTimer.Cancel ();
+  m_handshakeResendEvent.Cancel ();
 }
 
 /* Inherit from Socket class: Bind socket to an end-point in QuicL4Protocol */
@@ -1563,7 +1564,15 @@ QuicSocketBase::SendDataPacket (SequenceNumber32 packetNumber,
       // The first packet of a client that took the fast-connect path carries a
       // 0-RTT header, whether 0-RTT was forced by attribute or allowed because
       // the peer address was already authenticated
-      if (!m_connected and !m_zeroRttConnect)
+      if (m_handshakeResendPending)
+        {
+          // The server is still waiting for the Handshake packet that completes its handshake: this one
+          // repeats it (RFC 9001 s4.9.2)
+          m_handshakeResendPending = false;
+          head = QuicHeader::CreateHandshake (m_connectionId, m_vers,
+                                              packetNumber);
+        }
+      else if (!m_connected and !m_zeroRttConnect)
         {
           m_connected = true;
           head = QuicHeader::CreateHandshake (m_connectionId, m_vers,
@@ -1893,6 +1902,38 @@ QuicSocketBase::ArmIdleTimer ()
   NS_LOG_LOGIC (this << " idle timer set at time " << Simulator::Now ().GetSeconds () << " to expire at time "
                      << (Simulator::Now () + timeout).GetSeconds ());
   m_idleTimeoutEvent = Simulator::Schedule (timeout, &QuicSocketBase::Close, this);
+}
+
+void
+QuicSocketBase::ArmHandshakeResend ()
+{
+  m_handshakeResendEvent.Cancel ();
+  if (m_isServerSide || m_zeroRttConnect || m_handshakeDoneReceived || m_socketState != OPEN
+      || m_handshakeResendCount >= kMaxHandshakeResends)
+    {
+      return;
+    }
+  Time delay = ProbeTimeout (false) * (1u << m_handshakeResendCount);
+  NS_LOG_INFO ("Handshake packet repeated in " << delay.GetSeconds () << " s unless HANDSHAKE_DONE arrives");
+  m_handshakeResendEvent = Simulator::Schedule (delay, &QuicSocketBase::HandshakeResendTimeout, this);
+}
+
+void
+QuicSocketBase::HandshakeResendTimeout ()
+{
+  NS_LOG_FUNCTION (this);
+  if (m_isServerSide || m_handshakeDoneReceived || m_socketState != OPEN)
+    {
+      return;
+    }
+  ++m_handshakeResendCount;
+  NS_LOG_INFO ("No HANDSHAKE_DONE yet: repeating the Handshake packet (attempt " << m_handshakeResendCount << ")");
+  // the PING makes the packet ack-eliciting even when nothing else is queued
+  m_handshakeResendPending = true;
+  SendControlFrame (QuicSubheader::CreatePing ());
+  SendPendingData (true);
+  m_handshakeResendPending = false;
+  ArmHandshakeResend ();
 }
 
 bool
@@ -2802,6 +2843,8 @@ QuicSocketBase::OnReceivedFrame (QuicSubheader &sub)
             return;
           }
         m_connected = true;
+        m_handshakeDoneReceived = true;
+        m_handshakeResendEvent.Cancel ();
         break;
 
       case QuicSubheader::PATH_CHALLENGE:
@@ -3528,6 +3571,7 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
       m_couldContainTransportParameters = false;
 
       SendInitialHandshake (QuicHeader::HANDSHAKE, quicHeader, p);
+      ArmHandshakeResend ();
       return;
     }
   else if (quicHeader.IsHandshake () and m_socketState == CONNECTING_SVR)
@@ -3612,7 +3656,8 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
         }
       return;
     }
-  else if (quicHeader.IsShort () and (m_socketState == OPEN or IsFlushingOnClose ()))
+  else if ((quicHeader.IsShort () or (quicHeader.IsHandshake () and m_isServerSide))
+           and (m_socketState == OPEN or IsFlushingOnClose ()))
     {
       // RFC 9000 §12.3: duplicate packet numbers MUST be discarded
       SequenceNumber32 pktNum = quicHeader.GetPacketNumber ();
@@ -3627,11 +3672,13 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
       // reflects it, the client sends the opposite, so the bit flips once per round trip
       bool newLargest = m_receivedPacketNumbers.Empty () || pktNum.GetValue () > m_receivedPacketNumbers.Largest ();
       NotePacketReceived (pktNum.GetValue ());
-      if (newLargest)
+      if (newLargest && quicHeader.IsShort ())
         {
           m_spinBit = m_isServerSide ? quicHeader.GetSpinBit () : !quicHeader.GetSpinBit ();
         }
-      m_currentRecvPacketNumberSpace = GetPacketNumberSpace (quicHeader);
+      // a Handshake packet that arrives once the server is open is the client repeating it: its frames
+      // count in the application space, because the Handshake space is gone
+      m_currentRecvPacketNumberSpace = quicHeader.IsShort () ? GetPacketNumberSpace (quicHeader) : APP_DATA_SPACE;
       onlyAckFrames = m_quicl5->DispatchRecv (p, address);
 
     }

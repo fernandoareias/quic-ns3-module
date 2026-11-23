@@ -1575,6 +1575,73 @@ private:
 };
 
 /**
+ * Drops the packet at a given arrival index; the index is chosen while the packet is still on the wire, so a
+ * test can aim at a packet it saw leave the sender
+ */
+class FeatDropNth : public ErrorModel
+{
+public:
+  static TypeId GetTypeId (void)
+  {
+    static TypeId tid = TypeId ("FeatDropNth").SetParent<ErrorModel> ().AddConstructor<FeatDropNth> ();
+    return tid;
+  }
+  uint32_t m_seen {0};
+  int64_t m_target {-1};
+private:
+  bool DoCorrupt (Ptr<Packet>) override { return (int64_t) m_seen++ == m_target; }
+  void DoReset (void) override {}
+};
+
+/**
+ * RFC 9001 s4.9.2: the Handshake packet that completes the server's handshake is sent again until HANDSHAKE_DONE
+ * arrives. A server that is still connecting drops every 1-RTT packet, so a lost Handshake packet used to leave the
+ * connection stuck for good.
+ */
+class FeatClientHandshakeLossTest : public TestCase
+{
+public:
+  FeatClientHandshakeLossTest () : TestCase ("a lost client Handshake packet is sent again (RFC 9001 s4.9.2)") {}
+private:
+  void DoRun () override
+  {
+    FeatRig r;
+    r.serverStreams = 1;
+    r.serverBytesPerStream = 20000;
+    r.serverCloses = false;
+    r.stopAt = Seconds (10);
+    r.onClientConnected = [this] (uint32_t, Ptr<Socket> c) {
+      FeatQuic (c)->TraceConnectWithoutContext ("Tx", MakeCallback (&FeatClientHandshakeLossTest::OnClientTx, this));
+    };
+    r.Build ();
+    m_drop = CreateObject<FeatDropNth> ();
+    r.dev.Get (0)->SetAttribute ("ReceiveErrorModel", PointerValue (m_drop));
+    r.Run ();
+    NS_TEST_ASSERT_MSG_EQ (m_dropped, true, "the client sent a Handshake packet");
+    NS_TEST_ASSERT_MSG_GT (m_handshakePackets, 1u, "the Handshake packet was sent again");
+    NS_TEST_ASSERT_MSG_EQ (r.rx[0][1].bytes, 20000u, "the transfer completes");
+  }
+  void OnClientTx (Ptr<const Packet>, const QuicHeader &h, Ptr<const QuicSocketBase>)
+  {
+    if (h.IsHandshake ())
+      {
+        ++m_handshakePackets;
+        if (!m_dropped)
+          {
+            // the server device counts arrivals in the order the client sent them
+            m_dropped = true;
+            m_drop->m_target = m_sent;
+          }
+      }
+    ++m_sent;
+  }
+  Ptr<FeatDropNth> m_drop;
+  bool m_dropped {false};
+  uint32_t m_sent {0};
+  uint32_t m_handshakePackets {0};
+};
+
+/**
  * RFC 9000 s6, s17.2.1: the Version Negotiation packet lists the versions in network byte order, and a client that
  * proposed an unknown version carries on with one of them.
  */
@@ -1702,6 +1769,7 @@ public:
     AddTestCase (new FeatIdleTimeoutTest ("idle timeout: 0 on both sides disables the timer (RFC 9000 s10.1)", 0, 0), TestCase::Duration::QUICK);
     AddTestCase (new FeatDrainingTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatHandshakeDoneRetransmitTest, TestCase::Duration::QUICK);
+    AddTestCase (new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatVersionNegotiationTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatTransportParameterRangeTest (20, true), TestCase::Duration::QUICK);
     AddTestCase (new FeatTransportParameterRangeTest (25, false), TestCase::Duration::QUICK);

@@ -1024,6 +1024,16 @@ protected:
   void ArmIdleTimer ();
 
   /**
+   * Client: arm the timer that repeats the Handshake packet until HANDSHAKE_DONE arrives (RFC 9001 s4.9.2: a
+   * client keeps its Handshake keys until the handshake is confirmed, so the packet that completes the
+   * server's handshake can be sent again)
+   */
+  void ArmHandshakeResend ();
+
+  /** The Handshake packet was not answered in time: send another one */
+  void HandshakeResendTimeout ();
+
+  /**
    * \brief True while the idle timer is running (or the connection is open with the timer disabled)
    */
   bool IdleTimerArmed () const;
@@ -1161,6 +1171,11 @@ protected:
   void OnMtuProbeTimeout (void);
   void OnMtuProbeAcked (void);
   bool m_closeNotified {false};       //!< The application was already told that the connection ended
+  EventId m_handshakeResendEvent;             //!< Client: repeats the Handshake packet until HANDSHAKE_DONE arrives
+  uint32_t m_handshakeResendCount {0};        //!< Client: times the Handshake packet was repeated (the backoff exponent)
+  bool m_handshakeResendPending {false};      //!< The next packet sent carries a Handshake header
+  bool m_handshakeDoneReceived {false};       //!< Client: HANDSHAKE_DONE arrived, the handshake is confirmed
+  static constexpr uint32_t kMaxHandshakeResends = 8;   //!< Handshake packets repeated before the client relies on the idle timeout
   // ACK frequency (draft-ietf-quic-ack-frequency), as msquic: always advertised, adjusted by the sender
   // ---- Connection ids and paths (RFC 9000 s5.1, s8.2, s9; msquic connection.c, path.c) ----
   /** A connection id and its sequence number, with the stateless reset token that goes with it */
