@@ -1095,11 +1095,7 @@ QuicSocketBase::SendPendingData (bool withAck)
 
   // the window may have shrunk since the tolerance was raised: the peer must keep acknowledging
   // several times per round trip
-  uint32_t toleranceLimit = AckToleranceLimit ();
-  if (m_peerAckTolerance > toleranceLimit)
-    {
-      UpdatePeerAckTolerance ((uint8_t) toleranceLimit);
-    }
+  ClampPeerAckTolerance ();
 
   if (m_txBuffer->AppSize () == 0)
     {
@@ -2008,6 +2004,8 @@ QuicSocketBase::ReTxTimeout ()
         }
       // Retransmit all lost packets immediately
       DoRetransmit (lostPackets);
+      // the loss shrank the window: the peer must not keep waiting for more packets than the window holds
+      ClampPeerAckTolerance ();
     }
   else if (m_tcb->m_alarmType == 2)
     {
@@ -4258,6 +4256,16 @@ QuicSocketBase::OnMtuProbeAcked (void)
       return;
     }
   StartMtuDiscovery ();
+}
+
+void
+QuicSocketBase::ClampPeerAckTolerance ()
+{
+  uint32_t limit = AckToleranceLimit ();
+  if (m_peerAckTolerance > limit)
+    {
+      UpdatePeerAckTolerance ((uint8_t) limit);
+    }
 }
 
 uint32_t
