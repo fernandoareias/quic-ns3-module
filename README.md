@@ -92,6 +92,7 @@ The frame layouts are those of RFC 9000 §19, and the first byte of the headers 
 - Migration is client-initiated only: no `preferred_address` and no multipath.
 - No keep-alive.
 - Loopback support requires special handling due to ns-3's UDP socket internals.
+- The Handshake packet of the client is sent once and is not retransmitted. A server stays in `CONNECTING_SVR` until it arrives and discards the 1-RTT packets that come before it, so if that one packet is lost the connection never delivers data (with 1% loss about 1 connection in 90 in the ErlDP mesh experiments).
 
 ## Original authors
 
