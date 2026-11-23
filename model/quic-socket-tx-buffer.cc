@@ -606,7 +606,9 @@ uint32_t QuicSocketTxBuffer::Retransmission (SequenceNumber32 packetNumber)
                   len = std::min<uint64_t> (len, pkt->GetSize ());
                   Ptr<Packet> data = CopyRange (pkt, 0, len);
                   pkt->RemoveAtStart (len);
+                  // RFC 9000 s13.3: RESET_STREAM and STOP_SENDING are sent again until they are acknowledged
                   if (!sub.IsStream () && !sub.IsMaxData () && !sub.IsMaxStreamData ()
+                      && !sub.IsRstStream () && !sub.IsStopSending ()
                       && !sub.IsBlocked () && !sub.IsStreamBlocked () && !sub.IsAckFrequency ()
                       && sub.GetFrameType () != QuicSubheader::MAX_STREAMS_BIDI && sub.GetFrameType () != QuicSubheader::MAX_STREAMS_UNI
                       && sub.GetFrameType () != QuicSubheader::STREAMS_BLOCKED_BIDI && sub.GetFrameType () != QuicSubheader::STREAMS_BLOCKED_UNI)
