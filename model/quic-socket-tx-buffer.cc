@@ -22,6 +22,10 @@ CopyRange (ns3::Ptr<ns3::Packet> p, uint32_t start, uint32_t len)
     {
       p->CopyData (all.data (), all.size ());
     }
+  if (len == 0)
+    {
+      return ns3::Create<ns3::Packet> ();
+    }
   return ns3::Create<ns3::Packet> (all.data () + start, len);
 }
 }

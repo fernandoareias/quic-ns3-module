@@ -419,7 +419,8 @@ QuicL5Protocol::DisgregateRecv (Ptr<Packet> data)
         {
           data->CopyData (frameBytes.data (), frameDataLen);
         }
-      Ptr<Packet> remainingfragment = Create<Packet> (frameBytes.data (), frameDataLen);
+      Ptr<Packet> remainingfragment = (frameDataLen > 0) ? Create<Packet> (frameBytes.data (), frameDataLen)
+                                                           : Create<Packet> ();
       NS_LOG_INFO ("fragment size " << remainingfragment->GetSize ());
 
       // remove the first portion of the packet
