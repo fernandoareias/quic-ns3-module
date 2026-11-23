@@ -158,8 +158,9 @@ QuicSocketBase::GetTypeId (void)
                    BooleanValue (false),
                    MakeBooleanAccessor (&QuicSocketBase::m_omit_connection_id),
                    MakeBooleanChecker ())
-    .AddAttribute ("MaxPacketSize", "Maximum Packet Size",
-                   UintegerValue (1460),
+    .AddAttribute ("MaxPacketSize", "Maximum Packet Size: the frames of a packet, without the QUIC header; "
+                   "1459 fills a 1500 byte IP MTU (20 IP + 8 UDP + 13 short header)",
+                   UintegerValue (1459),
                    MakeUintegerAccessor (&QuicSocketBase::GetSegSize,
                                          &QuicSocketBase::SetSegSize),
                    MakeUintegerChecker<uint16_t> ())

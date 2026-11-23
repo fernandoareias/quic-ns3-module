@@ -1596,8 +1596,8 @@ private:
     });
     Simulator::Stop (Seconds (15));
     Simulator::Run ();
-    uint32_t clientMtu = DynamicCast<QuicSocketBase> (m_client)->GetSegSize () + 40;
-    uint32_t serverMtu = DynamicCast<QuicSocketBase> (m_server)->GetSegSize () + 40;
+    uint32_t clientMtu = DynamicCast<QuicSocketBase> (m_client)->GetSegSize () + 41;
+    uint32_t serverMtu = DynamicCast<QuicSocketBase> (m_server)->GetSegSize () + 41;
     Simulator::Destroy ();
 
     NS_TEST_ASSERT_MSG_EQ (clientMtu, m_expectedMtu, "client path MTU");
@@ -2026,7 +2026,7 @@ private:
         NS_TEST_ASSERT_MSG_GT (m_cwndAfter, m_cwndBefore / 2, "a port-only rebind keeps the congestion window");
       }
     NS_TEST_ASSERT_MSG_EQ (validated, true, "the new path was never validated");
-    NS_TEST_ASSERT_MSG_EQ (seg, 1460u, "the new path did not rediscover its MTU");
+    NS_TEST_ASSERT_MSG_EQ (seg, 1459u, "the new path did not rediscover its MTU");
   }
 
   void Accept (Ptr<Socket> s, const Address &)

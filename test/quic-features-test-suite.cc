@@ -785,9 +785,9 @@ private:
     r.Run ();
     NS_TEST_ASSERT_MSG_EQ (r.rx[0][1].bytes, 3000000u, "all bytes delivered");
     uint32_t seg = DynamicCast<QuicSocketBase> (r.accepted[0])->GetSegSize ();
-    // segment size plus IPv4 (20), UDP (8) and the short QUIC header (12)
+    // segment size plus IPv4 (20), UDP (8) and the short QUIC header (13)
     NS_TEST_ASSERT_MSG_GT (g_featMaxIpBytes, seg, "the server must send (almost) full segments");
-    NS_TEST_ASSERT_MSG_LT_OR_EQ (g_featMaxIpBytes, seg + 40, "largest IP datagram the server handed to the link, segment " << seg);
+    NS_TEST_ASSERT_MSG_LT_OR_EQ (g_featMaxIpBytes, seg + 41, "largest IP datagram the server handed to the link, segment " << seg);
   }
 };
 

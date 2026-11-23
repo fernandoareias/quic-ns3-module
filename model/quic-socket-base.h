@@ -1165,7 +1165,7 @@ protected:
   bool m_pmtudSearchDone {true};      //!< Search finished or not started
   EventId m_pmtudTimeout;             //!< The outstanding probe is considered lost
   static constexpr uint32_t kPmtudInitialMtu = 1288;   //!< QUIC_DPLPMTUD_DEFAULT_MIN_MTU with IPv4 accounting
-  static constexpr uint32_t kPmtudOverhead = 40;       //!< IP MTU minus segment size
+  static constexpr uint32_t kPmtudOverhead = 41;       //!< IP MTU minus segment size: IP 20 + UDP 8 + short QUIC header 13
   void StartMtuDiscovery (void);
   void SendMtuProbe (void);
   void OnMtuProbeTimeout (void);

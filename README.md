@@ -86,14 +86,14 @@ The frame layouts are those of RFC 9000 §19, and the first byte of the headers 
 - **Persistent congestion** is detected as msquic does (a loss after more than 2 consecutive PTOs). The RFC 9002 §7.6 duration test is selected with `PersistentCongestionByPto=false`.
 - **ACK frequency** follows the ack-frequency draft as msquic does; it asks the peer for an ACK tolerance of up to 41 packets, beyond the one-ACK-per-two-packets of RFC 9000 §13.2.2.
 - No ECN marking (only the `ACK_ECN` counts are read) and no coalesced packets.
+- **Segment size.** `MaxPacketSize` counts the frames of a packet, without the QUIC header. The default of 1459 fills a 1500 byte IP MTU exactly (IPv4 20 + UDP 8 + short header 13); the path MTU discovery sizes segments as the IP MTU minus 41. A larger segment makes the IP layer fragment every full datagram.
+- **Handshake loss.** The Handshake packet of the client is what lets the server leave `CONNECTING_SVR`; the client repeats it (with a PING, in a Handshake header, with exponential backoff) until it receives HANDSHAKE_DONE (RFC 9001 §4.9.2). A server that is already open treats the repeated packet like any other and acknowledges it.
 
 ## Known limitations
 
 - Migration is client-initiated only: no `preferred_address` and no multipath.
 - No keep-alive.
 - Loopback support requires special handling due to ns-3's UDP socket internals.
-- With the default `MaxPacketSize` of 1460 a full datagram is the segment plus the 13 byte short QUIC header, 1473 bytes of UDP payload: 1 byte over a 1500 byte IP MTU. The IP layer fragments it, the reassembled datagram can arrive with its last byte overwritten, and when that byte ends an ACK frame the connection dies (after about 20 s at 30 thousand packets per second). Set `ns3::QuicSocketBase::MaxPacketSize` to 1459 on a 1500 byte link (the path MTU discovery sizes segments as the IP MTU minus 40, but the headers are 41 bytes).
-- The Handshake packet of the client is sent once and is not retransmitted. A server stays in `CONNECTING_SVR` until it arrives and discards the 1-RTT packets that come before it, so if that one packet is lost the connection never delivers data (with 1% loss about 1 connection in 90 in the ErlDP mesh experiments).
 
 ## Original authors
 
