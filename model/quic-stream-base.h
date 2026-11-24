@@ -261,7 +261,8 @@ class QuicStreamBase : public QuicStream
     Ptr<Node> m_node;                                 //!< The node this stream is associated with
     uint64_t m_connectionId;                          //!< The connection ID
     uint64_t m_streamId;                              //!< The stream ID
-    Ptr<QuicL5Protocol> m_quicl5; //!< The L5 Protocol this stack is associated with
+    QuicL5Protocol* m_quicl5; //!< The L5 Protocol this stack is associated with; not a Ptr, because
+                              //!< the L5 Protocol owns its streams (a Ptr here would be a cycle)
 
     // Flow Control Parameters
     uint64_t m_maxStreamData;        //!< Peer limit: highest stream offset we may send (absolute)

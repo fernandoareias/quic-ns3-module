@@ -1071,6 +1071,7 @@ QuicL4Protocol::DoDispose(void)
 {
     NS_LOG_FUNCTION(this);
     m_quicUdpBindingList.clear();
+    m_cidMap.clear();
 
     m_node = 0;
     //  m_downTarget.Nullify ();

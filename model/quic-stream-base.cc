@@ -105,13 +105,14 @@ QuicStreamBase::QuicStreamBase(void)
 QuicStreamBase::~QuicStreamBase(void)
 {
     NS_LOG_FUNCTION(this);
+    m_streamSendPendingDataEvent.Cancel();
 }
 
 void
 QuicStreamBase::SetQuicL5(Ptr<QuicL5Protocol> quicl5)
 {
     NS_LOG_FUNCTION(this);
-    m_quicl5 = quicl5;
+    m_quicl5 = PeekPointer(quicl5);
     SetStreamRcvBufSize(m_streamRxBufferSize);
     SetStreamSndBufSize(m_streamTxBufferSize);
 }

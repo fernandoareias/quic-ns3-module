@@ -198,7 +198,7 @@ void
 QuicL5Protocol::SetSocket(Ptr<QuicSocketBase> sock)
 {
     NS_LOG_FUNCTION(this);
-    m_socket = sock;
+    m_socket = PeekPointer(sock);
 }
 
 int

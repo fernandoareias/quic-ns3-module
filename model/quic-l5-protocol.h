@@ -323,10 +323,12 @@ class QuicL5Protocol : public Object
     uint64_t m_connRecvTotal{0};  //!< Sum of highest received stream offsets
     uint64_t m_connMaxAllowed{0}; //!< Advertised MAX_DATA (0: not yet initialised)
     bool m_socketTxFull{
-        false}; //!< A stream was refused by the full socket buffer and waits for room
-    Ptr<QuicSocketBase> m_socket; //!< The Quic socket this stack is associated with
-    Ptr<Node> m_node;             //!< The node this stack is associated with
-    uint64_t m_connectionId;      //!< The connection id this stack is associated with
+        false};               //!< A stream was refused by the full socket buffer and waits for room
+    QuicSocketBase* m_socket; //!< The Quic socket this stack is associated with; not a Ptr, because
+                              //!< the socket owns this stack and a Ptr here would be a cycle that
+                              //!< keeps both alive for good
+    Ptr<Node> m_node;         //!< The node this stack is associated with
+    uint64_t m_connectionId;  //!< The connection id this stack is associated with
     std::vector<Ptr<QuicStreamBase>>
         m_streams; //!< The streams this stack is associated with (handshake first)
     std::map<uint64_t, Ptr<QuicStreamBase>> m_streamById; //!< The streams by RFC 9000 stream id

@@ -771,9 +771,22 @@ QuicSocketBase::~QuicSocketBase(void)
         NS_ASSERT(m_endPoint6 == nullptr);
     }
     m_quicl4 = 0;
-    // CancelAllTimers ();
+    // the timers hold this pointer without a reference
     m_pacingTimer.Cancel();
     m_handshakeResendEvent.Cancel();
+    m_sendPendingDataEvent.Cancel();
+    m_retxEvent.Cancel();
+    m_keepAliveEvent.Cancel();
+    m_idleTimeoutEvent.Cancel();
+    m_drainingPeriodEvent.Cancel();
+    m_sendAckEvent.Cancel();
+    m_delAckEvent.Cancel();
+    m_pmtudTimeout.Cancel();
+    m_pathTimer.Cancel();
+    if (m_tcb != nullptr)
+    {
+        m_tcb->m_lossDetectionAlarm.Cancel();
+    }
 }
 
 /* Inherit from Socket class: Bind socket to an end-point in QuicL4Protocol */
@@ -1916,7 +1929,7 @@ QuicSocketBase::EnterDraining()
     SetState(CLOSING);
     m_drainingPeriodEvent = Simulator::Schedule(ClosingPeriod(), &QuicSocketBase::DoClose, this);
     // the application hears of the close right away, outside the frame being processed
-    Simulator::ScheduleNow(&QuicSocketBase::NotifyClosedByPeer, this);
+    Simulator::ScheduleNow(&QuicSocketBase::NotifyClosedByPeer, Ptr<QuicSocketBase>(this));
 }
 
 void
@@ -1958,7 +1971,7 @@ QuicSocketBase::IdleTimeoutExpired()
         {
             NotifyConnectionFailed();
         }
-        Simulator::ScheduleNow(&QuicSocketBase::DoClose, this);
+        Simulator::ScheduleNow(&QuicSocketBase::DoClose, Ptr<QuicSocketBase>(this));
         return;
     }
     Close();
@@ -2170,7 +2183,7 @@ QuicSocketBase::ReTxTimeout()
             m_closeNotified = true;
             NotifyErrorClose();
             // Schedule final teardown; ScheduleNow avoids re-entrancy from callbacks
-            Simulator::ScheduleNow(&QuicSocketBase::DoClose, this);
+            Simulator::ScheduleNow(&QuicSocketBase::DoClose, Ptr<QuicSocketBase>(this));
             return;
         }
     }
@@ -2311,7 +2324,9 @@ QuicSocketBase::Close(void)
         {
             m_closeOnEmpty = true;
             // an idle connection has nothing that would bring the close along: look at it now
-            Simulator::ScheduleNow(&QuicSocketBase::SendPendingData, this, m_connected);
+            Simulator::ScheduleNow(&QuicSocketBase::SendPendingData,
+                                   Ptr<QuicSocketBase>(this),
+                                   m_connected);
         }
         else
         {
@@ -3519,7 +3534,7 @@ QuicSocketBase::DoFastConnect(void)
     {
         m_zeroRttConnect = true;
         SetState(OPEN);
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, this);
+        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
         m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
         QuicHeader q;
         SendInitialHandshake(QuicHeader::ZRTT_PROTECTED, q, 0);
@@ -3637,7 +3652,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Addres
         m_keyPhase == QuicHeader::PHASE_ONE ? m_keyPhase = QuicHeader::PHASE_ZERO
                                             : m_keyPhase = QuicHeader::PHASE_ONE;
         SetState(OPEN);
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, this);
+        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
         m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
         // each frame of the client's first flight is a packet of its own (the first one carries the
         // 0-RTT header), so the transport parameters may come in a later packet: they are looked
@@ -3699,7 +3714,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Addres
         DiscardInitialPacketSpace(); // RFC 9002 §9.1: discard Initial on first Handshake recv
         SetState(OPEN);
         DiscardHandshakePacketSpace(); // RFC 9002 §9.1: discard Handshake on reaching OPEN
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, this);
+        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
         m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
         m_couldContainTransportParameters = false;
 
@@ -3722,7 +3737,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Addres
         DiscardInitialPacketSpace();        // RFC 9002 §9.1: discard Initial on Handshake recv
         SetState(OPEN);
         DiscardHandshakePacketSpace(); // RFC 9002 §9.1: discard Handshake on reaching OPEN
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, this);
+        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
         m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
         // RFC 9000 s19.20: the server sends HANDSHAKE_DONE; like every frame but ACK and PADDING it
         // is retransmitted if its packet is lost (RFC 9000 s13.3), so it goes through the transmit
@@ -3929,7 +3944,7 @@ QuicSocketBase::SetState(TracedValue<QuicStates_t> newstate)
     if (newstate == OPEN && m_pmtudEnabled && !m_pmtudSearchDone &&
         m_pmtudMaxSeg > m_tcb->m_segmentSize)
     {
-        Simulator::ScheduleNow(&QuicSocketBase::StartMtuDiscovery, this);
+        Simulator::ScheduleNow(&QuicSocketBase::StartMtuDiscovery, Ptr<QuicSocketBase>(this));
     }
     // a 0-RTT server is open before the client's transport parameters have arrived: it holds the
     // writes until then
@@ -3940,7 +3955,7 @@ QuicSocketBase::SetState(TracedValue<QuicStates_t> newstate)
     if (newstate == OPEN && m_closeAfterHandshake)
     {
         m_closeAfterHandshake = false;
-        Simulator::ScheduleNow(&QuicSocketBase::Close, this);
+        Simulator::ScheduleNow(&QuicSocketBase::Close, Ptr<QuicSocketBase>(this));
     }
 }
 
@@ -4493,7 +4508,7 @@ QuicSocketBase::HandleStatelessReset(void)
     SetState(CLOSING);
     m_closeNotified = true;
     NotifyErrorClose();
-    Simulator::ScheduleNow(&QuicSocketBase::DoClose, this);
+    Simulator::ScheduleNow(&QuicSocketBase::DoClose, Ptr<QuicSocketBase>(this));
 }
 
 bool
@@ -4893,7 +4908,7 @@ QuicSocketBase::OnPathValidationTimer(void)
                 SetState(CLOSING);
                 m_closeNotified = true;
                 NotifyErrorClose();
-                Simulator::ScheduleNow(&QuicSocketBase::DoClose, this);
+                Simulator::ScheduleNow(&QuicSocketBase::DoClose, Ptr<QuicSocketBase>(this));
                 return;
             }
             RemovePath(i);
@@ -4933,7 +4948,7 @@ QuicSocketBase::SetPathValid(QuicPath& path)
     {
         // msquic QuicMtuDiscoveryPeerValidated: the validated active path searches its MTU again
         m_pmtudSearchDone = false;
-        Simulator::ScheduleNow(&QuicSocketBase::StartMtuDiscovery, this);
+        Simulator::ScheduleNow(&QuicSocketBase::StartMtuDiscovery, Ptr<QuicSocketBase>(this));
         if (m_sendPendingDataEvent.IsExpired())
         {
             m_sendPendingDataEvent = Simulator::Schedule(TimeStep(1),
@@ -4993,7 +5008,7 @@ QuicSocketBase::ActivatePath(size_t index)
     if (now.validated)
     {
         m_pmtudSearchDone = false;
-        Simulator::ScheduleNow(&QuicSocketBase::StartMtuDiscovery, this);
+        Simulator::ScheduleNow(&QuicSocketBase::StartMtuDiscovery, Ptr<QuicSocketBase>(this));
     }
     if (m_sendPendingDataEvent.IsExpired())
     {
