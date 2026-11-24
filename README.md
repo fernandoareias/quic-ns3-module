@@ -103,7 +103,7 @@ The frame layouts are those of RFC 9000 §19, and the first byte of the headers 
 - Migration is client-initiated only: no `preferred_address` and no multipath.
 - **Handshake under heavy loss.** The client repeats its Initial with exponential backoff (about 0.1, 1.1, 3.1, 7.1 and 15.1 s after the start) and gives up when the idle timeout (30 s) expires without an answer: the connection fails, the application hears of it through the connect-failed callback, and nothing more is sent (RFC 9000 s10.1). With a loss rate `L` in both directions the chance of that is roughly `(1 - (1 - L)^2)^5`: 0.03% with 10% loss, 0.2% with 15%, 0.6% with 20%, 3.5% with 30% (40 seeds of `quic-loss-stress` at 10, 15, 20, 25 and 30% lost 0, 0, 1, 1 and 1 connections, always the seed whose first five Initials were lost). A shorter idle timeout or a slower backoff would change the chance; the module follows RFC 9002 s6.2.
 - **Closing.** A connection closed by the application or by the idle timeout stays in the closing state for three PTOs (RFC 9000 s10.1, s10.2.1), answering the packets of the peer with CONNECTION_CLOSE, as a connection closed by the peer drains for three PTOs.
-- No keep-alive.
+- **Keep-alive.** Off by default. `KeepAliveInterval` (a `Time`, 0 disables it) sends a PING after that long without receiving a packet; the answer restarts the idle timers of both ends, so a silent connection does not close at the idle timeout. It has no effect when it is not shorter than the idle timeout, and an unreachable peer is still detected (the PING is lost, the probes follow, and the idle timeout or the disconnect timeout closes the connection).
 - Loopback support requires special handling due to ns-3's UDP socket internals.
 
 ## Original authors

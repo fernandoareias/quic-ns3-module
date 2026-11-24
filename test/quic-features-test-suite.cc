@@ -2073,6 +2073,51 @@ class FeatClosingRepeatTest : public TestCase
 };
 
 /**
+ * RFC 9000 s10.1.2: without traffic both idle timers expire and the connection closes; a PING every
+ * KeepAliveInterval of silence makes the peer answer, which restarts both timers.
+ */
+class FeatKeepAliveTest : public TestCase
+{
+  public:
+    FeatKeepAliveTest(std::string name, double keepAlive)
+        : TestCase(name),
+          m_keepAlive(keepAlive)
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        FeatRig r;
+        r.serverStreams = 0;
+        r.serverCloses = false;
+        r.stopAt = Seconds(60);
+        r.Build();
+        r.listen->SetAttribute("IdleTimeout", TimeValue(Seconds(5)));
+        r.clients[0]->SetAttribute("IdleTimeout", TimeValue(Seconds(5)));
+        r.clients[0]->SetAttribute("KeepAliveInterval", TimeValue(Seconds(m_keepAlive)));
+        Simulator::Schedule(Seconds(50), [this, &r]() {
+            m_clientOpen = FeatQuic(r.clients[0])->GetSocketState() == QuicSocketBase::OPEN;
+            m_serverOpen = FeatQuic(r.accepted[0])->GetSocketState() == QuicSocketBase::OPEN;
+        });
+        r.Run();
+        const bool kept = m_keepAlive > 0;
+        NS_TEST_ASSERT_MSG_EQ(m_clientOpen,
+                              kept,
+                              "the client is " << (m_clientOpen ? "open" : "closed")
+                                               << " after 50 s of silence");
+        NS_TEST_ASSERT_MSG_EQ(m_serverOpen,
+                              kept,
+                              "the server is " << (m_serverOpen ? "open" : "closed")
+                                               << " after 50 s of silence");
+    }
+
+    double m_keepAlive;
+    bool m_clientOpen{false};
+    bool m_serverOpen{false};
+};
+
+/**
  * RFC 9000 s10.1: a handshake that gets no answer for the idle timeout is abandoned. Close() used
  * to treat the expiry as the application's close and kept retransmitting the Initial: a server that
  * answered after the timeout completed a handshake that then closed at once. The connection now
@@ -2631,6 +2676,15 @@ class QuicFeaturesTestSuite : public TestSuite
         AddTestCase(new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatClosingRepeatTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatHandshakeTimeoutTest, TestCase::Duration::QUICK);
+        AddTestCase(
+            new FeatKeepAliveTest("keep-alive: a silent connection closes at the idle timeout "
+                                  "without it (RFC 9000 s10.1)",
+                                  0),
+            TestCase::Duration::QUICK);
+        AddTestCase(new FeatKeepAliveTest("keep-alive: a PING every 2 s keeps a silent connection "
+                                          "open with a 5 s idle timeout (RFC 9000 s10.1.2)",
+                                          2),
+                    TestCase::Duration::QUICK);
         AddTestCase(new FeatBbrProbeRttTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatIdleCloseTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatZeroRttTest(false), TestCase::Duration::QUICK);

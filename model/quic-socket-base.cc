@@ -133,6 +133,13 @@ QuicSocketBase::GetTypeId(void)
                           TimeValue(Seconds(30)),
                           MakeTimeAccessor(&QuicSocketBase::m_idleTimeout),
                           MakeTimeChecker())
+            .AddAttribute("KeepAliveInterval",
+                          "Send a PING after this long without receiving a packet, so that the "
+                          "idle timers of both ends do not close a silent connection (0 disables "
+                          "it; msquic: KeepAliveIntervalMs)",
+                          TimeValue(Seconds(0)),
+                          MakeTimeAccessor(&QuicSocketBase::m_keepAliveInterval),
+                          MakeTimeChecker())
             .AddAttribute("DisconnectTimeout",
                           "Close the connection after this long without ACK progress while probing "
                           "(msquic: 16 s)",
@@ -578,6 +585,7 @@ QuicSocketBase::QuicSocketBase(void)
       m_max_data(0),
       m_initial_max_stream_id_bidi(0),
       m_idleTimeout(Seconds(300.0)),
+      m_keepAliveInterval(Seconds(0)),
       m_omit_connection_id(false),
       m_ack_delay_exponent(3),
       m_initial_max_stream_id_uni(0),
@@ -676,6 +684,7 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
       m_max_data(sock.m_max_data),
       m_initial_max_stream_id_bidi(sock.m_initial_max_stream_id_bidi),
       m_idleTimeout(sock.m_idleTimeout),
+      m_keepAliveInterval(sock.m_keepAliveInterval),
       m_omit_connection_id(sock.m_omit_connection_id),
       m_ack_delay_exponent(sock.m_ack_delay_exponent),
       m_disableActiveMigration(sock.m_disableActiveMigration),
@@ -1969,6 +1978,23 @@ QuicSocketBase::ArmIdleTimer()
     NS_LOG_LOGIC(this << " idle timer set at time " << Simulator::Now().GetSeconds()
                       << " to expire at time " << (Simulator::Now() + timeout).GetSeconds());
     m_idleTimeoutEvent = Simulator::Schedule(timeout, &QuicSocketBase::IdleTimeoutExpired, this);
+    m_keepAliveEvent.Cancel();
+    if (m_keepAliveInterval.IsStrictlyPositive() && m_keepAliveInterval < timeout)
+    {
+        m_keepAliveEvent =
+            Simulator::Schedule(m_keepAliveInterval, &QuicSocketBase::SendKeepAlive, this);
+    }
+}
+
+void
+QuicSocketBase::SendKeepAlive()
+{
+    if (m_socketState != OPEN || m_drainingPeriodEvent.IsPending())
+    {
+        return;
+    }
+    NS_LOG_INFO(this << " keep-alive PING at " << Simulator::Now().GetSeconds());
+    SendControlFrame(QuicSubheader::CreatePing());
 }
 
 void
@@ -3528,6 +3554,7 @@ QuicSocketBase::DoClose(void)
     NS_LOG_FUNCTION(this);
     NS_LOG_INFO(this << " DoClose at time " << Simulator::Now().GetSeconds());
 
+    m_keepAliveEvent.Cancel();
     if (m_socketState != IDLE)
     {
         SetState(IDLE);

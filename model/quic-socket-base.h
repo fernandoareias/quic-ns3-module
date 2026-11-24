@@ -1102,6 +1102,12 @@ class QuicSocketBase : public QuicSocket
     void IdleTimeoutExpired();
 
     /**
+     * Send a PING on an otherwise silent connection, so that the idle timers of both ends are
+     * restarted by the answer (RFC 9000 s10.1.2).
+     */
+    void SendKeepAlive();
+
+    /**
      * \brief Record a received packet number and, when it is the largest, its arrival time
      * \param packetNumber the packet number
      */
@@ -1503,6 +1509,8 @@ class QuicSocketBase : public QuicSocket
                                            //!< bidirectional streams the peer may initiate
     TracedValue<Time> m_idleTimeout; //!< Idle timeout; 0 disables it (the negotiated value once the
                                      //!< transport parameters are in)
+    Time m_keepAliveInterval;  //!< Time without a received packet after which a PING is sent; 0
+                               //!< disables the keep-alive
     bool m_omit_connection_id; //!< The flag that indicates if the connection id is required in the
                                //!< upcoming connection
     /*uint128_t  m_stateless_reset_token;*/ //!< The stateless reset token
@@ -1528,6 +1536,7 @@ class QuicSocketBase : public QuicSocket
     // Timers and Events
     EventId m_sendPendingDataEvent; //!< Micro-delay event to send pending data
     EventId m_retxEvent;            //!< Retransmission event
+    EventId m_keepAliveEvent;       //!< Event that sends the keep-alive PING
     EventId m_idleTimeoutEvent;     //!< Event triggered upon receiving or sending a packet, when it
                                     //!< expires the connection closes
     EventId m_drainingPeriodEvent;  //!< Event triggered upon idle timeout or immediate connection
