@@ -124,6 +124,7 @@ main(int argc, char* argv[])
     uint32_t maxStreamData = 0;
     uint32_t maxData = 0;
     bool zrtt = false;
+    bool vn = false;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("loss", "Packet loss probability (burst start probability with --burst)", loss);
@@ -138,6 +139,7 @@ main(int argc, char* argv[])
     cmd.AddValue("cc", "Congestion control TypeId", cc);
     cmd.AddValue("msd", "MaxStreamData, 0 keeps the default", maxStreamData);
     cmd.AddValue("md", "MaxData, 0 keeps the default", maxData);
+    cmd.AddValue("vn", "The client proposes a reserved version, which costs a Version Negotiation round trip", vn);
     cmd.AddValue("zrtt", "Warm up with a first connection, then transfer over a 0-RTT connection", zrtt);
     cmd.Parse(argc, argv);
 
@@ -196,8 +198,13 @@ main(int argc, char* argv[])
     listener->Listen();
     listener->SetAcceptCallback(MakeNullCallback<bool, Ptr<Socket>, const Address&>(),
                                 MakeCallback(&Accepted));
-    auto startClient = [&nodes, &factory, &interfaces]() {
+    auto startClient = [&nodes, &factory, &interfaces, vn]() {
         Ptr<Socket> client = Socket::CreateSocket(nodes.Get(1), factory);
+        if (vn)
+        {
+            // only the client proposes it: the server must answer with its list of versions
+            client->SetAttribute("InitialVersion", UintegerValue(0x2a3a4a5a));
+        }
         client->SetRecvCallback(MakeBoundCallback(&Drain, &g_clientRx));
         client->SetConnectCallback(MakeCallback(&Connected), MakeNullCallback<void, Ptr<Socket>>());
         client->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
