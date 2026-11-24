@@ -1748,6 +1748,97 @@ private:
 };
 
 /**
+ * RFC 9000 s7.4.1 and s4.6: a client that connects again to a server it knows sends 0-RTT data within the limits the server
+ * announced the last time. The second connection of this test writes at the instant it connects and has to deliver its
+ * data both ways, much sooner than a full handshake would allow; with the first packet lost, the packets that follow
+ * must still be 0-RTT packets, because the server only learns of the connection from one of them.
+ */
+class FeatZeroRttTest : public TestCase
+{
+public:
+  FeatZeroRttTest (bool dropFirst)
+    : TestCase (dropFirst ? "0-RTT: the connection is made even when the first packet is lost (RFC 9000 s7.4.1)"
+                          : "0-RTT: data goes both ways from the first flight (RFC 9000 s7.4.1)"),
+      m_dropFirst (dropFirst) {}
+private:
+  static constexpr uint64_t kClientBytes = 5000;
+  static constexpr uint64_t kServerBytes = 20000;
+  void DoRun () override
+  {
+    FeatRig r;
+    r.serverStreams = 0;
+    r.serverCloses = false;
+    r.stopAt = Seconds (60);
+    r.onAccept = [this] (Ptr<Socket> s) {
+      s->SetRecvCallback (MakeCallback (&FeatZeroRttTest::ServerRead, this));
+      if (m_second)
+        {
+          FeatRig::SendPattern (s, ServerStreamId (1), kServerBytes);
+        }
+    };
+    r.Build ();
+    m_drop = CreateObject<FeatDropNth> ();
+    r.dev.Get (0)->SetAttribute ("ReceiveErrorModel", PointerValue (m_drop));
+    Ptr<Socket> second;
+    // the first connection moves no data and is closed: the client now knows the server and the server the client
+    Simulator::Schedule (Seconds (2), [&r] () { r.clients[0]->Close (); });
+    Simulator::Schedule (Seconds (40), [this, &r, &second] () {
+      m_second = true;
+      r.nodes.Get (1)->GetObject<QuicL4Protocol> ()->SetAttribute ("0RTT-Handshake", BooleanValue (true));
+      r.nodes.Get (0)->GetObject<QuicL4Protocol> ()->SetAttribute ("0RTT-Handshake", BooleanValue (true));
+      second = Socket::CreateSocket (r.nodes.Get (1), QuicSocketFactory::GetTypeId ());
+      second->SetRecvCallback (MakeCallback (&FeatZeroRttTest::ClientRead, this));
+      if (m_dropFirst)
+        {
+          m_drop->m_target = m_drop->m_seen;
+        }
+      m_start = Simulator::Now ();
+      second->Connect (InetSocketAddress (r.serverAddr, 4433));
+      FeatRig::SendPattern (second, 0, kClientBytes);
+    });
+    r.Run ();
+    NS_TEST_ASSERT_MSG_EQ (m_serverRx, kClientBytes, "the client's 0-RTT data reached the server");
+    NS_TEST_ASSERT_MSG_EQ (m_clientRx, kServerBytes, "the server's data reached the client");
+    if (!m_dropFirst)
+      {
+        // one way is 20 ms: a full handshake delivers nothing before 60 ms, 0-RTT data arrives after about 20 ms
+        NS_TEST_ASSERT_MSG_LT ((m_firstServerRx - m_start).GetMilliSeconds (), 50, "the first data reached the server at "
+                               << (m_firstServerRx - m_start).GetMilliSeconds () << " ms");
+      }
+  }
+  void ServerRead (Ptr<Socket> s)
+  {
+    Ptr<Packet> p;
+    while ((p = s->Recv ()) && p->GetSize () > 0)
+      {
+        if (m_second)
+          {
+            if (m_serverRx == 0)
+              {
+                m_firstServerRx = Simulator::Now ();
+              }
+            m_serverRx += p->GetSize ();
+          }
+      }
+  }
+  void ClientRead (Ptr<Socket> s)
+  {
+    Ptr<Packet> p;
+    while ((p = s->Recv ()) && p->GetSize () > 0)
+      {
+        m_clientRx += p->GetSize ();
+      }
+  }
+  bool m_dropFirst;
+  bool m_second {false};
+  Ptr<FeatDropNth> m_drop;
+  Time m_start {Seconds (0)};
+  Time m_firstServerRx {Seconds (0)};
+  uint64_t m_serverRx {0};
+  uint64_t m_clientRx {0};
+};
+
+/**
  * RFC 9000 s6, s17.2.1: the Version Negotiation packet lists the versions in network byte order, and a client that
  * proposed an unknown version carries on with one of them.
  */
@@ -1878,6 +1969,8 @@ public:
     AddTestCase (new FeatHandshakeDoneRetransmitTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClosingRepeatTest, TestCase::Duration::QUICK);
+    AddTestCase (new FeatZeroRttTest (false), TestCase::Duration::QUICK);
+    AddTestCase (new FeatZeroRttTest (true), TestCase::Duration::QUICK);
     AddTestCase (new FeatVersionNegotiationTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatTransportParameterRangeTest (20, true), TestCase::Duration::QUICK);
     AddTestCase (new FeatTransportParameterRangeTest (25, false), TestCase::Duration::QUICK);

@@ -20,6 +20,7 @@
 #include "ns3/sequence-number.h"
 #include "ns3/ip-l4-protocol.h"
 #include "quic-header.h"
+#include "quic-transport-parameters.h"
 #include "ns3/socket.h"
 
 namespace ns3 {
@@ -230,6 +231,26 @@ public:
    * \return The authenticated addresses vector for this L4 Protocol
    */
   const std::vector<Address >& GetAuthAddresses () const;
+
+  /**
+   * \brief Remember the transport parameters a server announced (RFC 9000 s7.4.1)
+   *
+   * A client that connects to the same server again with 0-RTT data uses them, as it has not yet heard from the
+   * server and cannot open a stream without knowing its limits.
+   *
+   * \param server the address of the server
+   * \param parameters the parameters the server announced
+   */
+  void RememberServerParameters (Ipv4Address server, const QuicTransportParameters &parameters);
+
+  /**
+   * \brief The transport parameters remembered for a server
+   *
+   * \param server the address of the server
+   * \param parameters the parameters, when there are any
+   * \return true if parameters were remembered for this server
+   */
+  bool GetRememberedParameters (Ipv4Address server, QuicTransportParameters &parameters) const;
 
   /**
    * \brief This method is called by the underlying UDP socket upon receiving a packet
@@ -507,6 +528,7 @@ private:
   std::map <Ptr<Socket>, Callback<void, Ptr<Packet>, const QuicHeader&, Address& > > m_socketHandlers;  //!< Callback handlers for sockets
 
   std::vector<Address > m_authAddresses;    //!< Authenticated addresses for this L4 Protocol
+  std::map<Ipv4Address, QuicTransportParameters> m_rememberedParameters; //!< Parameters announced by servers this stack connected to
   std::map<uint64_t, Ptr<QuicSocketBase> > m_cidMap;  //!< Connection id -> connection (every id issued to a peer)
   uint64_t m_resetKeyA {0};                 //!< Secret of the stateless reset token function
   uint64_t m_resetKeyB {0};                 //!< Secret of the stateless reset token function

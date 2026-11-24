@@ -487,6 +487,24 @@ QuicL4Protocol::GetAuthAddresses () const
   return m_authAddresses;
 }
 
+void
+QuicL4Protocol::RememberServerParameters (Ipv4Address server, const QuicTransportParameters &parameters)
+{
+  m_rememberedParameters[server] = parameters;
+}
+
+bool
+QuicL4Protocol::GetRememberedParameters (Ipv4Address server, QuicTransportParameters &parameters) const
+{
+  auto it = m_rememberedParameters.find (server);
+  if (it == m_rememberedParameters.end ())
+    {
+      return false;
+    }
+  parameters = it->second;
+  return true;
+}
+
 Ptr<QuicSocketBase>
 QuicL4Protocol::FindListener (Ptr<Socket> udpSocket) const
 {

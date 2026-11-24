@@ -31,6 +31,7 @@
 #include "ns3/network-module.h"
 #include "ns3/point-to-point-module.h"
 #include "ns3/quic-helper.h"
+#include "ns3/quic-l4-protocol.h"
 #include "ns3/quic-socket-base.h"
 #include "ns3/quic-socket-factory.h"
 
@@ -48,6 +49,7 @@ uint64_t g_serverRx = 0;            //!< bytes the server received
 uint64_t g_clientRx = 0;            //!< bytes the client received
 std::vector<uint64_t> g_clientSent; //!< bytes the client wrote, per stream
 std::vector<uint64_t> g_serverSent; //!< bytes the server wrote, per stream
+bool g_transfer = true;             //!< false during the warm-up connection of --zrtt, which moves no data
 
 void
 Drain(uint64_t* counter, Ptr<Socket> socket)
@@ -81,6 +83,10 @@ void
 Accepted(Ptr<Socket> socket, const Address&)
 {
     socket->SetRecvCallback(MakeBoundCallback(&Drain, &g_serverRx));
+    if (!g_transfer)
+    {
+        return;
+    }
     g_serverSent.assign(g_streams, 0);
     for (uint32_t i = 0; i < g_streams; ++i)
     {
@@ -91,6 +97,10 @@ Accepted(Ptr<Socket> socket, const Address&)
 void
 Connected(Ptr<Socket> socket)
 {
+    if (!g_transfer)
+    {
+        return;
+    }
     g_clientSent.assign(g_streams, 0);
     for (uint32_t i = 0; i < g_streams; ++i)
     {
@@ -113,6 +123,7 @@ main(int argc, char* argv[])
     std::string cc = "ns3::QuicCubic";
     uint32_t maxStreamData = 0;
     uint32_t maxData = 0;
+    bool zrtt = false;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("loss", "Packet loss probability (burst start probability with --burst)", loss);
@@ -127,6 +138,7 @@ main(int argc, char* argv[])
     cmd.AddValue("cc", "Congestion control TypeId", cc);
     cmd.AddValue("msd", "MaxStreamData, 0 keeps the default", maxStreamData);
     cmd.AddValue("md", "MaxData, 0 keeps the default", maxData);
+    cmd.AddValue("zrtt", "Warm up with a first connection, then transfer over a 0-RTT connection", zrtt);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(7);
@@ -184,12 +196,33 @@ main(int argc, char* argv[])
     listener->Listen();
     listener->SetAcceptCallback(MakeNullCallback<bool, Ptr<Socket>, const Address&>(),
                                 MakeCallback(&Accepted));
-    Ptr<Socket> client = Socket::CreateSocket(nodes.Get(1), factory);
-    client->SetRecvCallback(MakeBoundCallback(&Drain, &g_clientRx));
-    client->SetConnectCallback(MakeCallback(&Connected), MakeNullCallback<void, Ptr<Socket>>());
-    Simulator::Schedule(Seconds(0.1), [client, &interfaces]() {
+    auto startClient = [&nodes, &factory, &interfaces]() {
+        Ptr<Socket> client = Socket::CreateSocket(nodes.Get(1), factory);
+        client->SetRecvCallback(MakeBoundCallback(&Drain, &g_clientRx));
+        client->SetConnectCallback(MakeCallback(&Connected), MakeNullCallback<void, Ptr<Socket>>());
         client->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
-    });
+        return client;
+    };
+    Ptr<Socket> client;
+    if (zrtt)
+    {
+        // the server learns the client address in a first connection that moves no data, and the second one
+        // starts with 0-RTT data
+        g_transfer = false;
+        Simulator::Schedule(Seconds(0.1), [&client, &startClient]() { client = startClient(); });
+        Simulator::Schedule(Seconds(2.0), [&client]() { client->Close(); });
+        Simulator::Schedule(Seconds(40.0), [&nodes, &client, &startClient]() {
+            g_transfer = true;
+            // the client sends 0-RTT data and the server accepts it: both stacks have to allow it
+            nodes.Get(1)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake", BooleanValue(true));
+            nodes.Get(0)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake", BooleanValue(true));
+            client = startClient();
+        });
+    }
+    else
+    {
+        Simulator::Schedule(Seconds(0.1), [&client, &startClient]() { client = startClient(); });
+    }
 
     Simulator::Stop(Seconds(stop));
     Simulator::Run();

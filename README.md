@@ -67,7 +67,7 @@ Ptr<Socket> socket = Socket::CreateSocket(node, QuicSocketFactory::GetTypeId());
 
 ## Loss stress test
 
-`examples/quic-loss-stress.cc` moves `--bytes` bytes on each of `--nstreams` streams in both directions over a link with random loss and exits with 0 only if every byte arrives. Looping it over `--run`, `--loss`, `--rate`, `--delay`, `--cc` (`ns3::QuicCubic`, `ns3::QuicBbr`, `ns3::QuicCongestionControl`), `--msd` and `--md` (the flow-control windows) exercises the loss recovery and the connection set-up: uniform loss up to 15 %, 1 to 4 streams, several links and all three congestion controls complete in every run. `--burst` uses the ns-3 `BurstErrorModel`, which counts packets and not time, so with few packets on the link one burst can last for seconds and a failure at a high burst rate does not point at the protocol.
+`examples/quic-loss-stress.cc` moves `--bytes` bytes on each of `--nstreams` streams in both directions over a link with random loss and exits with 0 only if every byte arrives. Looping it over `--run`, `--loss`, `--rate`, `--delay`, `--zrtt` (a warm-up connection, then a transfer that starts with 0-RTT data), `--cc` (`ns3::QuicCubic`, `ns3::QuicBbr`, `ns3::QuicCongestionControl`), `--msd` and `--md` (the flow-control windows) exercises the loss recovery and the connection set-up: uniform loss up to 15 %, 1 to 4 streams, several links and all three congestion controls complete in every run. `--burst` uses the ns-3 `BurstErrorModel`, which counts packets and not time, so with few packets on the link one burst can last for seconds and a failure at a high burst rate does not point at the protocol.
 
 ```bash
 ./ns3 run "quic-loss-stress --loss=0.05 --run=7 --nstreams=3 --bytes=200000 --cc=ns3::QuicBbr"
@@ -96,6 +96,7 @@ The frame layouts are those of RFC 9000 §19, and the first byte of the headers 
 - No ECN marking (only the `ACK_ECN` counts are read) and no coalesced packets.
 - **Segment size.** `MaxPacketSize` counts the frames of a packet, without the QUIC header. The default of 1459 fills a 1500 byte IP MTU exactly (IPv4 20 + UDP 8 + short header 13); the path MTU discovery sizes segments as the IP MTU minus 41. A larger segment makes the IP layer fragment every full datagram.
 - **Handshake loss.** The Handshake packet of the client is what lets the server leave `CONNECTING_SVR`; the client repeats it (with a PING, in a Handshake header, with exponential backoff) until it receives HANDSHAKE_DONE (RFC 9001 §4.9.2). A server that is already open treats the repeated packet like any other and acknowledges it.
+- **0-RTT.** With `QuicL4Protocol::0RTT-Handshake` on, a client that already connected to a server sends 0-RTT data right away, within the transport parameters the server announced the last time (kept by the client's `QuicL4Protocol`, RFC 9000 s7.4.1; without them it could not open a stream). Every packet of the client carries a 0-RTT header until the first answer arrives, so a lost first packet does not leave the server without a connection, and a server that has not yet received the client's parameters holds the writes of its application until it has. The server's stack must allow 0-RTT too (`0RTT-Handshake` on both nodes, as `quic-loss-stress --zrtt` does).
 
 ## Known limitations
 

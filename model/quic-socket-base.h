@@ -376,6 +376,15 @@ public:
   void OnReceivedTransportParameters (QuicTransportParameters transportParameters);
 
   /**
+   * Take the limits on what this endpoint sends from the transport parameters of the peer
+   * \param transportParameters the parameters the peer announced, or those remembered from an earlier connection
+   */
+  void ApplyPeerLimits (const QuicTransportParameters &transportParameters);
+
+  /** Send the writes the application made before the connection could carry them */
+  void FlushPendingWrites ();
+
+  /**
    * \brief Add a stream frame to the TX buffer and call SendPendingData
    *
    * \param frame a smart pointer to a packet
@@ -1173,6 +1182,7 @@ protected:
   bool m_closeNotified {false};       //!< The application was already told that the connection ended
   bool m_closePacketSent {false};     //!< A CONNECTION_CLOSE left after a local close: the closing state of RFC 9000 s10.2.1
   uint32_t m_closingPacketsReceived {0};   //!< Packets received while closing, to pace the repeats of CONNECTION_CLOSE
+  Address m_connectAddress;                   //!< Address a client connected to, to look up the parameters remembered for it
   EventId m_handshakeResendEvent;             //!< Client: repeats the Handshake packet until HANDSHAKE_DONE arrives
   uint32_t m_handshakeResendCount {0};        //!< Client: times the Handshake packet was repeated (the backoff exponent)
   bool m_handshakeResendPending {false};      //!< The next packet sent carries a Handshake header

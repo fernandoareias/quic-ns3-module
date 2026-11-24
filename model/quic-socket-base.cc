@@ -963,6 +963,8 @@ QuicSocketBase::Connect (const Address & address)
       m_quicl5->CreateHandshakeStream ();
     }
 
+  m_connectAddress = address;
+
   // check if the address is in a list of known and authenticated addresses
   auto result = std::find (
     m_quicl4->GetAuthAddresses ().begin (), m_quicl4->GetAuthAddresses ().end (),
@@ -1013,7 +1015,8 @@ QuicSocketBase::SendOnStream (Ptr<Packet> p, uint64_t streamId)
 {
   // Like msquic, streams are opened and used once the connection is established: writes made while
   // the handshake is running wait for it
-  if (m_socketState == CONNECTING_CLT || m_socketState == CONNECTING_SVR)
+  if (m_socketState == CONNECTING_CLT || m_socketState == CONNECTING_SVR
+      || (m_isServerSide && m_socketState == LISTENING))
     {
       // the writes that wait are bounded by the send buffer, like any other write
       if (m_pendingWriteBytes + p->GetSize () > m_txBuffer->Available ())
@@ -1575,15 +1578,20 @@ QuicSocketBase::SendDataPacket (SequenceNumber32 packetNumber,
           head = QuicHeader::CreateHandshake (m_connectionId, m_vers,
                                               packetNumber);
         }
-      else if (!m_connected and m_zeroRttConnect)
+      else if (m_zeroRttConnect and !m_tcb->m_handshakeConfirmed)
         {
+          // The server learns of the connection from a 0-RTT packet, so every packet is one until the first answer
+          // arrives: a lost first packet must not leave the server without a connection for the short header ones
           head = QuicHeader::Create0RTT (m_connectionId, m_vers,
                                          packetNumber);
-          m_connected = true;
-          m_keyPhase == QuicHeader::PHASE_ONE ? m_keyPhase =
-            QuicHeader::PHASE_ZERO :
-            m_keyPhase =
-              QuicHeader::PHASE_ONE;
+          if (!m_connected)
+            {
+              m_connected = true;
+              m_keyPhase == QuicHeader::PHASE_ONE ? m_keyPhase =
+                QuicHeader::PHASE_ZERO :
+                m_keyPhase =
+                  QuicHeader::PHASE_ONE;
+            }
         }
       else
         {
@@ -3220,6 +3228,7 @@ QuicSocketBase::OnReceivedTransportParameters (
       return;
     }
   m_receivedTransportParameters = true;
+  m_couldContainTransportParameters = false;
 
   // RFC 9000 §18.2: a client MUST NOT include a stateless reset token
   if (m_socketState == CONNECTING_SVR
@@ -3281,15 +3290,18 @@ QuicSocketBase::OnReceivedTransportParameters (
   NS_LOG_DEBUG (
     "Before applying received transport parameters " << " m_initial_max_stream_data " << m_initial_max_stream_data << " m_max_data " << m_max_data << " m_initial_max_stream_id_bidi " << m_initial_max_stream_id_bidi << " m_idleTimeout " << m_idleTimeout << " m_omit_connection_id " << m_omit_connection_id << " m_tcb->m_segmentSize " << m_tcb->m_segmentSize << " m_ack_delay_exponent " << m_ack_delay_exponent << " m_initial_max_stream_id_uni " << m_initial_max_stream_id_uni);
 
-  // Peer limits for what we send; our own receive windows are left untouched
-  m_peerInitialMaxStreamData = transportParameters.GetInitialMaxStreamData ();
-  m_peerStreamData[0] = transportParameters.GetInitialMaxStreamData ();           // bidi, opened by the peer
-  m_peerStreamData[1] = transportParameters.GetInitialMaxStreamDataBidiRemote ();  // bidi, opened by us
-  m_peerStreamData[2] = transportParameters.GetInitialMaxStreamDataUni ();         // uni, opened by us
-  m_peerMaxStreams[0] = transportParameters.GetInitialMaxStreamIdBidi ();
-  m_peerMaxStreams[1] = transportParameters.GetInitialMaxStreamIdUni ();
-  m_quicl5->UpdateInitialMaxStreamData ();
-  SetConnectionMaxData (transportParameters.GetInitialMaxData ());
+  ApplyPeerLimits (transportParameters);
+  if (m_socketState == OPEN)
+    {
+      FlushPendingWrites ();
+    }
+
+  // a client keeps what the server announced for a later connection that starts with 0-RTT data
+  if (!m_isServerSide && !m_connectAddress.IsInvalid ())
+    {
+      m_quicl4->RememberServerParameters (InetSocketAddress::ConvertFrom (m_connectAddress).GetIpv4 (),
+                                          transportParameters);
+    }
 
   // RFC 9000 s10.1: the effective idle timeout is the smaller of the two advertised values, a value of 0
   // meaning "no limit" for that endpoint (both 0: the timer is off)
@@ -3376,10 +3388,32 @@ QuicSocketBase::DoConnect (void)
   return 0;
 }
 
+void
+QuicSocketBase::ApplyPeerLimits (const QuicTransportParameters &transportParameters)
+{
+  // Peer limits for what we send; our own receive windows are left untouched
+  m_peerInitialMaxStreamData = transportParameters.GetInitialMaxStreamData ();
+  m_peerStreamData[0] = transportParameters.GetInitialMaxStreamData ();           // bidi, opened by the peer
+  m_peerStreamData[1] = transportParameters.GetInitialMaxStreamDataBidiRemote ();  // bidi, opened by us
+  m_peerStreamData[2] = transportParameters.GetInitialMaxStreamDataUni ();         // uni, opened by us
+  m_peerMaxStreams[0] = transportParameters.GetInitialMaxStreamIdBidi ();
+  m_peerMaxStreams[1] = transportParameters.GetInitialMaxStreamIdUni ();
+  m_quicl5->UpdateInitialMaxStreamData ();
+  SetConnectionMaxData (transportParameters.GetInitialMaxData ());
+}
+
 int
 QuicSocketBase::DoFastConnect (void)
 {
   NS_LOG_FUNCTION (this);
+
+  // RFC 9000 s7.4.1: 0-RTT data is sent within the limits the server announced the last time
+  QuicTransportParameters remembered;
+  if (!m_connectAddress.IsInvalid ()
+      && m_quicl4->GetRememberedParameters (InetSocketAddress::ConvertFrom (m_connectAddress).GetIpv4 (), remembered))
+    {
+      ApplyPeerLimits (remembered);
+    }
   if (!IsVersionSupported (m_vers))
     {
       NS_LOG_WARN ("0RTT: m_vers=" << m_vers << " invalido apos reconexao; "
@@ -3522,7 +3556,9 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
       Simulator::ScheduleNow (&QuicSocketBase::ConnectionSucceeded, this);
       m_congestionControl->CongestionStateSet (m_tcb,
                                                TcpSocketState::CA_OPEN);
-      m_couldContainTransportParameters = false;
+      // each frame of the client's first flight is a packet of its own (the first one carries the 0-RTT header), so
+      // the transport parameters may come in a later packet: they are looked for until they arrive
+      m_couldContainTransportParameters = !m_receivedTransportParameters;
 
     }
   else if (quicHeader.IsInitial () and m_socketState == CONNECTING_SVR)
@@ -3671,7 +3707,7 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
         }
       return;
     }
-  else if ((quicHeader.IsShort () or (quicHeader.IsHandshake () and m_isServerSide))
+  else if ((quicHeader.IsShort () or (m_isServerSide and (quicHeader.IsHandshake () or quicHeader.IsORTT ())))
            and (m_socketState == OPEN or IsFlushingOnClose ()))
     {
       // RFC 9000 §12.3: duplicate packet numbers MUST be discarded
@@ -3691,8 +3727,8 @@ QuicSocketBase::ReceivedData (Ptr<Packet> p, const QuicHeader& quicHeader,
         {
           m_spinBit = m_isServerSide ? quicHeader.GetSpinBit () : !quicHeader.GetSpinBit ();
         }
-      // a Handshake packet that arrives once the server is open is the client repeating it: its frames
-      // count in the application space, because the Handshake space is gone
+      // a Handshake packet that arrives once the server is open is the client repeating it, and a 0-RTT packet is one
+      // of the client's first flight: their frames count in the application space, because the Handshake space is gone
       m_currentRecvPacketNumberSpace = quicHeader.IsShort () ? GetPacketNumberSpace (quicHeader) : APP_DATA_SPACE;
       onlyAckFrames = m_quicl5->DispatchRecv (p, address);
 
@@ -3808,20 +3844,31 @@ QuicSocketBase::SetState (TracedValue<QuicStates_t> newstate)
     {
       Simulator::ScheduleNow (&QuicSocketBase::StartMtuDiscovery, this);
     }
-  if (newstate == OPEN && !m_pendingWrites.empty ())
+  // a 0-RTT server is open before the client's transport parameters have arrived: it holds the writes until then
+  if (newstate == OPEN && (m_receivedTransportParameters || !m_isServerSide))
     {
-      auto writes = std::move (m_pendingWrites);
-      m_pendingWrites.clear ();
-      m_pendingWriteBytes = 0;
-      for (auto &w : writes)
-        {
-          m_quicl5->DispatchSend (w.first, w.second);
-        }
+      FlushPendingWrites ();
     }
   if (newstate == OPEN && m_closeAfterHandshake)
     {
       m_closeAfterHandshake = false;
       Simulator::ScheduleNow (&QuicSocketBase::Close, this);
+    }
+}
+
+void
+QuicSocketBase::FlushPendingWrites ()
+{
+  if (m_pendingWrites.empty ())
+    {
+      return;
+    }
+  auto writes = std::move (m_pendingWrites);
+  m_pendingWrites.clear ();
+  m_pendingWriteBytes = 0;
+  for (auto &w : writes)
+    {
+      m_quicl5->DispatchSend (w.first, w.second);
     }
 }
 
