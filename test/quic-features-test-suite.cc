@@ -2073,6 +2073,70 @@ class FeatClosingRepeatTest : public TestCase
 };
 
 /**
+ * RFC 9000 s10.1: a handshake that gets no answer for the idle timeout is abandoned. Close() used
+ * to treat the expiry as the application's close and kept retransmitting the Initial: a server that
+ * answered after the timeout completed a handshake that then closed at once. The connection now
+ * fails when the timer expires, the application is told, and nothing more is sent.
+ */
+class FeatHandshakeTimeoutTest : public TestCase
+{
+  public:
+    FeatHandshakeTimeoutTest()
+        : TestCase(
+              "a handshake without an answer fails when the idle timer expires (RFC 9000 s10.1)")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        FeatRig r;
+        r.serverStreams = 0;
+        r.serverCloses = false;
+        r.stopAt = Seconds(60);
+        r.Build();
+        r.clients[0]->SetAttribute("IdleTimeout", TimeValue(Seconds(5)));
+        r.clients[0]->SetConnectCallback(MakeCallback(&FeatHandshakeTimeoutTest::OnConnected, this),
+                                         MakeCallback(&FeatHandshakeTimeoutTest::OnFailed, this));
+        // nothing reaches the server until the client has given up
+        Ptr<RateErrorModel> em = CreateObject<RateErrorModel>();
+        em->SetAttribute("ErrorRate", DoubleValue(1.0));
+        em->SetAttribute("ErrorUnit", StringValue("ERROR_UNIT_PACKET"));
+        r.dev.Get(0)->SetAttribute("ReceiveErrorModel", PointerValue(em));
+        Simulator::Schedule(Seconds(10), &ErrorModel::Disable, em);
+        Simulator::Schedule(Seconds(6), [this, &r]() { m_sentAtSix = r.packetsToServer; });
+        Simulator::Schedule(Seconds(59),
+                            [this, &r]() { m_state = FeatQuic(r.clients[0])->GetSocketState(); });
+        r.Run();
+        NS_TEST_ASSERT_MSG_EQ(m_connected, false, "the connection came up");
+        NS_TEST_ASSERT_MSG_EQ(m_failed, true, "the application was told that it failed");
+        NS_TEST_ASSERT_MSG_GT_OR_EQ(m_failedAt.GetSeconds(), 5.0, "failed before the idle timeout");
+        NS_TEST_ASSERT_MSG_LT(m_failedAt.GetSeconds(), 5.5, "failed long after the idle timeout");
+        NS_TEST_ASSERT_MSG_EQ(r.packetsToServer,
+                              m_sentAtSix,
+                              "the client kept sending after it gave up");
+        NS_TEST_ASSERT_MSG_EQ((int)m_state, (int)QuicSocket::IDLE, "the socket was not closed");
+    }
+
+    void OnConnected(Ptr<Socket>)
+    {
+        m_connected = true;
+    }
+
+    void OnFailed(Ptr<Socket>)
+    {
+        m_failed = true;
+        m_failedAt = Simulator::Now();
+    }
+
+    bool m_connected{false};
+    bool m_failed{false};
+    Time m_failedAt{Seconds(0)};
+    uint64_t m_sentAtSix{0};
+    QuicSocket::QuicStates_t m_state{QuicSocket::OPEN};
+};
+
+/**
  * Drops the packet at a given arrival index; the index is chosen while the packet is still on the
  * wire, so a test can aim at a packet it saw leave the sender
  */
@@ -2566,6 +2630,7 @@ class QuicFeaturesTestSuite : public TestSuite
         AddTestCase(new FeatHandshakeDoneRetransmitTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatClosingRepeatTest, TestCase::Duration::QUICK);
+        AddTestCase(new FeatHandshakeTimeoutTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatBbrProbeRttTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatIdleCloseTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatZeroRttTest(false), TestCase::Duration::QUICK);

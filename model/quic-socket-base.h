@@ -1096,6 +1096,12 @@ class QuicSocketBase : public QuicSocket
     Time ClosingPeriod() const;
 
     /**
+     * The idle timer expired. A connection still in the handshake is abandoned and the application
+     * hears that it failed (RFC 9000 s10.1); an established one closes as Close () does.
+     */
+    void IdleTimeoutExpired();
+
+    /**
      * \brief Record a received packet number and, when it is the largest, its arrival time
      * \param packetNumber the packet number
      */

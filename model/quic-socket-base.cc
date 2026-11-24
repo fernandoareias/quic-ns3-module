@@ -1933,6 +1933,29 @@ QuicSocketBase::NotePacketReceived(uint32_t packetNumber)
 }
 
 void
+QuicSocketBase::IdleTimeoutExpired()
+{
+    if (m_socketState == CONNECTING_CLT || m_socketState == CONNECTING_SVR)
+    {
+        // nothing was flushed or promised yet: unlike Close () called by the application, which
+        // waits for the handshake to write what is buffered, the connection never came up
+        NS_LOG_INFO(this << " handshake idle timeout at " << Simulator::Now().GetSeconds());
+        const bool client = m_socketState == CONNECTING_CLT;
+        m_tcb->m_lossDetectionAlarm.Cancel();
+        m_closeAfterHandshake = false;
+        SetState(CLOSING);
+        m_closeNotified = true;
+        if (client)
+        {
+            NotifyConnectionFailed();
+        }
+        Simulator::ScheduleNow(&QuicSocketBase::DoClose, this);
+        return;
+    }
+    Close();
+}
+
+void
 QuicSocketBase::ArmIdleTimer()
 {
     m_idleTimeoutEvent.Cancel();
@@ -1945,7 +1968,7 @@ QuicSocketBase::ArmIdleTimer()
     Time timeout = std::max(m_idleTimeout.Get(), 3 * ProbeTimeout(true));
     NS_LOG_LOGIC(this << " idle timer set at time " << Simulator::Now().GetSeconds()
                       << " to expire at time " << (Simulator::Now() + timeout).GetSeconds());
-    m_idleTimeoutEvent = Simulator::Schedule(timeout, &QuicSocketBase::Close, this);
+    m_idleTimeoutEvent = Simulator::Schedule(timeout, &QuicSocketBase::IdleTimeoutExpired, this);
 }
 
 void
