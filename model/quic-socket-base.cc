@@ -2222,6 +2222,8 @@ QuicSocketBase::Close (void)
       if (m_flushOnClose)
         {
           m_closeOnEmpty = true;
+          // an idle connection has nothing that would bring the close along: look at it now
+          Simulator::ScheduleNow (&QuicSocketBase::SendPendingData, this, m_connected);
         }
       else
         {

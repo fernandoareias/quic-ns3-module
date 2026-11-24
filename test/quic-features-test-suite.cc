@@ -1839,6 +1839,36 @@ private:
 };
 
 /**
+ * Close() on a connection that has nothing to send or to wait for used to do nothing until the idle timeout (30 s) closed
+ * the peer: no packet was left to bring the close along. The CONNECTION_CLOSE now goes out at once.
+ */
+class FeatIdleCloseTest : public TestCase
+{
+public:
+  FeatIdleCloseTest () : TestCase ("Close() on an idle connection reaches the peer at once") {}
+private:
+  void DoRun () override
+  {
+    FeatRig r;
+    r.serverStreams = 0;
+    r.serverCloses = false;
+    r.stopAt = Seconds (12);
+    r.Build ();
+    Simulator::Schedule (Seconds (2), [&r] () { r.clients[0]->Close (); });
+    Simulator::Schedule (Seconds (11), [this, &r] () {
+      m_clientState = DynamicCast<QuicSocketBase> (r.clients[0])->GetSocketState ();
+      m_serverState = DynamicCast<QuicSocketBase> (r.accepted[0])->GetSocketState ();
+    });
+    r.Run ();
+    // the closing endpoint stays in its closing period (DrainingPeriodTimeout, 90 s), the peer is closed at once
+    NS_TEST_ASSERT_MSG_EQ ((int) m_clientState, (int) QuicSocket::CLOSING, "the closing endpoint is closing");
+    NS_TEST_ASSERT_MSG_EQ ((int) m_serverState, (int) QuicSocket::IDLE, "the peer is closed");
+  }
+  QuicSocket::QuicStates_t m_clientState {QuicSocket::OPEN};
+  QuicSocket::QuicStates_t m_serverState {QuicSocket::OPEN};
+};
+
+/**
  * RFC 9000 s6, s17.2.1: the Version Negotiation packet lists the versions in network byte order, and a client that
  * proposed an unknown version carries on with one of them.
  */
@@ -1969,6 +1999,7 @@ public:
     AddTestCase (new FeatHandshakeDoneRetransmitTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClosingRepeatTest, TestCase::Duration::QUICK);
+    AddTestCase (new FeatIdleCloseTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatZeroRttTest (false), TestCase::Duration::QUICK);
     AddTestCase (new FeatZeroRttTest (true), TestCase::Duration::QUICK);
     AddTestCase (new FeatVersionNegotiationTest, TestCase::Duration::QUICK);
