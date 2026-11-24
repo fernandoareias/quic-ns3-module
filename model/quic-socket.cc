@@ -11,73 +11,70 @@
 
 #define __STDC_LIMIT_MACROS
 
-#include "ns3/object.h"
-#include "ns3/log.h"
-#include "ns3/uinteger.h"
-#include "ns3/double.h"
-#include "ns3/boolean.h"
-#include "ns3/trace-source-accessor.h"
-#include "ns3/nstime.h"
 #include "quic-socket.h"
 
-namespace ns3 {
+#include "ns3/boolean.h"
+#include "ns3/double.h"
+#include "ns3/log.h"
+#include "ns3/nstime.h"
+#include "ns3/object.h"
+#include "ns3/trace-source-accessor.h"
+#include "ns3/uinteger.h"
 
-NS_LOG_COMPONENT_DEFINE ("QuicSocket");
+namespace ns3
+{
 
-NS_OBJECT_ENSURE_REGISTERED (QuicSocket);
+NS_LOG_COMPONENT_DEFINE("QuicSocket");
 
-const char* const
-QuicSocket::QuicStateName[QuicSocket::LAST_STATE] = {
-  "IDLE", "LISTENING", "CONNECTING_SVR",
-  "CONNECTING_CLT", "OPEN", "CLOSING"
-};
+NS_OBJECT_ENSURE_REGISTERED(QuicSocket);
+
+const char* const QuicSocket::QuicStateName[QuicSocket::LAST_STATE] =
+    {"IDLE", "LISTENING", "CONNECTING_SVR", "CONNECTING_CLT", "OPEN", "CLOSING"};
 
 TypeId
-QuicSocket::GetTypeId (void)
+QuicSocket::GetTypeId(void)
 {
-  static TypeId tid = TypeId ("ns3::QuicSocket")
-    .SetParent<Socket> ()
-    .SetGroupName ("Internet")
-  ;
-  return tid;
+    static TypeId tid = TypeId("ns3::QuicSocket").SetParent<Socket>().SetGroupName("Internet");
+    return tid;
 }
 
-QuicSocket::QuicSocket ()
-  : Socket (),
-  m_socketType (NONE)
+QuicSocket::QuicSocket()
+    : Socket(),
+      m_socketType(NONE)
 {
-  NS_LOG_FUNCTION_NOARGS ();
+    NS_LOG_FUNCTION_NOARGS();
 }
 
-QuicSocket::QuicSocket (const QuicSocket& sock)
-  : Socket (sock),
-  m_socketType (sock.m_socketType)
+QuicSocket::QuicSocket(const QuicSocket& sock)
+    : Socket(sock),
+      m_socketType(sock.m_socketType)
 {
-  NS_LOG_FUNCTION_NOARGS ();
+    NS_LOG_FUNCTION_NOARGS();
 }
 
-QuicSocket::~QuicSocket ()
+QuicSocket::~QuicSocket()
 {
-  NS_LOG_FUNCTION_NOARGS ();
+    NS_LOG_FUNCTION_NOARGS();
 }
 
 QuicSocket::QuicSocketTypes_t
-QuicSocket::GetQuicSocketType () const
+QuicSocket::GetQuicSocketType() const
 {
-  return m_socketType;
+    return m_socketType;
 }
 
 void
-QuicSocket::SetQuicSocketType (QuicSocketTypes_t m_socketType)
+QuicSocket::SetQuicSocketType(QuicSocketTypes_t m_socketType)
 {
-  QuicSocket::m_socketType = m_socketType;
+    QuicSocket::m_socketType = m_socketType;
 }
 
 bool
-QuicSocket::CheckVersionNegotiation (uint32_t version)
+QuicSocket::CheckVersionNegotiation(uint32_t version)
 {
-  // RFC 9000 s15: version 0 and the reserved versions 0x?a?a?a?a are for negotiation
-  return  (version == QUIC_VERSION_NEGOTIATION) || ((version & 0x0F0F0F0F) == QUIC_VERSION_NEGOTIATION_PATTERN);
+    // RFC 9000 s15: version 0 and the reserved versions 0x?a?a?a?a are for negotiation
+    return (version == QUIC_VERSION_NEGOTIATION) ||
+           ((version & 0x0F0F0F0F) == QUIC_VERSION_NEGOTIATION_PATTERN);
 }
 
 } // namespace ns3

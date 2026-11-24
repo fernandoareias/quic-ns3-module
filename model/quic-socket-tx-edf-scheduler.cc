@@ -10,167 +10,197 @@
 
 #include "quic-socket-tx-edf-scheduler.h"
 
+#include "quic-socket-base.h"
+#include "quic-subheader.h"
+
+#include "ns3/abort.h"
+#include "ns3/log.h"
+#include "ns3/packet.h"
+#include "ns3/simulator.h"
+
 #include <algorithm>
 #include <iostream>
 #include <sstream>
-#include "ns3/simulator.h"
 
-#include "ns3/packet.h"
-#include "ns3/log.h"
-#include "ns3/abort.h"
-#include "quic-subheader.h"
-#include "quic-socket-base.h"
-
-namespace ns3 {
-
-NS_LOG_COMPONENT_DEFINE ("QuicSocketTxEdfScheduler");
-
-NS_OBJECT_ENSURE_REGISTERED (QuicSocketTxEdfScheduler);
-
-TypeId QuicSocketTxEdfScheduler::GetTypeId (void)
+namespace ns3
 {
-  static TypeId tid = TypeId ("ns3::QuicSocketTxEdfScheduler")
-    .SetParent<QuicSocketTxScheduler>()
-    .SetGroupName ("Internet")
-    .AddConstructor<QuicSocketTxEdfScheduler>()
-    .AddAttribute ("RetxFirst", "Prioritize retransmissions regardless of stream",
-                   BooleanValue (false),
-                   MakeBooleanAccessor (&QuicSocketTxEdfScheduler::m_retxFirst),
-                   MakeBooleanChecker ())
-  ;
-  return tid;
+
+NS_LOG_COMPONENT_DEFINE("QuicSocketTxEdfScheduler");
+
+NS_OBJECT_ENSURE_REGISTERED(QuicSocketTxEdfScheduler);
+
+TypeId
+QuicSocketTxEdfScheduler::GetTypeId(void)
+{
+    static TypeId tid =
+        TypeId("ns3::QuicSocketTxEdfScheduler")
+            .SetParent<QuicSocketTxScheduler>()
+            .SetGroupName("Internet")
+            .AddConstructor<QuicSocketTxEdfScheduler>()
+            .AddAttribute("RetxFirst",
+                          "Prioritize retransmissions regardless of stream",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&QuicSocketTxEdfScheduler::m_retxFirst),
+                          MakeBooleanChecker());
+    return tid;
 }
 
-QuicSocketTxEdfScheduler::QuicSocketTxEdfScheduler () :
-  QuicSocketTxScheduler (), m_retxFirst (false)
+QuicSocketTxEdfScheduler::QuicSocketTxEdfScheduler()
+    : QuicSocketTxScheduler(),
+      m_retxFirst(false)
 {
-  m_defaultLatency = Seconds (0.1);
+    m_defaultLatency = Seconds(0.1);
 }
 
-QuicSocketTxEdfScheduler::QuicSocketTxEdfScheduler (
-  const QuicSocketTxEdfScheduler &other) :
-  QuicSocketTxScheduler (other), m_retxFirst (
-    other.m_retxFirst)
+QuicSocketTxEdfScheduler::QuicSocketTxEdfScheduler(const QuicSocketTxEdfScheduler& other)
+    : QuicSocketTxScheduler(other),
+      m_retxFirst(other.m_retxFirst)
 {
-  m_defaultLatency = other.m_defaultLatency;
-  m_latencyMap = other.m_latencyMap;
+    m_defaultLatency = other.m_defaultLatency;
+    m_latencyMap = other.m_latencyMap;
 }
 
-QuicSocketTxEdfScheduler::~QuicSocketTxEdfScheduler (void)
-{}
-
-void QuicSocketTxEdfScheduler::Add (Ptr<QuicSocketTxItem> item, bool retx)
+QuicSocketTxEdfScheduler::~QuicSocketTxEdfScheduler(void)
 {
-  NS_LOG_FUNCTION (this << item);
+}
 
-  if (retx)
+void
+QuicSocketTxEdfScheduler::Add(Ptr<QuicSocketTxItem> item, bool retx)
+{
+    NS_LOG_FUNCTION(this << item);
+
+    if (retx)
     {
-      if (m_retxFirst)
+        if (m_retxFirst)
         {
-          QuicSubheader sub;
-          item->m_packet->PeekHeader (sub);
-          NS_LOG_INFO ("Adding retransmitted packet with highest priority");
-          AddScheduleItem (CreateObject<QuicSocketTxScheduleItem> (sub.GetStreamId (), sub.GetOffset (), -1, item), retx);
+            QuicSubheader sub;
+            item->m_packet->PeekHeader(sub);
+            NS_LOG_INFO("Adding retransmitted packet with highest priority");
+            AddScheduleItem(CreateObject<QuicSocketTxScheduleItem>(sub.GetStreamId(),
+                                                                   sub.GetOffset(),
+                                                                   -1,
+                                                                   item),
+                            retx);
         }
-      else
+        else
         {
-          uint32_t dataSizeByte = item->m_packet->GetSize ();
-          QuicSubheader sub;
-          item->m_packet->PeekHeader (sub);
-          if (sub.GetSerializedSize () + sub.GetLength ()
-              < dataSizeByte)
+            uint32_t dataSizeByte = item->m_packet->GetSize();
+            QuicSubheader sub;
+            item->m_packet->PeekHeader(sub);
+            if (sub.GetSerializedSize() + sub.GetLength() < dataSizeByte)
             {
+                NS_LOG_INFO("Disgregate packet to be retransmitted"
+                            << dataSizeByte << "; first fragment size"
+                            << sub.GetSerializedSize() + sub.GetLength());
+                Ptr<Packet> remaining = item->m_packet->Copy();
 
-              NS_LOG_INFO (
-                "Disgregate packet to be retransmitted" << dataSizeByte << "; first fragment size" << sub.GetSerializedSize () + sub.GetLength ());
-              Ptr<Packet> remaining = item->m_packet->Copy ();
-
-              // the packet could contain multiple frames
-              // each of them starts with a subheader
-              // cycle through the data packet and extract the frames
-              for (uint32_t start = 0; start < dataSizeByte;)
+                // the packet could contain multiple frames
+                // each of them starts with a subheader
+                // cycle through the data packet and extract the frames
+                for (uint32_t start = 0; start < dataSizeByte;)
                 {
-                  item->m_packet->RemoveHeader (sub);
-                  Ptr<Packet> nextFragment = Create<Packet> ();
-                  if (sub.IsStream ())
+                    item->m_packet->RemoveHeader(sub);
+                    Ptr<Packet> nextFragment = Create<Packet>();
+                    if (sub.IsStream())
                     {
-                      NS_LOG_INFO (
-                        "subheader " << sub << " dataSizeByte " << dataSizeByte << " remaining " << item->m_packet->GetSize () << " frame size " << sub.GetLength ());
-                      nextFragment = item->m_packet->Copy ();
-                      NS_LOG_INFO ("fragment size " << nextFragment->GetSize () << " " << sub.GetLength ());
-                      nextFragment->RemoveAtEnd (
-                        nextFragment->GetSize () - sub.GetLength ());
-                      NS_LOG_INFO ("fragment size " << nextFragment->GetSize ());
+                        NS_LOG_INFO("subheader " << sub << " dataSizeByte " << dataSizeByte
+                                                 << " remaining " << item->m_packet->GetSize()
+                                                 << " frame size " << sub.GetLength());
+                        nextFragment = item->m_packet->Copy();
+                        NS_LOG_INFO("fragment size " << nextFragment->GetSize() << " "
+                                                     << sub.GetLength());
+                        nextFragment->RemoveAtEnd(nextFragment->GetSize() - sub.GetLength());
+                        NS_LOG_INFO("fragment size " << nextFragment->GetSize());
 
-                      // remove the first portion of the packet
-                      item->m_packet->RemoveAtStart (sub.GetLength ());
+                        // remove the first portion of the packet
+                        item->m_packet->RemoveAtStart(sub.GetLength());
                     }
-                  nextFragment->AddHeader (sub);
-                  start += nextFragment->GetSize ();
-                  Ptr<QuicSocketTxItem> it = CreateObject<QuicSocketTxItem> (
-                    *item);
-                  uint64_t streamId = sub.GetStreamId ();
-                  uint64_t offset = sub.GetOffset ();
-                  it->m_packet = nextFragment;
-                  NS_LOG_INFO (
-                    "Added retx fragment on stream " << streamId << " with offset " << offset << " and length " << it->m_packet->GetSize () << ", pointer " << GetPointer (it->m_packet));
-                  AddScheduleItem (CreateObject<QuicSocketTxScheduleItem> (streamId, offset, GetDeadline (it).GetSeconds (), it), false);
+                    nextFragment->AddHeader(sub);
+                    start += nextFragment->GetSize();
+                    Ptr<QuicSocketTxItem> it = CreateObject<QuicSocketTxItem>(*item);
+                    uint64_t streamId = sub.GetStreamId();
+                    uint64_t offset = sub.GetOffset();
+                    it->m_packet = nextFragment;
+                    NS_LOG_INFO("Added retx fragment on stream "
+                                << streamId << " with offset " << offset << " and length "
+                                << it->m_packet->GetSize() << ", pointer "
+                                << GetPointer(it->m_packet));
+                    AddScheduleItem(
+                        CreateObject<QuicSocketTxScheduleItem>(streamId,
+                                                               offset,
+                                                               GetDeadline(it).GetSeconds(),
+                                                               it),
+                        false);
                 }
             }
-          else
+            else
             {
-              NS_LOG_INFO (
-                "Added retx packet on stream " << sub.GetStreamId () << " with offset " << sub.GetOffset ());
-              AddScheduleItem (CreateObject<QuicSocketTxScheduleItem> (sub.GetStreamId (), sub.GetOffset (), GetDeadline (item).GetSeconds (), item), false);
+                NS_LOG_INFO("Added retx packet on stream " << sub.GetStreamId() << " with offset "
+                                                           << sub.GetOffset());
+                AddScheduleItem(
+                    CreateObject<QuicSocketTxScheduleItem>(sub.GetStreamId(),
+                                                           sub.GetOffset(),
+                                                           GetDeadline(item).GetSeconds(),
+                                                           item),
+                    false);
             }
         }
     }
-  else
+    else
     {
-      QuicSubheader sub;
-      item->m_packet->PeekHeader (sub);
-      NS_LOG_INFO (
-        "Added packet on stream " << sub.GetStreamId () << " with offset " << sub.GetOffset ());
-      AddScheduleItem (CreateObject<QuicSocketTxScheduleItem> (sub.GetStreamId (), sub.GetOffset (), GetDeadline (item).GetSeconds (), item), retx);
+        QuicSubheader sub;
+        item->m_packet->PeekHeader(sub);
+        NS_LOG_INFO("Added packet on stream " << sub.GetStreamId() << " with offset "
+                                              << sub.GetOffset());
+        AddScheduleItem(CreateObject<QuicSocketTxScheduleItem>(sub.GetStreamId(),
+                                                               sub.GetOffset(),
+                                                               GetDeadline(item).GetSeconds(),
+                                                               item),
+                        retx);
     }
 }
 
-void QuicSocketTxEdfScheduler::SetLatency (uint32_t streamId, Time latency)
+void
+QuicSocketTxEdfScheduler::SetLatency(uint32_t streamId, Time latency)
 {
-  m_latencyMap[streamId] = latency;
+    m_latencyMap[streamId] = latency;
 }
 
-const Time QuicSocketTxEdfScheduler::GetLatency (uint32_t streamId)
+const Time
+QuicSocketTxEdfScheduler::GetLatency(uint32_t streamId)
 {
-  Time latency = m_defaultLatency;
-  if (m_latencyMap.count (streamId) > 0)
+    Time latency = m_defaultLatency;
+    if (m_latencyMap.count(streamId) > 0)
     {
-      latency = m_latencyMap.at (streamId);
+        latency = m_latencyMap.at(streamId);
     }
-  else
+    else
     {
-      NS_LOG_INFO (
-        "Stream " << streamId << " does not have a pre-specified latency, using default");
+        NS_LOG_INFO("Stream " << streamId
+                              << " does not have a pre-specified latency, using default");
     }
-  return latency;
+    return latency;
 }
 
-void QuicSocketTxEdfScheduler::SetDefaultLatency (Time latency)
+void
+QuicSocketTxEdfScheduler::SetDefaultLatency(Time latency)
 {
-  m_defaultLatency = latency;
+    m_defaultLatency = latency;
 }
 
-const Time QuicSocketTxEdfScheduler::GetDefaultLatency ()
+const Time
+QuicSocketTxEdfScheduler::GetDefaultLatency()
 {
-  return m_defaultLatency;
+    return m_defaultLatency;
 }
 
-Time QuicSocketTxEdfScheduler::GetDeadline (Ptr<QuicSocketTxItem> item)
+Time
+QuicSocketTxEdfScheduler::GetDeadline(Ptr<QuicSocketTxItem> item)
 {
-  Ptr<Packet> packet = item->m_packet;
-  QuicSubheader sub;
-  packet->PeekHeader (sub);
-  return item->m_generated + GetLatency (sub.GetStreamId ());
+    Ptr<Packet> packet = item->m_packet;
+    QuicSubheader sub;
+    packet->PeekHeader(sub);
+    return item->m_generated + GetLatency(sub.GetStreamId());
 }
 
-}
+} // namespace ns3

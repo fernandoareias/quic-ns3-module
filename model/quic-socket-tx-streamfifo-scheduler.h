@@ -10,9 +10,11 @@
 #define QUIC_SOCKET_TX_STREAMFIFO_SCHEDULER_H
 
 #include "quic-socket-tx-scheduler.h"
+
 #include <map>
 
-namespace ns3 {
+namespace ns3
+{
 
 /**
  * \brief Per-stream FIFO, as msquic's default stream scheduling
@@ -23,33 +25,34 @@ namespace ns3 {
  */
 class QuicSocketTxStreamFifoScheduler : public QuicSocketTxScheduler
 {
-public:
-  static TypeId GetTypeId (void);
+  public:
+    static TypeId GetTypeId(void);
 
-  QuicSocketTxStreamFifoScheduler ();
-  QuicSocketTxStreamFifoScheduler (const QuicSocketTxStreamFifoScheduler &other);
-  virtual ~QuicSocketTxStreamFifoScheduler (void);
+    QuicSocketTxStreamFifoScheduler();
+    QuicSocketTxStreamFifoScheduler(const QuicSocketTxStreamFifoScheduler& other);
+    virtual ~QuicSocketTxStreamFifoScheduler(void);
 
-  void Add (Ptr<QuicSocketTxItem> item, bool retx) override;
+    void Add(Ptr<QuicSocketTxItem> item, bool retx) override;
 
-  void SetStreamPriority (uint64_t streamId, uint16_t priority) override;
+    void SetStreamPriority(uint64_t streamId, uint16_t priority) override;
 
-  void OnStreamBacklog (uint64_t streamId, bool backlogged) override;
+    void OnStreamBacklog(uint64_t streamId, bool backlogged) override;
 
-protected:
-  void OnQueued (uint64_t streamId, uint32_t bytes) override;
-  void OnDequeued (uint64_t streamId, uint32_t bytes) override;
+  protected:
+    void OnQueued(uint64_t streamId, uint32_t bytes) override;
+    void OnDequeued(uint64_t streamId, uint32_t bytes) override;
 
-protected:
-  struct StreamState
-  {
-    double rank {0};
-    uint64_t queued {0};
-    uint16_t priority {0x7FFF};
-    bool backlogged {false};   //!< unsent data still sits in the stream buffer
-  };
-  std::map<uint64_t, StreamState> m_streams;
-  double m_nextRank {1.0};
+  protected:
+    struct StreamState
+    {
+        double rank{0};
+        uint64_t queued{0};
+        uint16_t priority{0x7FFF};
+        bool backlogged{false}; //!< unsent data still sits in the stream buffer
+    };
+
+    std::map<uint64_t, StreamState> m_streams;
+    double m_nextRank{1.0};
 };
 
 } // namespace ns3

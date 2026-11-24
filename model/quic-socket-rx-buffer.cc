@@ -9,186 +9,187 @@
  *          Davide Marcato <davidemarcato@outlook.com>
  */
 
-#include "ns3/packet.h"
+#include "quic-socket-rx-buffer.h"
+
 #include "ns3/fatal-error.h"
 #include "ns3/log.h"
-#include "quic-socket-rx-buffer.h"
+#include "ns3/packet.h"
+
 #include <algorithm>
 
-namespace ns3 {
+namespace ns3
+{
 
-NS_LOG_COMPONENT_DEFINE ("QuicSocketRxBuffer");
+NS_LOG_COMPONENT_DEFINE("QuicSocketRxBuffer");
 
-QuicSocketRxItem::QuicSocketRxItem ()
-  : m_packet (0),
-  m_offset (0),
-  m_fin (false)
+QuicSocketRxItem::QuicSocketRxItem()
+    : m_packet(0),
+      m_offset(0),
+      m_fin(false)
 {
 }
 
-QuicSocketRxItem::QuicSocketRxItem (const QuicSocketRxItem &other)
-  : m_packet (other.m_packet),
-  m_offset (other.m_offset),
-  m_fin (other.m_fin)
+QuicSocketRxItem::QuicSocketRxItem(const QuicSocketRxItem& other)
+    : m_packet(other.m_packet),
+      m_offset(other.m_offset),
+      m_fin(other.m_fin)
 {
 }
 
 void
-QuicSocketRxItem::Print (std::ostream &os) const
+QuicSocketRxItem::Print(std::ostream& os) const
 {
-  os << "[OFF " << m_offset << "]";
+    os << "[OFF " << m_offset << "]";
 
-  if (m_fin)
+    if (m_fin)
     {
-      os << "|fin|";
+        os << "|fin|";
     }
-
 }
 
-NS_OBJECT_ENSURE_REGISTERED (QuicSocketRxBuffer);
+NS_OBJECT_ENSURE_REGISTERED(QuicSocketRxBuffer);
 
 TypeId
-QuicSocketRxBuffer::GetTypeId (void)
+QuicSocketRxBuffer::GetTypeId(void)
 {
-  static TypeId tid = TypeId ("ns3::QuicSocketRxBuffer")
-    .SetParent<Object> ()
-    .SetGroupName ("Internet")
-    .AddConstructor<QuicSocketRxBuffer> ()
-  ;
-  return tid;
+    static TypeId tid = TypeId("ns3::QuicSocketRxBuffer")
+                            .SetParent<Object>()
+                            .SetGroupName("Internet")
+                            .AddConstructor<QuicSocketRxBuffer>();
+    return tid;
 }
 
-QuicSocketRxBuffer::QuicSocketRxBuffer ()
-  : m_recvSize (0),
-  m_recvSizeTot (0),
-  m_maxBuffer (32768)
+QuicSocketRxBuffer::QuicSocketRxBuffer()
+    : m_recvSize(0),
+      m_recvSizeTot(0),
+      m_maxBuffer(32768)
 {
-  m_socketRecvList = QuicSocketRxPacketList ();
+    m_socketRecvList = QuicSocketRxPacketList();
 }
 
-QuicSocketRxBuffer::~QuicSocketRxBuffer ()
+QuicSocketRxBuffer::~QuicSocketRxBuffer()
 {
 }
 
 bool
-QuicSocketRxBuffer::Add (Ptr<Packet> p, bool force)
+QuicSocketRxBuffer::Add(Ptr<Packet> p, bool force)
 {
-  NS_LOG_FUNCTION (this << p << force);
+    NS_LOG_FUNCTION(this << p << force);
 
-  NS_LOG_INFO (
-    "Try to append " << p->GetSize () << " bytes " << ", availSize=" << Available ());
+    NS_LOG_INFO("Try to append " << p->GetSize() << " bytes " << ", availSize=" << Available());
 
-  if (force || p->GetSize () <= Available ())
+    if (force || p->GetSize() <= Available())
     {
-      if (p->GetSize () > Available ())
+        if (p->GetSize() > Available())
         {
-          NS_LOG_WARN ("Receive buffer of " << m_maxBuffer << " bytes exceeded by "
-                       << p->GetSize () - Available () << " bytes of acknowledged data");
+            NS_LOG_WARN("Receive buffer of " << m_maxBuffer << " bytes exceeded by "
+                                             << p->GetSize() - Available()
+                                             << " bytes of acknowledged data");
         }
-      if (p->GetSize () > 0)
+        if (p->GetSize() > 0)
         {
-          m_socketRecvList.insert (m_socketRecvList.end (), p->Copy ());
-          m_recvSize += p->GetSize ();
-          m_recvSizeTot += p->GetSize ();
+            m_socketRecvList.insert(m_socketRecvList.end(), p->Copy());
+            m_recvSize += p->GetSize();
+            m_recvSizeTot += p->GetSize();
 
-          NS_LOG_INFO ("Update: Received Size = " << m_recvSize);
-          return true;
+            NS_LOG_INFO("Update: Received Size = " << m_recvSize);
+            return true;
         }
-      else
+        else
         {
-          NS_LOG_WARN ("Discarded. Try to insert empty packet.");
-          return false;
+            NS_LOG_WARN("Discarded. Try to insert empty packet.");
+            return false;
         }
     }
-  NS_LOG_WARN ("Rejected. Not enough room to buffer packet.");
-  return false;
+    NS_LOG_WARN("Rejected. Not enough room to buffer packet.");
+    return false;
 }
 
 Ptr<Packet>
-QuicSocketRxBuffer::Extract (uint32_t maxSize)
+QuicSocketRxBuffer::Extract(uint32_t maxSize)
 {
-  NS_LOG_FUNCTION (this << maxSize);
+    NS_LOG_FUNCTION(this << maxSize);
 
-  uint32_t extractSize = std::min (maxSize, m_recvSize);
-  NS_LOG_INFO (
-    "Requested to extract " << extractSize << " bytes from QuicSocketRxBuffer of size=" << m_recvSize);
+    uint32_t extractSize = std::min(maxSize, m_recvSize);
+    NS_LOG_INFO("Requested to extract " << extractSize
+                                        << " bytes from QuicSocketRxBuffer of size=" << m_recvSize);
 
-  if (extractSize == 0)
+    if (extractSize == 0)
     {
-      return 0;
+        return 0;
     }
 
-  Ptr<Packet> outPkt = Create<Packet> ();
+    Ptr<Packet> outPkt = Create<Packet>();
 
-  while (!m_socketRecvList.empty ())
+    while (!m_socketRecvList.empty())
     {
-      Ptr<Packet> currentPacket = m_socketRecvList.front ();
-      uint32_t size = currentPacket->GetSize ();
+        Ptr<Packet> currentPacket = m_socketRecvList.front();
+        uint32_t size = currentPacket->GetSize();
 
-      if (outPkt->GetSize () + size > extractSize)
+        if (outPkt->GetSize() + size > extractSize)
         {
-          break;
+            break;
         }
 
-      outPkt->AddAtEnd (currentPacket);
-      m_socketRecvList.erase (m_socketRecvList.begin ());
-      m_recvSize -= size;
-      NS_LOG_LOGIC ("Added packet of size " << size);
+        outPkt->AddAtEnd(currentPacket);
+        m_socketRecvList.erase(m_socketRecvList.begin());
+        m_recvSize -= size;
+        NS_LOG_LOGIC("Added packet of size " << size);
     }
 
-  if (outPkt->GetSize () == 0)
+    if (outPkt->GetSize() == 0)
     {
-      NS_LOG_LOGIC ("Nothing extracted.");
-      return 0;
+        NS_LOG_LOGIC("Nothing extracted.");
+        return 0;
     }
-  NS_LOG_INFO (
-    "Extracted " << outPkt->GetSize () << " bytes from QuicSocketRxBuffer. New buffer size=" << m_recvSize);
-  return outPkt;
+    NS_LOG_INFO("Extracted " << outPkt->GetSize()
+                             << " bytes from QuicSocketRxBuffer. New buffer size=" << m_recvSize);
+    return outPkt;
 }
 
 uint32_t
-QuicSocketRxBuffer::Available (void) const
+QuicSocketRxBuffer::Available(void) const
 {
-  return m_recvSize < m_maxBuffer ? m_maxBuffer - m_recvSize : 0;
+    return m_recvSize < m_maxBuffer ? m_maxBuffer - m_recvSize : 0;
 }
 
 uint32_t
-QuicSocketRxBuffer::GetMaxBufferSize (void) const
+QuicSocketRxBuffer::GetMaxBufferSize(void) const
 {
-  return m_maxBuffer;
+    return m_maxBuffer;
 }
 
 uint32_t
-QuicSocketRxBuffer::Size (void) const
+QuicSocketRxBuffer::Size(void) const
 {
-  NS_LOG_FUNCTION (this);
+    NS_LOG_FUNCTION(this);
 
-  return m_recvSize;
+    return m_recvSize;
 }
 
 void
-QuicSocketRxBuffer::SetMaxBufferSize (uint32_t s)
+QuicSocketRxBuffer::SetMaxBufferSize(uint32_t s)
 {
-  m_maxBuffer = s;
+    m_maxBuffer = s;
 }
 
 void
-QuicSocketRxBuffer::Print (std::ostream & os) const
+QuicSocketRxBuffer::Print(std::ostream& os) const
 {
-  NS_LOG_FUNCTION (this);
-  QuicSocketRxBuffer::QuicSocketRxPacketList::const_iterator it;
-  std::stringstream ss;
-  std::stringstream as;
+    NS_LOG_FUNCTION(this);
+    QuicSocketRxBuffer::QuicSocketRxPacketList::const_iterator it;
+    std::stringstream ss;
+    std::stringstream as;
 
-  for (it = m_socketRecvList.begin (); it != m_socketRecvList.end (); ++it)
+    for (it = m_socketRecvList.begin(); it != m_socketRecvList.end(); ++it)
     {
-      (*it)->Print (ss);
+        (*it)->Print(ss);
     }
 
-  os << "Socket Recv list: \n" << ss.str () << "\n\nCurrent Status: "
-     << "\nNumber of receptions = " << m_socketRecvList.size ()
-     << "\nReceived Size = " << m_recvSize;
-
+    os << "Socket Recv list: \n"
+       << ss.str() << "\n\nCurrent Status: "
+       << "\nNumber of receptions = " << m_socketRecvList.size()
+       << "\nReceived Size = " << m_recvSize;
 }
 
-} //namepsace ns3
+} // namespace ns3

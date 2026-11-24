@@ -12,12 +12,14 @@
 #ifndef QUICSOCKETFACTORY_H
 #define QUICSOCKETFACTORY_H
 
-#include "ns3/socket-factory.h"
-#include "quic-socket-base.h"
-#include "ns3/node.h"
 #include "quic-l4-protocol.h"
+#include "quic-socket-base.h"
 
-namespace ns3 {
+#include "ns3/node.h"
+#include "ns3/socket-factory.h"
+
+namespace ns3
+{
 
 /**
  * \ingroup socket
@@ -32,38 +34,38 @@ namespace ns3 {
  */
 class QuicSocketFactory : public SocketFactory
 {
-public:
-  QuicSocketFactory ();
-  virtual ~QuicSocketFactory ();
+  public:
+    QuicSocketFactory();
+    virtual ~QuicSocketFactory();
 
-  /**
-   * Get the type ID.
-   * \brief Get the type ID.
-   * \return the object TypeId
-   */
-  static TypeId GetTypeId (void);
+    /**
+     * Get the type ID.
+     * \brief Get the type ID.
+     * \return the object TypeId
+     */
+    static TypeId GetTypeId(void);
 
-  /**
-   * \brief Implements a method to create a QUIC-based socket and return a base class smart pointer to the socket
-   *
-   * \return smart pointer to Socket
-   */
-  virtual Ptr<Socket> CreateSocket (void);
+    /**
+     * \brief Implements a method to create a QUIC-based socket and return a base class smart
+     * pointer to the socket
+     *
+     * \return smart pointer to Socket
+     */
+    virtual Ptr<Socket> CreateSocket(void);
 
-  /**
-   * \brief Set the associated QUIC L4 protocol.
-   *
-   * \param quic the QUIC L4 protocol
-   */
-  void SetQuicL4 (Ptr<QuicL4Protocol> quic);
+    /**
+     * \brief Set the associated QUIC L4 protocol.
+     *
+     * \param quic the QUIC L4 protocol
+     */
+    void SetQuicL4(Ptr<QuicL4Protocol> quic);
 
-protected:
-  virtual void DoDispose (void);
+  protected:
+    virtual void DoDispose(void);
 
-private:
-  Ptr<QuicL4Protocol> m_quicl4;                 //!< The associated QUIC L4 protocol
-  std::vector<Ptr<QuicSocketBase> > m_sockets;  //!< The list of QuicSocketBase
-
+  private:
+    Ptr<QuicL4Protocol> m_quicl4;               //!< The associated QUIC L4 protocol
+    std::vector<Ptr<QuicSocketBase>> m_sockets; //!< The list of QuicSocketBase
 };
 
 } // namespace ns3

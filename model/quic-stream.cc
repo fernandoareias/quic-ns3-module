@@ -11,44 +11,52 @@
 
 #define __STDC_LIMIT_MACROS
 
-#include "ns3/object.h"
-#include "ns3/log.h"
-#include "ns3/uinteger.h"
-#include "ns3/double.h"
-#include "ns3/boolean.h"
-#include "ns3/trace-source-accessor.h"
-#include "ns3/nstime.h"
 #include "quic-stream.h"
+
+#include "ns3/boolean.h"
+#include "ns3/double.h"
+#include "ns3/log.h"
 #include "ns3/node.h"
+#include "ns3/nstime.h"
+#include "ns3/object.h"
+#include "ns3/trace-source-accessor.h"
+#include "ns3/uinteger.h"
 
-namespace ns3 {
+namespace ns3
+{
 
-NS_LOG_COMPONENT_DEFINE ("QuicStream");
+NS_LOG_COMPONENT_DEFINE("QuicStream");
 
-NS_OBJECT_ENSURE_REGISTERED (QuicStream);
+NS_OBJECT_ENSURE_REGISTERED(QuicStream);
 
-const char* const
-QuicStream::QuicStreamStateName[QuicStream::LAST_STATE] = {"IDLE", "OPEN", "SEND", "RECV", "SIZE_KNOWN", "DATA_SENT", "DATA_RECVD", "DATA_READ", "RESET_SENT", "RESET_RECVD", "RESET_READ"};
+const char* const QuicStream::QuicStreamStateName[QuicStream::LAST_STATE] = {"IDLE",
+                                                                             "OPEN",
+                                                                             "SEND",
+                                                                             "RECV",
+                                                                             "SIZE_KNOWN",
+                                                                             "DATA_SENT",
+                                                                             "DATA_RECVD",
+                                                                             "DATA_READ",
+                                                                             "RESET_SENT",
+                                                                             "RESET_RECVD",
+                                                                             "RESET_READ"};
 
 TypeId
-QuicStream::GetTypeId (void)
+QuicStream::GetTypeId(void)
 {
-  static TypeId tid = TypeId ("ns3::QuicStream")
-    .SetParent<Object> ()
-    .SetGroupName ("Internet")
-  ;
-  return tid;
+    static TypeId tid = TypeId("ns3::QuicStream").SetParent<Object>().SetGroupName("Internet");
+    return tid;
 }
 
-QuicStream::QuicStream ()
-  : Object ()
+QuicStream::QuicStream()
+    : Object()
 {
-  NS_LOG_FUNCTION_NOARGS ();
+    NS_LOG_FUNCTION_NOARGS();
 }
 
-QuicStream::~QuicStream ()
+QuicStream::~QuicStream()
 {
-  NS_LOG_FUNCTION_NOARGS ();
+    NS_LOG_FUNCTION_NOARGS();
 }
 
 } // namespace ns3

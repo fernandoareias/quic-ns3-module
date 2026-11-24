@@ -8,89 +8,91 @@
  *          Umberto Paro <umberto.paro@me.com>
  */
 
-
-
 #ifndef QUICSOCKETTXEDFSCHED_H
 #define QUICSOCKETTXEDFSCHED_H
 
 #include "quic-socket-tx-scheduler.h"
-#include <queue>
-#include <map>
-#include <vector>
+
 #include "ns3/nstime.h"
 
-namespace ns3 {
+#include <map>
+#include <queue>
+#include <vector>
+
+namespace ns3
+{
 
 /**
  * \brief The EDF implementation
  *
- * This class is an Earliest Deadline First implementation of the socket scheduler, which prioritizes the packet with the earliest deadline
+ * This class is an Earliest Deadline First implementation of the socket scheduler, which
+ * prioritizes the packet with the earliest deadline
  */
 class QuicSocketTxEdfScheduler : public QuicSocketTxScheduler
 {
-public:
-  /**
-   * \brief Get the type ID.
-   * \return the object TypeId
-   */
-  static TypeId GetTypeId (void);
+  public:
+    /**
+     * \brief Get the type ID.
+     * \return the object TypeId
+     */
+    static TypeId GetTypeId(void);
 
-  QuicSocketTxEdfScheduler ();
-  QuicSocketTxEdfScheduler (const QuicSocketTxEdfScheduler &other);
-  virtual ~QuicSocketTxEdfScheduler (void);
+    QuicSocketTxEdfScheduler();
+    QuicSocketTxEdfScheduler(const QuicSocketTxEdfScheduler& other);
+    virtual ~QuicSocketTxEdfScheduler(void);
 
-  /**
-   * Add a tx item to the scheduling list and assign priority
-   *
-   * \param item a smart pointer to a transmission item
-   * \param retx true if the transmission item is being retransmitted
-   *
-   */
-  void Add (Ptr<QuicSocketTxItem> item, bool retx) override;
+    /**
+     * Add a tx item to the scheduling list and assign priority
+     *
+     * \param item a smart pointer to a transmission item
+     * \param retx true if the transmission item is being retransmitted
+     *
+     */
+    void Add(Ptr<QuicSocketTxItem> item, bool retx) override;
 
-  /**
-   * Set the latency bound for a specified stream
-   *
-   * \param streamId The stream ID
-   * \param latency The stream's maximum latency
-   */
-  void SetLatency (uint32_t streamId, Time latency);
+    /**
+     * Set the latency bound for a specified stream
+     *
+     * \param streamId The stream ID
+     * \param latency The stream's maximum latency
+     */
+    void SetLatency(uint32_t streamId, Time latency);
 
-  /**
-   * Get the latency bound for a specified stream
-   *
-   * \param streamId The stream ID
-   * \return The stream's maximum latency, or 0 if the stream is not registered
-   */
-  const Time GetLatency (uint32_t streamId);
+    /**
+     * Get the latency bound for a specified stream
+     *
+     * \param streamId The stream ID
+     * \return The stream's maximum latency, or 0 if the stream is not registered
+     */
+    const Time GetLatency(uint32_t streamId);
 
-  /**
-   * Set the default latency bound
-   *
-   * \param latency The default maximum latency
-   */
-  void SetDefaultLatency (Time latency);
+    /**
+     * Set the default latency bound
+     *
+     * \param latency The default maximum latency
+     */
+    void SetDefaultLatency(Time latency);
 
-  /**
-   * Get the default latency bound
-   *
-   * \param streamId The stream ID
-   * \return The default maximum latency
-   */
-  const Time GetDefaultLatency ();
+    /**
+     * Get the default latency bound
+     *
+     * \param streamId The stream ID
+     * \return The default maximum latency
+     */
+    const Time GetDefaultLatency();
 
-private:
-  /**
-   * Gets the deadline for a transmission item
-   * \param item The pointer to the item
-   */
-  Time GetDeadline (Ptr<QuicSocketTxItem> item);
+  private:
+    /**
+     * Gets the deadline for a transmission item
+     * \param item The pointer to the item
+     */
+    Time GetDeadline(Ptr<QuicSocketTxItem> item);
 
-  bool m_retxFirst;
-  Time m_defaultLatency;
-  std::map<uint32_t, Time> m_latencyMap;
+    bool m_retxFirst;
+    Time m_defaultLatency;
+    std::map<uint32_t, Time> m_latencyMap;
 };
 
-} // namepsace ns3
+} // namespace ns3
 
 #endif /* QUICSOCKETTXEDFSCHED_H */

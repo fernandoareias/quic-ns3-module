@@ -10,8 +10,8 @@
 #include "quic-helper.h"
 
 #include "ns3/log.h"
-#include "ns3/object-factory.h"
 #include "ns3/node.h"
+#include "ns3/object-factory.h"
 
 namespace ns3
 {

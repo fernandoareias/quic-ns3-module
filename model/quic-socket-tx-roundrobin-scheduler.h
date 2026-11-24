@@ -11,7 +11,8 @@
 
 #include "quic-socket-tx-streamfifo-scheduler.h"
 
-namespace ns3 {
+namespace ns3
+{
 
 /**
  * \brief Round-robin stream scheduling (msquic QUIC_STREAM_SCHEDULING_SCHEME_ROUND_ROBIN)
@@ -22,22 +23,22 @@ namespace ns3 {
  */
 class QuicSocketTxRoundRobinScheduler : public QuicSocketTxStreamFifoScheduler
 {
-public:
-  static TypeId GetTypeId (void);
+  public:
+    static TypeId GetTypeId(void);
 
-  QuicSocketTxRoundRobinScheduler ();
-  QuicSocketTxRoundRobinScheduler (const QuicSocketTxRoundRobinScheduler &other);
-  virtual ~QuicSocketTxRoundRobinScheduler (void);
+    QuicSocketTxRoundRobinScheduler();
+    QuicSocketTxRoundRobinScheduler(const QuicSocketTxRoundRobinScheduler& other);
+    virtual ~QuicSocketTxRoundRobinScheduler(void);
 
-  void Add (Ptr<QuicSocketTxItem> item, bool retx) override;
+    void Add(Ptr<QuicSocketTxItem> item, bool retx) override;
 
-protected:
-  void OnItemServed (double priority) override;
+  protected:
+    void OnItemServed(double priority) override;
 
-private:
-  static constexpr double kRoundBytes = 8 * 1460;   //!< one turn of a stream: 8 packets
-  std::map<uint64_t, double> m_cumulative;          //!< bytes queued per stream since it became active
-  double m_round {0};                               //!< round of the last item served
+  private:
+    static constexpr double kRoundBytes = 8 * 1460; //!< one turn of a stream: 8 packets
+    std::map<uint64_t, double> m_cumulative; //!< bytes queued per stream since it became active
+    double m_round{0};                       //!< round of the last item served
 };
 
 } // namespace ns3

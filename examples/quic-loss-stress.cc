@@ -9,20 +9,23 @@
 /**
  * quic-loss-stress.cc
  *
- * Two nodes on a point-to-point link with random packet loss in both directions. Client and server each write
- * `--bytes` bytes on every one of `--nstreams` streams, and the program checks that every byte arrives. It prints
- * "OK" or "FAIL" with the byte counts and returns 0 or 1, so a shell loop over `--run` (the RNG run number), the loss
- * rate, the link and the congestion control is a stress test of the loss recovery and of the connection set-up.
+ * Two nodes on a point-to-point link with random packet loss in both directions. Client and server
+ * each write
+ * `--bytes` bytes on every one of `--nstreams` streams, and the program checks that every byte
+ * arrives. It prints "OK" or "FAIL" with the byte counts and returns 0 or 1, so a shell loop over
+ * `--run` (the RNG run number), the loss rate, the link and the congestion control is a stress test
+ * of the loss recovery and of the connection set-up.
  *
- * It found the lost-Handshake stall, the control frames that were never retransmitted, and the short header that was
- * read as an Initial packet (see the quic test suites for their regression tests).
+ * It found the lost-Handshake stall, the control frames that were never retransmitted, and the
+ * short header that was read as an Initial packet (see the quic test suites for their regression
+ * tests).
  *
  * Usage:
  *   ./ns3 run "quic-loss-stress --loss=0.05 --run=7 --nstreams=3 --bytes=200000 --cc=ns3::QuicBbr"
  *
- * Note: --burst uses the ns-3 BurstErrorModel, which counts packets, not time. When only a few packets cross the link
- * (the sender backs off), one burst can last for many seconds, so failures with --burst at high rates are not
- * necessarily a protocol problem.
+ * Note: --burst uses the ns-3 BurstErrorModel, which counts packets, not time. When only a few
+ * packets cross the link (the sender backs off), one burst can last for many seconds, so failures
+ * with --burst at high rates are not necessarily a protocol problem.
  */
 
 #include "ns3/core-module.h"
@@ -49,7 +52,7 @@ uint64_t g_serverRx = 0;            //!< bytes the server received
 uint64_t g_clientRx = 0;            //!< bytes the client received
 std::vector<uint64_t> g_clientSent; //!< bytes the client wrote, per stream
 std::vector<uint64_t> g_serverSent; //!< bytes the server wrote, per stream
-bool g_transfer = true;             //!< false during the warm-up connection of --zrtt, which moves no data
+bool g_transfer = true; //!< false during the warm-up connection of --zrtt, which moves no data
 
 void
 Drain(uint64_t* counter, Ptr<Socket> socket)
@@ -139,8 +142,13 @@ main(int argc, char* argv[])
     cmd.AddValue("cc", "Congestion control TypeId", cc);
     cmd.AddValue("msd", "MaxStreamData, 0 keeps the default", maxStreamData);
     cmd.AddValue("md", "MaxData, 0 keeps the default", maxData);
-    cmd.AddValue("vn", "The client proposes a reserved version, which costs a Version Negotiation round trip", vn);
-    cmd.AddValue("zrtt", "Warm up with a first connection, then transfer over a 0-RTT connection", zrtt);
+    cmd.AddValue(
+        "vn",
+        "The client proposes a reserved version, which costs a Version Negotiation round trip",
+        vn);
+    cmd.AddValue("zrtt",
+                 "Warm up with a first connection, then transfer over a 0-RTT connection",
+                 zrtt);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(7);
@@ -213,16 +221,18 @@ main(int argc, char* argv[])
     Ptr<Socket> client;
     if (zrtt)
     {
-        // the server learns the client address in a first connection that moves no data, and the second one
-        // starts with 0-RTT data
+        // the server learns the client address in a first connection that moves no data, and the
+        // second one starts with 0-RTT data
         g_transfer = false;
         Simulator::Schedule(Seconds(0.1), [&client, &startClient]() { client = startClient(); });
         Simulator::Schedule(Seconds(2.0), [&client]() { client->Close(); });
         Simulator::Schedule(Seconds(40.0), [&nodes, &client, &startClient]() {
             g_transfer = true;
             // the client sends 0-RTT data and the server accepts it: both stacks have to allow it
-            nodes.Get(1)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake", BooleanValue(true));
-            nodes.Get(0)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake", BooleanValue(true));
+            nodes.Get(1)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake",
+                                                                    BooleanValue(true));
+            nodes.Get(0)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake",
+                                                                    BooleanValue(true));
             client = startClient();
         });
     }
@@ -237,7 +247,8 @@ main(int argc, char* argv[])
 
     const uint64_t expected = g_bytesPerStream * g_streams;
     const bool ok = g_serverRx == expected && g_clientRx == expected;
-    std::cout << (ok ? "OK" : "FAIL") << " loss=" << loss << " run=" << run << " streams=" << g_streams
-              << " server=" << g_serverRx << " client=" << g_clientRx << " of " << expected << std::endl;
+    std::cout << (ok ? "OK" : "FAIL") << " loss=" << loss << " run=" << run
+              << " streams=" << g_streams << " server=" << g_serverRx << " client=" << g_clientRx
+              << " of " << expected << std::endl;
     return ok ? 0 : 1;
 }
