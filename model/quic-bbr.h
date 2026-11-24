@@ -79,6 +79,7 @@ public:
   virtual int64_t AssignStreams (int64_t stream);
 
   virtual std::string GetName () const;
+  virtual bool UsesPacingRate () const;
   virtual void CongestionStateSet (Ptr<TcpSocketState> tcb,
                                    const TcpSocketState::TcpCongState_t newState);
 

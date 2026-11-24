@@ -3091,8 +3091,14 @@ QuicSocketBase::OnReceivedAckFrame (QuicSubheader &sub)
         {
           NS_LOG_INFO ("Update the variables in the congestion control (QUIC)");
           // Process the ACK
-          DynamicCast<QuicCongestionOps> (m_congestionControl)->OnAckReceived (
-            m_tcb, sub, ackedPackets, rs);
+          Ptr<QuicCongestionOps> ops = DynamicCast<QuicCongestionOps> (m_congestionControl);
+          if (ops->UsesPacingRate ())
+            {
+              // BBR works on what is in flight after the ACK (it waits for ProbeRTT to drain the pipe): bring the
+              // value in the TCB up to date, it still holds the one from before the ACK
+              BytesInFlight ();
+            }
+          ops->OnAckReceived (m_tcb, sub, ackedPackets, rs);
           m_lastRtt = m_tcb->m_lastRtt;
         }
       else
@@ -4167,9 +4173,19 @@ QuicSocketBase::BeginSendFlush (void)
   Time srtt = m_tcb->m_smoothedRtt;
   uint32_t cwnd = m_tcb->m_cWnd.Get ();
   uint32_t inFlight = m_tcb->m_bytesInFlight.Get ();
+  Ptr<QuicCongestionOps> ops = DynamicCast<QuicCongestionOps> (m_congestionControl);
   if (inFlight >= cwnd)
     {
       m_flushAllowance = 0;
+    }
+  else if (ops != nullptr && ops->UsesPacingRate () && m_tcb->m_pacing && m_lastFlushValid)
+    {
+      // the algorithm sets the rate (BBR): the allowance grows by that rate, within what the window leaves
+      double bytesPerUs = std::max (m_tcb->m_pacingRate.Get ().GetBitRate (), (uint64_t) 100000) / 8e6;
+      uint64_t dtUs = (now - m_lastFlushTime).GetMicroSeconds ();
+      uint64_t allowance = m_lastSendAllowance + (uint64_t) (bytesPerUs * dtUs);
+      m_flushAllowance = std::min<uint64_t> (allowance, cwnd - inFlight);
+      m_lastSendAllowance = (uint32_t) m_flushAllowance;
     }
   else if (!m_tcb->m_pacing || !m_lastFlushValid || srtt <= Seconds (0) || srtt < MicroSeconds (1000))
     {

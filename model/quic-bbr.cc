@@ -585,6 +585,12 @@ QuicBbr::GetPacingGain ()
   return m_pacingGain;
 }
 
+bool
+QuicBbr::UsesPacingRate () const
+{
+  return true;
+}
+
 std::string
 QuicBbr::GetName () const
 {
@@ -595,6 +601,9 @@ void
 QuicBbr::CongControl (Ptr<QuicSocketState> tcb, const struct RateSample *rs)
 {
   NS_LOG_FUNCTION (this << tcb << rs);
+  // the segment size grows when the path MTU discovery finds a larger MTU: four segments of the size at the start of
+  // the connection are fewer bytes than BBR keeps in flight in ProbeRTT, which then never sees its pipe drained
+  m_minPipeCwnd = 4 * tcb->m_segmentSize;
   UpdateModelAndState (tcb, rs);
   UpdateControlParameters (tcb, rs);
 }

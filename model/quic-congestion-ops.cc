@@ -55,6 +55,12 @@ QuicCongestionOps::QuicCongestionOps (
 QuicCongestionOps::~QuicCongestionOps (void)
 {}
 
+bool
+QuicCongestionOps::UsesPacingRate () const
+{
+  return false;
+}
+
 std::string
 QuicCongestionOps::GetName () const
 {

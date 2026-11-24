@@ -1869,6 +1869,55 @@ private:
 };
 
 /**
+ * BBR on a link without loss. Every ten seconds it goes through ProbeRTT, with a window of four segments, and has to
+ * come out of it at the rate it had. It did not: the minimum window was four segments of the size at the start of
+ * the connection, fewer bytes than ProbeRTT leaves in flight once the path MTU discovery has grown the segment, so
+ * the pipe never looked drained and the connection stayed at four segments for good (about 10 % of the link). Besides,
+ * the rate BBR sets was not the rate the socket paced at, so BBR stayed in Drain and never cycled its gains.
+ */
+class FeatBbrProbeRttTest : public TestCase
+{
+public:
+  FeatBbrProbeRttTest () : TestCase ("BBR: the connection keeps its rate through ProbeRTT (draft-cardwell-iccrg-bbr)") {}
+private:
+  static constexpr uint64_t kTotal = 20000000; //!< 16 s at 10 Mbps
+  void Fill ()
+  {
+    while (m_sent < kTotal)
+      {
+        uint32_t n = (uint32_t) std::min<uint64_t> (16000, kTotal - m_sent);
+        if (m_srv->GetTxAvailable () < n || m_srv->Send (Create<Packet> (n), ServerStreamId (1)) < 0)
+          {
+            break;
+          }
+        m_sent += n;
+      }
+    if (m_sent < kTotal)
+      {
+        Simulator::Schedule (MilliSeconds (2), &FeatBbrProbeRttTest::Fill, this);
+      }
+  }
+  void DoRun () override
+  {
+    FeatRig r;
+    r.cc = "ns3::QuicBbr";
+    r.stopAt = Seconds (60);
+    r.onAccept = [this] (Ptr<Socket> s) {
+      m_srv = s;
+      Fill ();
+    };
+    r.Build ();
+    r.Run ();
+    NS_TEST_ASSERT_MSG_EQ (r.rx[0][1].bytes, kTotal, "delivered");
+    double dur = r.rx[0][1].last.GetSeconds () - 0.1;
+    // 16 s at the link rate; stuck at four segments after the ProbeRTT at 10 s it took several minutes
+    NS_TEST_ASSERT_MSG_LT (dur, 20.0, "20 MB over 10 Mbps took " << dur << " s");
+  }
+  Ptr<Socket> m_srv;
+  uint64_t m_sent {0};
+};
+
+/**
  * RFC 9000 s6, s17.2.1: the Version Negotiation packet lists the versions in network byte order, and a client that
  * proposed an unknown version carries on with one of them.
  */
@@ -1999,6 +2048,7 @@ public:
     AddTestCase (new FeatHandshakeDoneRetransmitTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClientHandshakeLossTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatClosingRepeatTest, TestCase::Duration::QUICK);
+    AddTestCase (new FeatBbrProbeRttTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatIdleCloseTest, TestCase::Duration::QUICK);
     AddTestCase (new FeatZeroRttTest (false), TestCase::Duration::QUICK);
     AddTestCase (new FeatZeroRttTest (true), TestCase::Duration::QUICK);

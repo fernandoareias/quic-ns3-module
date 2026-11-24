@@ -66,6 +66,16 @@ public:
   std::string GetName () const;
 
   /**
+   * \brief Whether the sender has to space its packets by the pacing rate this algorithm sets
+   *
+   * The default is no: the socket then paces by its window and its round trip time, as msquic does. BBR sets a pacing
+   * rate that is part of its model (the gains of its states are gains of that rate), so it asks for it.
+   *
+   * \return true if the pacing rate of the TCB is the rate to send at
+   */
+  virtual bool UsesPacingRate () const;
+
+  /**
    * \brief Copy the congestion control algorithm across socket
    *
    * \return a pointer of the copied object
