@@ -1088,6 +1088,14 @@ class QuicSocketBase : public QuicSocket
     Time ProbeTimeout(bool withMaxAckDelay) const;
 
     /**
+     * Time a connection that closes stays in the closing state, absorbing the late packets of the
+     * peer (RFC 9000 s10.2.1 and s10.2.2: at least three PTOs).
+     *
+     * @return three times the PTO of the Application Data space
+     */
+    Time ClosingPeriod() const;
+
+    /**
      * \brief Record a received packet number and, when it is the largest, its arrival time
      * \param packetNumber the packet number
      */
@@ -1519,10 +1527,9 @@ class QuicSocketBase : public QuicSocket
     EventId m_drainingPeriodEvent;  //!< Event triggered upon idle timeout or immediate connection
                                     //!< close, when it expires all closes
     TracedValue<Time> m_rto;        //!< Retransmit timeout
-    TracedValue<Time> m_drainingPeriodTimeout; //!< Draining Period timeout
-    EventId m_sendAckEvent;                    //!< Send ACK timeout event
-    EventId m_delAckEvent;                     //!< Delayed ACK timeout event
-    bool m_flushOnClose;                       //!< Control behavior on connection close
+    EventId m_sendAckEvent;         //!< Send ACK timeout event
+    EventId m_delAckEvent;          //!< Delayed ACK timeout event
+    bool m_flushOnClose;            //!< Control behavior on connection close
     bool m_closeOnEmpty; //!< True if the socket will close after sending the buffered packets
 
     // Congestion Control

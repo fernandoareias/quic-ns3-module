@@ -101,6 +101,7 @@ The frame layouts are those of RFC 9000 §19, and the first byte of the headers 
 ## Known limitations
 
 - Migration is client-initiated only: no `preferred_address` and no multipath.
+- **Closing.** A connection closed by the application or by the idle timeout stays in the closing state for three PTOs (RFC 9000 s10.1, s10.2.1), answering the packets of the peer with CONNECTION_CLOSE, as a connection closed by the peer drains for three PTOs.
 - No keep-alive.
 - Loopback support requires special handling due to ns-3's UDP socket internals.
 

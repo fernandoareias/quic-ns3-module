@@ -586,7 +586,6 @@ QuicSocketBase::QuicSocketBase(void)
       m_receivedTransportParameters(false),
       m_couldContainTransportParameters(true),
       m_rto(Seconds(30.0)),
-      m_drainingPeriodTimeout(Seconds(90.0)),
       m_flushOnClose(true),
       m_closeOnEmpty(false),
       m_congestionControl(0),
@@ -686,7 +685,6 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
       m_receivedTransportParameters(sock.m_receivedTransportParameters),
       m_couldContainTransportParameters(sock.m_couldContainTransportParameters),
       m_rto(sock.m_rto),
-      m_drainingPeriodTimeout(sock.m_drainingPeriodTimeout),
       m_flushOnClose(sock.m_flushOnClose),
       m_closeOnEmpty(sock.m_closeOnEmpty),
       m_lastRtt(sock.m_lastRtt),
@@ -1755,6 +1753,12 @@ QuicSocketBase::SetReTxTimeout()
 }
 
 Time
+QuicSocketBase::ClosingPeriod() const
+{
+    return 3 * ProbeTimeout(true);
+}
+
+Time
 QuicSocketBase::ProbeTimeout(bool withMaxAckDelay) const
 {
     // RFC 9002 s6.2.1: smoothed_rtt + max (4 * rttvar, kGranularity) + max_ack_delay; before the
@@ -1901,8 +1905,7 @@ QuicSocketBase::EnterDraining()
     m_tcb->m_lossDetectionAlarm.Cancel();
     m_idleTimeoutEvent.Cancel();
     SetState(CLOSING);
-    m_drainingPeriodEvent =
-        Simulator::Schedule(3 * ProbeTimeout(true), &QuicSocketBase::DoClose, this);
+    m_drainingPeriodEvent = Simulator::Schedule(ClosingPeriod(), &QuicSocketBase::DoClose, this);
     // the application hears of the close right away, outside the frame being processed
     Simulator::ScheduleNow(&QuicSocketBase::NotifyClosedByPeer, this);
 }
@@ -2229,9 +2232,8 @@ QuicSocketBase::ScheduleCloseAndSendConnectionClosePacket()
     m_drainingPeriodEvent.Cancel();
     NS_LOG_LOGIC(this << " Close Schedule DoClose at time " << Simulator::Now().GetSeconds()
                       << " to expire at time "
-                      << (Simulator::Now() + m_drainingPeriodTimeout.Get()).GetSeconds());
-    m_drainingPeriodEvent =
-        Simulator::Schedule(m_drainingPeriodTimeout, &QuicSocketBase::DoClose, this);
+                      << (Simulator::Now() + ClosingPeriod()).GetSeconds());
+    m_drainingPeriodEvent = Simulator::Schedule(ClosingPeriod(), &QuicSocketBase::DoClose, this);
     SendConnectionClosePacket(0, "Scheduled connection close - no error");
     m_closePacketSent = true;
     m_closingPacketsReceived = 0;
@@ -2280,9 +2282,9 @@ QuicSocketBase::Close(void)
         m_drainingPeriodEvent.Cancel();
         NS_LOG_LOGIC(this << " Close Schedule DoClose at time " << Simulator::Now().GetSeconds()
                           << " to expire at time "
-                          << (Simulator::Now() + m_drainingPeriodTimeout.Get()).GetSeconds());
+                          << (Simulator::Now() + ClosingPeriod()).GetSeconds());
         m_drainingPeriodEvent =
-            Simulator::Schedule(m_drainingPeriodTimeout, &QuicSocketBase::DoClose, this);
+            Simulator::Schedule(ClosingPeriod(), &QuicSocketBase::DoClose, this);
     }
     else if (!IdleTimerArmed() and m_drainingPeriodEvent.IsExpired() and
              m_socketState != CLOSING and m_socketState != IDLE) // close last listening sockets

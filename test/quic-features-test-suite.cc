@@ -1995,8 +1995,9 @@ class FeatHandshakeDoneRetransmitTest : public TestCase
 
 /**
  * RFC 9000 s10.2.1: an endpoint that closed the connection answers the packets it still receives
- * with CONNECTION_CLOSE. The first CONNECTION_CLOSE is lost here; without the repeat the peer
- * learns of the close only when its idle timer expires.
+ * with CONNECTION_CLOSE. The first CONNECTION_CLOSE is lost here, and the client sends a packet
+ * while the closing period (three PTOs) lasts; without the repeat the peer learns of the close only
+ * when its idle timer expires.
  */
 class FeatClosingRepeatTest : public TestCase
 {
@@ -2022,6 +2023,7 @@ class FeatClosingRepeatTest : public TestCase
             s->Close();
         };
         r.Build();
+        m_client = r.clients[0];
         r.clients[0]->SetCloseCallbacks(MakeCallback(&FeatClosingRepeatTest::OnClientClosed, this),
                                         MakeCallback(&FeatClosingRepeatTest::OnClientClosed, this));
         m_em = CreateObject<RateErrorModel>();
@@ -2050,6 +2052,9 @@ class FeatClosingRepeatTest : public TestCase
                 // the first one never reaches the client
                 m_em->Enable();
                 Simulator::Schedule(MilliSeconds(30), &ErrorModel::Disable, m_em);
+                // the client writes once the loss is over, inside the closing period (at least
+                // 75 ms with the default max_ack_delay)
+                Simulator::Schedule(MilliSeconds(40), &FeatRig::SendPattern, m_client, 0, 100);
             }
         }
     }
@@ -2061,6 +2066,7 @@ class FeatClosingRepeatTest : public TestCase
     }
 
     Ptr<RateErrorModel> m_em;
+    Ptr<Socket> m_client;
     uint32_t m_closeSent{0};
     bool m_closed{false};
     Time m_closedAt{Seconds(0)};
@@ -2281,19 +2287,26 @@ class FeatIdleCloseTest : public TestCase
         r.stopAt = Seconds(12);
         r.Build();
         Simulator::Schedule(Seconds(2), [&r]() { r.clients[0]->Close(); });
+        Simulator::Schedule(Seconds(2.001), [this, &r]() {
+            m_clientEarly = DynamicCast<QuicSocketBase>(r.clients[0])->GetSocketState();
+        });
         Simulator::Schedule(Seconds(11), [this, &r]() {
             m_clientState = DynamicCast<QuicSocketBase>(r.clients[0])->GetSocketState();
             m_serverState = DynamicCast<QuicSocketBase>(r.accepted[0])->GetSocketState();
         });
         r.Run();
-        // the closing endpoint stays in its closing period (DrainingPeriodTimeout, 90 s), the peer
-        // is closed at once
-        NS_TEST_ASSERT_MSG_EQ((int)m_clientState,
+        // the closing endpoint stays in its closing period (three PTOs, at least 75 ms with the
+        // default max_ack_delay), the peer is closed at once
+        NS_TEST_ASSERT_MSG_EQ((int)m_clientEarly,
                               (int)QuicSocket::CLOSING,
-                              "the closing endpoint is closing");
+                              "the closing endpoint is closing right after Close()");
+        NS_TEST_ASSERT_MSG_EQ((int)m_clientState,
+                              (int)QuicSocket::IDLE,
+                              "the closing period ended long before 9 s");
         NS_TEST_ASSERT_MSG_EQ((int)m_serverState, (int)QuicSocket::IDLE, "the peer is closed");
     }
 
+    QuicSocket::QuicStates_t m_clientEarly{QuicSocket::OPEN};
     QuicSocket::QuicStates_t m_clientState{QuicSocket::OPEN};
     QuicSocket::QuicStates_t m_serverState{QuicSocket::OPEN};
 };
