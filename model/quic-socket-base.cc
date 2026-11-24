@@ -761,14 +761,16 @@ QuicSocketBase::~QuicSocketBase(void)
         NS_ASSERT(m_quicl4 != nullptr);
         NS_ASSERT(m_endPoint != nullptr);
         m_quicl4->DeAllocate(m_endPoint);
-        NS_ASSERT(m_endPoint == nullptr);
+        // the demux does not reset the socket's pointer
+        m_endPoint = nullptr;
     }
     if (m_endPoint6 != nullptr)
     {
         NS_ASSERT(m_quicl4 != nullptr);
         NS_ASSERT(m_endPoint6 != nullptr);
         m_quicl4->DeAllocate(m_endPoint6);
-        NS_ASSERT(m_endPoint6 == nullptr);
+        // the demux does not reset the socket's pointer
+        m_endPoint6 = nullptr;
     }
     m_quicl4 = 0;
     // the timers hold this pointer without a reference

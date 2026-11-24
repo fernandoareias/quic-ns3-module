@@ -177,6 +177,9 @@ QuicL4Protocol::~QuicL4Protocol()
 {
     NS_LOG_FUNCTION(this);
     m_quicUdpBindingList.clear();
+    // sockets keep a Ptr to this object, so none is left that could still use the demuxes
+    delete m_endPoints;
+    delete m_endPoints6;
 }
 
 void
@@ -1072,6 +1075,7 @@ QuicL4Protocol::DoDispose(void)
     NS_LOG_FUNCTION(this);
     m_quicUdpBindingList.clear();
     m_cidMap.clear();
+    m_socketHandlers.clear();
 
     m_node = 0;
     //  m_downTarget.Nullify ();
