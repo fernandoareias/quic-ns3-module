@@ -3716,7 +3716,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Addres
             for (size_t j = 0; j < supportedVersions.size(); j++)
             {
                 //			NS_LOG_INFO("rec " << receivedVersions[i] << " myvers " <<
-                //m_supportedVersions[j] );
+                // m_supportedVersions[j] );
                 if (receivedVersions[i] == supportedVersions[j])
                 {
                     foundVersion = receivedVersions[i];
