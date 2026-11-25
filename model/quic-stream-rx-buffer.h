@@ -21,6 +21,7 @@
 #include "ns3/traced-value.h"
 
 #include <map>
+#include <memory>
 
 namespace ns3
 {
@@ -167,7 +168,7 @@ class QuicStreamRxBuffer : public Object
 
   private:
     // TODO consider replacing std::vector with a ordered data structure
-    typedef std::vector<QuicStreamRxItem*>
+    typedef std::vector<std::unique_ptr<QuicStreamRxItem>>
         QuicStreamRxPacketList; //!< container for data stored in the buffer
 
     QuicStreamRxPacketList m_streamRecvList; //!< List of received packets with additional info

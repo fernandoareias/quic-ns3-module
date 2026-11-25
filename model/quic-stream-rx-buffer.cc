@@ -90,7 +90,7 @@ QuicStreamRxBuffer::Add(Ptr<Packet> p, const QuicSubheader& sub)
     {
         if (p->GetSize() > 0)
         {
-            QuicStreamRxItem* item = new QuicStreamRxItem();
+            auto item = std::make_unique<QuicStreamRxItem>();
             item->m_packet = p->Copy();
             item->m_offset = sub.GetOffset();
             item->m_fin = sub.IsStreamFin();
@@ -103,7 +103,7 @@ QuicStreamRxBuffer::Add(Ptr<Packet> p, const QuicSubheader& sub)
                 NS_LOG_LOGIC("FIN packet for the stream");
                 m_finalSize = sub.GetOffset() + p->GetSize();
                 m_recvFin = true;
-                m_streamRecvList.insert(m_streamRecvList.end(), item);
+                m_streamRecvList.insert(m_streamRecvList.end(), std::move(item));
                 return true;
             }
 
@@ -119,7 +119,7 @@ QuicStreamRxBuffer::Add(Ptr<Packet> p, const QuicSubheader& sub)
                 }
                 if (item->m_offset < (*it)->m_offset)
                 {
-                    m_streamRecvList.insert(it, item);
+                    m_streamRecvList.insert(it, std::move(item));
                     NS_LOG_LOGIC("Inserted packet");
                     inserted = true;
                     break;
@@ -129,7 +129,7 @@ QuicStreamRxBuffer::Add(Ptr<Packet> p, const QuicSubheader& sub)
             if (!inserted)
             {
                 NS_LOG_LOGIC("Appending packet");
-                m_streamRecvList.insert(m_streamRecvList.end(), item);
+                m_streamRecvList.insert(m_streamRecvList.end(), std::move(item));
             }
             m_numBytesInBuffer += p->GetSize();
             NS_LOG_INFO("Update: Received Size = " << m_numBytesInBuffer);
@@ -174,7 +174,6 @@ QuicStreamRxBuffer::Extract(uint32_t maxSize)
             outPkt->AddAtEnd(currentPacket);
             NS_LOG_LOGIC("Extracted and removed packet "
                          << (*it)->m_offset << " from RxBuffer, bytes to extract: " << extractSize);
-            delete *it;
             m_streamRecvList.erase(it);
 
             m_numBytesInBuffer -= currentPacket->GetSize();
@@ -232,7 +231,7 @@ QuicStreamRxBuffer::ExtractInOrder(uint64_t recvOffset)
 
     while (!m_streamRecvList.empty())
     {
-        QuicStreamRxItem* item = m_streamRecvList.front();
+        QuicStreamRxItem* item = m_streamRecvList.front().get();
         uint64_t itemEnd = item->m_offset + item->m_packet->GetSize();
         if (item->m_offset > cur)
         {
@@ -246,7 +245,6 @@ QuicStreamRxBuffer::ExtractInOrder(uint64_t recvOffset)
             out->AddAtEnd(p);
             cur = itemEnd;
         }
-        delete item;
         m_streamRecvList.erase(m_streamRecvList.begin());
     }
 
