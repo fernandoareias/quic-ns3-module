@@ -75,7 +75,22 @@ Ptr<Socket> socket = Socket::CreateSocket(node, QuicSocketFactory::GetTypeId());
 
 ## Streaming experiment
 
-`examples/quic-video-streaming.cc` sends a video, an audio and a metadata flow (low-latency live media) over one connection through a bottleneck link, with QUIC or TCP, and prints the one-way delivery delay of every flow, counted from the instant each message was generated; a message that never arrives counts as late. `scripts/streaming_experiment.py` runs the experiment of the paper: random loss (uniform at 0 to 3 % and in bursts of mean length 4 at 1 to 3 %) on an otherwise idle 10 Mbps link, no TLS, 30 repetitions of five variants (TCP with the ns-3 defaults, with Linux timers and buffers, and with those plus pacing, and QUIC with round-robin and with per-stream FIFO scheduling, about four minutes) and prints the LaTeX rows of its tables. The results it produced are in `results/streaming-loss.csv`. That file is the data of the paper, from the module as it was at that time (`a4debf5`); `results/streaming-loss-v1.1.0.csv` is the same experiment with the module of release v1.1.0, which has the loss-recovery corrections of 2026-11-23 (client Handshake repeated, control frames covered by the loss timer, RESET_STREAM/STOP_SENDING retransmitted, CONNECTION_CLOSE repeated, ACK room in retransmissions). The three TCP variants are identical in both files; for QUIC 574 of the 630 rows per variant differ, by little: the 99th percentile of the video flow drops by about 1 to 10 ms at 1 to 2 % loss (for example 83.4 to 74.1 ms with round-robin at 1 % uniform loss) and the share of messages later than 150 ms changes by under 0.2 points, except at 3 % uniform loss (3.13 to 2.94 % with round-robin). The TCP is the ns-3 one, without tail loss probe or RACK, and there is no cross traffic, so the experiment measures random loss and not congestion. From the ns-3 root:
+`examples/quic-video-streaming.cc` sends a video flow, an audio flow and a metadata flow (low-latency live media) over one connection through a bottleneck link, using QUIC or TCP. It prints the one-way delivery delay of every flow, counted from the instant each message was generated. A message that never arrives counts as late.
+
+`scripts/streaming_experiment.py` runs the experiment of the paper.
+
+- Loss is random: uniform at 0 to 3% and in bursts of mean length 4 at 1 to 3%, on an otherwise idle 10 Mbps link, without TLS.
+- There are 30 repetitions of five variants: TCP with the ns-3 defaults, TCP with Linux timers and buffers, TCP with those settings and pacing, and QUIC with round-robin and with per-stream FIFO scheduling. The run takes about four minutes.
+- The script prints the LaTeX rows of the tables of the paper.
+
+The results directory contains two files for the same experiment.
+
+- `results/streaming-loss.csv` holds the data of the paper, produced by the module as it was at that time (`a4debf5`).
+- `results/streaming-loss-v1.1.0.csv` holds the same experiment with release v1.1.0, which contains the loss-recovery corrections of 2026-11-23: the client Handshake is repeated, control frames are covered by the loss timer, RESET_STREAM and STOP_SENDING are retransmitted, CONNECTION_CLOSE is repeated, and retransmissions leave room for an ACK.
+
+The three TCP variants are identical in both files. For QUIC, 574 of the 630 rows per variant differ, by a small amount. The 99th percentile of the video flow drops by about 1 to 10 ms at 1 to 2% loss (for example from 83.4 to 74.1 ms with round-robin at 1% uniform loss). The share of messages later than 150 ms changes by less than 0.2 percentage points, except at 3% uniform loss (from 3.13 to 2.94% with round-robin).
+
+The TCP used is the ns-3 implementation, without tail loss probe or RACK, and there is no cross traffic. The experiment therefore measures the effect of random loss and not of congestion. From the ns-3 root:
 
 ```bash
 ./ns3 build quic-video-streaming
@@ -85,24 +100,24 @@ contrib/quic/scripts/streaming_experiment.py tables   # rows of the tables
 
 ## Differences from the RFCs
 
-The frame layouts are those of RFC 9000 §19, and the first byte of the headers follows §17. What differs:
+The frame layouts are those of RFC 9000, Section 19, and the first byte of the headers follows Section 17. What differs:
 
 - **No TLS:** no packet protection, no key update, no CRYPTO frames, no Retry and no address-validation tokens (`NEW_TOKEN` is ignored by clients and is a protocol violation for servers).
 - **Long headers** carry no Source Connection ID, Token or Length, and the packet number is always 4 bytes (32 bits, not 62).
-- **Connection ids** are always 8 bytes, and the connection-id transport parameters (RFC 9000 §7.3) are not checked. `OmitConnectionId` (short headers without the id) is flagged in a reserved bit.
-- **Transport parameters** are a fixed 72-byte structure, not the TLV list of RFC 9000 §18, carried in the handshake payload.
-- **Persistent congestion** is detected as msquic does (a loss after more than 2 consecutive PTOs). The RFC 9002 §7.6 duration test is selected with `PersistentCongestionByPto=false`.
-- **ACK frequency** follows the ack-frequency draft as msquic does; it asks the peer for an ACK tolerance of up to 41 packets, beyond the one-ACK-per-two-packets of RFC 9000 §13.2.2.
+- **Connection ids** are always 8 bytes, and the connection-id transport parameters (RFC 9000, Section 7.3) are not checked. `OmitConnectionId` (short headers without the id) is flagged in a reserved bit.
+- **Transport parameters** are a fixed 72-byte structure, not the TLV list of RFC 9000, Section 18, carried in the handshake payload.
+- **Persistent congestion** is detected as msquic does (a loss after more than 2 consecutive PTOs). The RFC 9002, Section 7.6 duration test is selected with `PersistentCongestionByPto=false`.
+- **ACK frequency** follows the ack-frequency draft as msquic does; it asks the peer for an ACK tolerance of up to 41 packets, beyond the one-ACK-per-two-packets of RFC 9000, Section 13.2.2.
 - No ECN marking (only the `ACK_ECN` counts are read) and no coalesced packets.
 - **Segment size.** `MaxPacketSize` counts the frames of a packet, without the QUIC header. The default of 1459 fills a 1500 byte IP MTU exactly (IPv4 20 + UDP 8 + short header 13); the path MTU discovery sizes segments as the IP MTU minus 41. A larger segment makes the IP layer fragment every full datagram.
-- **Handshake loss.** The Handshake packet of the client is what lets the server leave `CONNECTING_SVR`; the client repeats it (with a PING, in a Handshake header, with exponential backoff) until it receives HANDSHAKE_DONE (RFC 9001 §4.9.2). A server that is already open treats the repeated packet like any other and acknowledges it.
-- **0-RTT.** With `QuicL4Protocol::0RTT-Handshake` on, a client that already connected to a server sends 0-RTT data right away, within the transport parameters the server announced the last time (kept by the client's `QuicL4Protocol`, RFC 9000 s7.4.1; without them it could not open a stream). Every packet of the client carries a 0-RTT header until the first answer arrives, so a lost first packet does not leave the server without a connection, and a server that has not yet received the client's parameters holds the writes of its application until it has. The server's stack must allow 0-RTT too (`0RTT-Handshake` on both nodes, as `quic-loss-stress --zrtt` does).
+- **Handshake loss.** The Handshake packet of the client is what lets the server leave `CONNECTING_SVR`; the client repeats it (with a PING, in a Handshake header, with exponential backoff) until it receives HANDSHAKE_DONE (RFC 9001, Section 4.9.2). A server that is already open treats the repeated packet like any other and acknowledges it.
+- **0-RTT.** With `QuicL4Protocol::0RTT-Handshake` on, a client that already connected to a server sends 0-RTT data right away, within the transport parameters the server announced the last time (kept by the client's `QuicL4Protocol`, RFC 9000, Section 7.4.1; without them it could not open a stream). Every packet of the client carries a 0-RTT header until the first answer arrives, so a lost first packet does not leave the server without a connection, and a server that has not yet received the client's parameters holds the writes of its application until it has. The server's stack must allow 0-RTT too (`0RTT-Handshake` on both nodes, as `quic-loss-stress --zrtt` does).
 
 ## Known limitations
 
 - Migration is client-initiated only: no `preferred_address` and no multipath.
-- **Handshake under heavy loss.** The client repeats its Initial with exponential backoff (about 0.1, 1.1, 3.1, 7.1 and 15.1 s after the start) and gives up when the idle timeout (30 s) expires without an answer: the connection fails, the application hears of it through the connect-failed callback, and nothing more is sent (RFC 9000 s10.1). With a loss rate `L` in both directions the chance of that is roughly `(1 - (1 - L)^2)^5`: 0.03% with 10% loss, 0.2% with 15%, 0.6% with 20%, 3.5% with 30% (40 seeds of `quic-loss-stress` at 10, 15, 20, 25 and 30% lost 0, 0, 1, 1 and 1 connections, always the seed whose first five Initials were lost). A shorter idle timeout or a slower backoff would change the chance; the module follows RFC 9002 s6.2.
-- **Closing.** A connection closed by the application or by the idle timeout stays in the closing state for three PTOs (RFC 9000 s10.1, s10.2.1), answering the packets of the peer with CONNECTION_CLOSE, as a connection closed by the peer drains for three PTOs.
+- **Handshake under heavy loss.** The client repeats its Initial with exponential backoff (about 0.1, 1.1, 3.1, 7.1 and 15.1 s after the start) and gives up when the idle timeout (30 s) expires without an answer: the connection fails, the application hears of it through the connect-failed callback, and nothing more is sent (RFC 9000, Section 10.1). With a loss rate `L` in both directions the chance of that is roughly `(1 - (1 - L)^2)^5`: 0.03% with 10% loss, 0.2% with 15%, 0.6% with 20%, 3.5% with 30% (40 seeds of `quic-loss-stress` at 10, 15, 20, 25 and 30% lost 0, 0, 1, 1 and 1 connections, always the seed whose first five Initials were lost). A shorter idle timeout or a slower backoff would change the chance; the module follows RFC 9002, Section 6.2.
+- **Closing.** A connection closed by the application or by the idle timeout stays in the closing state for three PTOs (RFC 9000, Sections 10.1 and 10.2.1), answering the packets of the peer with CONNECTION_CLOSE, as a connection closed by the peer drains for three PTOs.
 - **Keep-alive.** Off by default. `KeepAliveInterval` (a `Time`, 0 disables it) sends a PING after that long without receiving a packet; the answer restarts the idle timers of both ends, so a silent connection does not close at the idle timeout. It has no effect when it is not shorter than the idle timeout, and an unreachable peer is still detected (the PING is lost, the probes follow, and the idle timeout or the disconnect timeout closes the connection).
 - Loopback support requires special handling due to ns-3's UDP socket internals.
 
@@ -120,7 +135,7 @@ The frame layouts are those of RFC 9000 §19, and the first byte of the headers 
 
 RFC 9000 / RFC 9002 updates and ns-3 integration patches:
 
-- Fernando Areias — nando.calheirosx@gmail.com
+- Fernando Areias (nando.calheirosx@gmail.com)
 
 ## License
 
