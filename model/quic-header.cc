@@ -186,13 +186,19 @@ QuicHeader::Serialize(Buffer::Iterator start) const
         }
         if (IsRetry())
         {
-            i.Write(m_token.data(), m_token.size());
+            if (!m_token.empty())
+            {
+                i.Write(m_token.data(), m_token.size());
+            }
             return;
         }
         if (IsInitial())
         {
             QuicWriteVarInt(i, m_token.size());
-            i.Write(m_token.data(), m_token.size());
+            if (!m_token.empty())
+            {
+                i.Write(m_token.data(), m_token.size());
+            }
         }
         QuicWriteVarInt(i, m_pnLength + m_payloadSize);
     }
@@ -326,7 +332,10 @@ QuicHeader::Deserialize(Buffer::Iterator start)
             return fail();
         }
         m_token.resize(left - QUIC_AEAD_TAG_SIZE);
-        i.Read(m_token.data(), m_token.size());
+        if (!m_token.empty())
+        {
+            i.Read(m_token.data(), m_token.size());
+        }
         left = QUIC_AEAD_TAG_SIZE;
         m_payloadSize = left;
         return total - left;
@@ -345,7 +354,10 @@ QuicHeader::Deserialize(Buffer::Iterator start)
             return fail();
         }
         m_token.resize(tokenLength);
-        i.Read(m_token.data(), m_token.size());
+        if (!m_token.empty())
+        {
+            i.Read(m_token.data(), m_token.size());
+        }
         left -= tokenLength;
     }
     uint64_t length = 0;

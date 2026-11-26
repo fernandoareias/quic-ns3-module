@@ -258,7 +258,10 @@ class BufferWriter
 
     void Bytes(const uint8_t* bytes, uint32_t count)
     {
-        m_i.Write(bytes, count);
+        if (count > 0)
+        {
+            m_i.Write(bytes, count);
+        }
     }
 
   private:

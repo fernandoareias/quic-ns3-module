@@ -275,7 +275,10 @@ QuicTransportParameters::Serialize(Buffer::Iterator start) const
     const std::vector<uint8_t> body = EncodeEntries();
     Buffer::Iterator i = start;
     QuicWriteVarInt(i, body.size());
-    i.Write(body.data(), body.size());
+    if (!body.empty())
+    {
+        i.Write(body.data(), body.size());
+    }
 }
 
 uint32_t
