@@ -11,6 +11,8 @@
 
 #include "quic-subheader.h"
 
+#include "quic-wire.h"
+
 #include "ns3/address-utils.h"
 #include "ns3/buffer.h"
 #include "ns3/log.h"
@@ -937,135 +939,19 @@ operator<<(std::ostream& os, QuicSubheader& tc)
 void
 QuicSubheader::WriteVarInt64(Buffer::Iterator& i, uint64_t varInt64) const
 {
-    // NS_LOG_FUNCTION(this);
-
-    uint8_t mask = 0x00;
-    if (varInt64 <= 63)
-    {
-        uint8_t buffer[1];
-        buffer[0] = (uint8_t)varInt64;
-        i.WriteU8(buffer[0]);
-    }
-    else if (varInt64 <= 16383)
-    {
-        mask = 0x40;
-        uint8_t buffer[2];
-        buffer[0] = (uint8_t)(varInt64 >> 8);
-        buffer[1] = (uint8_t)varInt64;
-        buffer[0] |= mask;
-
-        for (int j = 0; j < 2; j++)
-        {
-            i.WriteU8(buffer[j]);
-        }
-    }
-    else if (varInt64 <= 1073741823)
-    {
-        mask = 0x80;
-        uint8_t buffer[4];
-        for (int i = 0; i < 4; i++)
-        {
-            buffer[i] = (uint8_t)(varInt64 >> (8 * (3 - i)));
-            // NS_LOG_INFO("WriteVarInt64 - buffer[i] " << (uint64_t)buffer[i]);
-        }
-
-        buffer[0] |= mask;
-
-        for (int j = 0; j < 4; j++)
-        {
-            i.WriteU8(buffer[j]);
-        }
-    }
-    else if (varInt64 <= 4611686018427387903)
-    {
-        mask = 0xC0;
-        uint8_t buffer[8];
-
-        for (int i = 0; i < 8; i++)
-        {
-            buffer[i] = (uint8_t)(varInt64 >> (8 * (7 - i)));
-            // NS_LOG_INFO("WriteVarInt64 - buffer[i] " << (uint64_t)buffer[i]);
-        }
-
-        buffer[0] |= mask;
-
-        for (int j = 0; j < 8; j++)
-        {
-            i.WriteU8(buffer[j]);
-        }
-    }
-    else
-    {
-        return; // Error too much large
-    }
-
-    // NS_LOG_INFO("WriteVarInt64 - bytestream32 " << (uint64_t)bytestream32 << " varInt64 " <<
-    // varInt64 << " mask " << mask);
+    QuicWriteVarInt(i, varInt64);
 }
 
 uint64_t
 QuicSubheader::ReadVarInt64(Buffer::Iterator& i)
 {
-    // NS_LOG_FUNCTION(this);
-
-    uint8_t bytestream8 = i.ReadU8();
-    uint8_t mask = bytestream8 & 0b11000000;
-    bytestream8 &= 0b00111111;
-
-    uint64_t bytestream64 = 0;
-
-    if (mask == 0x00)
-    {
-        bytestream64 = (uint64_t)bytestream8;
-    }
-    else if (mask == 0x40)
-    {
-        bytestream64 = ((uint64_t)bytestream8 << 8) | (uint64_t)i.ReadU8();
-    }
-    else if (mask == 0x80)
-    {
-        bytestream64 = ((uint64_t)bytestream8 << 24) | ((uint64_t)i.ReadU8() << 16) |
-                       ((uint64_t)i.ReadU8() << 8) | (uint64_t)i.ReadU8();
-    }
-    else if (mask == 0xC0)
-    {
-        bytestream64 = ((uint64_t)bytestream8 << 56) | ((uint64_t)i.ReadU8() << 48) |
-                       ((uint64_t)i.ReadU8() << 40) | ((uint64_t)i.ReadU8() << 32) |
-                       ((uint64_t)i.ReadU8() << 24) | ((uint64_t)i.ReadU8() << 16) |
-                       ((uint64_t)i.ReadU8() << 8) | (uint64_t)i.ReadU8();
-    }
-
-    // NS_LOG_INFO("ReadVarInt64 - bytestream8 " << (uint64_t)bytestream8 << " bytestream64 " <<
-    // bytestream64 << " mask " << (uint64_t)mask);
-
-    return bytestream64;
+    return QuicReadVarInt(i);
 }
 
 uint32_t
 QuicSubheader::GetVarInt64Size(uint64_t varInt64)
 {
-    // NS_LOG_FUNCTION(this);
-
-    if (varInt64 <= 63)
-    {
-        return (uint32_t)8;
-    }
-    else if (varInt64 <= 16383)
-    {
-        return (uint32_t)16;
-    }
-    else if (varInt64 <= 1073741823)
-    {
-        return (uint32_t)32;
-    }
-    else if (varInt64 <= 4611686018427387903)
-    {
-        return (uint32_t)64;
-    }
-    else
-    {
-        return 0;
-    }
+    return 8 * QuicVarIntLength(varInt64);
 }
 
 QuicSubheader
