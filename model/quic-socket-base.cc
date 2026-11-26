@@ -20,6 +20,7 @@
 #include "quic-congestion-ops.h"
 #include "quic-header.h"
 #include "quic-l4-protocol.h"
+#include "quic-qlog-writer.h"
 #include "quic-socket-tx-edf-scheduler.h"
 
 #include "ns3/abort.h"
@@ -339,11 +340,11 @@ QuicSocketBase::GetTypeId(void)
                             "ns3::TracedCallback::Uint32Callback")
             .AddTraceSource("RTO",
                             "Retransmission timeout",
-                            MakeTraceSourceAccessor(&QuicSocketBase::m_rto),
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_rtoTrace),
                             "ns3::Time::TracedValueCallback")
             .AddTraceSource("RTT",
                             "Last RTT sample",
-                            MakeTraceSourceAccessor(&QuicSocketBase::m_lastRtt),
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_rttTrace),
                             "ns3::Time::TracedValueCallback")
             .AddTraceSource("NextTxSequence",
                             "Next sequence number to send (SND.NXT)",
@@ -396,7 +397,30 @@ QuicSocketBase::GetTypeId(void)
             .AddTraceSource("Rx",
                             "Receive QUIC packet from UDP protocol",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_rxTrace),
-                            "ns3::QuicSocketBase::QuicTxRxTracedCallback");
+                            "ns3::QuicSocketBase::QuicTxRxTracedCallback")
+            .AddTraceSource("PacketLost",
+                            "A packet was declared lost (packet number, bytes, trigger: "
+                            "reordering_threshold, time_threshold or pto_expired)",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_packetLostTrace),
+                            "ns3::QuicSocketBase::QuicPacketLostCallback")
+            .AddTraceSource("PacketAcked",
+                            "A packet was acknowledged for the first time (packet number, bytes)",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_packetAckedTrace),
+                            "ns3::QuicSocketBase::QuicPacketAckedCallback")
+            .AddTraceSource("PtoExpired",
+                            "The probe timeout fired (consecutive count after it, next timeout)",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_ptoTrace),
+                            "ns3::QuicSocketBase::QuicPtoCallback")
+            .AddTraceSource("LossTimer",
+                            "The loss detection timer was set, expired or cancelled (event, type, "
+                            "delay)",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_lossTimerTrace),
+                            "ns3::QuicSocketBase::QuicLossTimerCallback")
+            .AddTraceSource("Metrics",
+                            "The recovery metrics (RTT, congestion window, bytes in flight) after "
+                            "an acknowledgment or a timeout",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_metricsTrace),
+                            "ns3::QuicSocketBase::QuicMetricsCallback");
     return tid;
 }
 
@@ -633,28 +657,7 @@ QuicSocketBase::QuicSocketBase(void)
         // (uint32_t) rand->GetValue (0, pow (2, 32) - 1025));
     }
 
-    // connect callbacks
-    bool ok;
-    ok = m_tcb->TraceConnectWithoutContext("CongestionWindow",
-                                           MakeCallback(&QuicSocketBase::UpdateCwnd, this));
-    NS_ASSERT_MSG(ok == true, "Failed connection to CWND trace");
-
-    ok = m_tcb->TraceConnectWithoutContext("SlowStartThreshold",
-                                           MakeCallback(&QuicSocketBase::UpdateSsThresh, this));
-    NS_ASSERT_MSG(ok == true, "Failed connection to SSTHR trace");
-
-    ok = m_tcb->TraceConnectWithoutContext("CongState",
-                                           MakeCallback(&QuicSocketBase::UpdateCongState, this));
-    NS_ASSERT_MSG(ok == true, "Failed connection to CongState trace");
-
-    ok = m_tcb->TraceConnectWithoutContext(
-        "NextTxSequence",
-        MakeCallback(&QuicSocketBase::UpdateNextTxSequence, this));
-    NS_ASSERT_MSG(ok == true, "Failed connection to TxSequence trace");
-
-    ok = m_tcb->TraceConnectWithoutContext("HighestSequence",
-                                           MakeCallback(&QuicSocketBase::UpdateHighTxMark, this));
-    NS_ASSERT_MSG(ok == true, "Failed connection to highest sequence trace");
+    ConnectStateTraces();
 }
 
 QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
@@ -737,6 +740,22 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
     m_tcb->m_pacingRate = m_tcb->m_maxPacingRate;
     m_pacingTimer.SetFunction(&QuicSocketBase::NotifyPacingPerformed, this);
 
+    // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
+    // state of the copy is a new object, whose traces lead to this socket
+    m_cWndTrace = sock.m_cWndTrace;
+    m_ssThTrace = sock.m_ssThTrace;
+    m_congStateTrace = sock.m_congStateTrace;
+    m_highTxMarkTrace = sock.m_highTxMarkTrace;
+    m_nextTxSequenceTrace = sock.m_nextTxSequenceTrace;
+    m_rttTrace = sock.m_rttTrace;
+    m_rtoTrace = sock.m_rtoTrace;
+    m_packetLostTrace = sock.m_packetLostTrace;
+    m_packetAckedTrace = sock.m_packetAckedTrace;
+    m_ptoTrace = sock.m_ptoTrace;
+    m_lossTimerTrace = sock.m_lossTimerTrace;
+    m_metricsTrace = sock.m_metricsTrace;
+    ConnectStateTraces();
+
     /**
      * [IETF DRAFT 10 - Quic Transport: sec 5.7.1]
      *
@@ -750,6 +769,32 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
         m_tcb->m_nextTxSequence = SequenceNumber32(0);
         // (uint32_t) rand->GetValue (0, pow (2, 32) - 1025));
     }
+}
+
+void
+QuicSocketBase::ConnectStateTraces()
+{
+    bool ok;
+    ok = m_tcb->TraceConnectWithoutContext("CongestionWindow",
+                                           MakeCallback(&QuicSocketBase::UpdateCwnd, this));
+    NS_ASSERT_MSG(ok == true, "Failed connection to CWND trace");
+
+    ok = m_tcb->TraceConnectWithoutContext("SlowStartThreshold",
+                                           MakeCallback(&QuicSocketBase::UpdateSsThresh, this));
+    NS_ASSERT_MSG(ok == true, "Failed connection to SSTHR trace");
+
+    ok = m_tcb->TraceConnectWithoutContext("CongState",
+                                           MakeCallback(&QuicSocketBase::UpdateCongState, this));
+    NS_ASSERT_MSG(ok == true, "Failed connection to CongState trace");
+
+    ok = m_tcb->TraceConnectWithoutContext(
+        "NextTxSequence",
+        MakeCallback(&QuicSocketBase::UpdateNextTxSequence, this));
+    NS_ASSERT_MSG(ok == true, "Failed connection to TxSequence trace");
+
+    ok = m_tcb->TraceConnectWithoutContext("HighestSequence",
+                                           MakeCallback(&QuicSocketBase::UpdateHighTxMark, this));
+    NS_ASSERT_MSG(ok == true, "Failed connection to highest sequence trace");
 }
 
 QuicSocketBase::~QuicSocketBase(void)
@@ -1480,7 +1525,7 @@ QuicSocketBase::SendAck()
 
     NS_LOG_INFO("Send ACK packet with header " << head);
     m_quicl4->SendPacket(this, p, head);
-    m_txTrace(p, head, this);
+    NotifyPacketSent(p, head);
 }
 
 void
@@ -1685,7 +1730,7 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
     const uint32_t minDatagram = m_padNextPacket ? MIN_INITIAL_PACKET_SIZE : 0;
     m_padNextPacket = false;
     m_quicl4->SendPacket(this, p, head, minDatagram);
-    m_txTrace(p, head, this);
+    NotifyPacketSent(p, head);
     NotifyDataSent(sz);
 
     m_txBuffer->UpdatePacketSent(packetNumber, sz);
@@ -1715,6 +1760,10 @@ QuicSocketBase::SetReTxTimeout()
     if (BytesInFlight() == 0 && !m_txBuffer->HasUnackedPackets() && m_tcb->m_handshakeConfirmed)
     {
         NS_LOG_INFO("No in-flight bytes and handshake confirmed; cancelling loss alarm");
+        if (m_tcb->m_lossDetectionAlarm.IsPending())
+        {
+            NotifyLossTimer("cancelled", "pto", Seconds(0));
+        }
         m_tcb->m_lossDetectionAlarm.Cancel();
         return;
     }
@@ -1778,6 +1827,13 @@ QuicSocketBase::SetReTxTimeout()
     m_tcb->m_lossDetectionAlarm =
         Simulator::Schedule(alarmDuration, &QuicSocketBase::ReTxTimeout, this);
     m_tcb->m_nextAlarmTrigger = Simulator::Now() + alarmDuration;
+    if (m_tcb->m_alarmType != 1 && alarmDuration != m_rto)
+    {
+        Time old = m_rto;
+        m_rto = alarmDuration;
+        m_rtoTrace(old, m_rto);
+    }
+    NotifyLossTimer("set", m_tcb->m_alarmType == 1 ? "loss_timeout" : "pto", alarmDuration);
 }
 
 Time
@@ -1970,6 +2026,7 @@ QuicSocketBase::IdleTimeoutExpired()
         // waits for the handshake to write what is buffered, the connection never came up
         NS_LOG_INFO(this << " handshake idle timeout at " << Simulator::Now().GetSeconds());
         const bool client = m_socketState == CONNECTING_CLT;
+        QlogClosed("local", "idle_timeout", 0, false, false, "");
         m_tcb->m_lossDetectionAlarm.Cancel();
         m_closeAfterHandshake = false;
         SetState(CLOSING);
@@ -2078,6 +2135,7 @@ QuicSocketBase::ReTxTimeout()
     NS_LOG_FUNCTION(this);
     m_tcb->m_ptoCountForLoss = m_tcb->m_rtoCount;
     NS_LOG_INFO("ReTxTimeout Expired at time " << Simulator::Now().GetSeconds());
+    NotifyLossTimer("expired", m_tcb->m_alarmType == 1 ? "loss_timeout" : "pto", Seconds(0));
     // Handshake packets are outstanding)
     if (m_tcb->m_alarmType == 0 &&
         (m_socketState == CONNECTING_CLT || m_socketState == CONNECTING_SVR))
@@ -2086,6 +2144,7 @@ QuicSocketBase::ReTxTimeout()
         // RFC 9002 s6.2.2: retransmit the outstanding handshake data (stream 0)
         m_txBuffer->ResetSentList(0);
         std::vector<Ptr<QuicSocketTxItem>> lostHandshake = m_txBuffer->DetectLostPackets();
+        NotifyPacketsLost(lostHandshake);
         m_tcb->m_handshakeCount++;
         if (!lostHandshake.empty())
         {
@@ -2096,6 +2155,7 @@ QuicSocketBase::ReTxTimeout()
     {
         m_txBuffer->DetectTimeLoss(m_tcb, m_tcb->m_largestAckedPacket.GetValue());
         std::vector<Ptr<QuicSocketTxItem>> lostPackets = m_txBuffer->DetectLostPackets();
+        NotifyPacketsLost(lostPackets);
         NS_LOG_INFO("RTO triggered: early retransmit");
         if (lostPackets.empty())
         {
@@ -2173,6 +2233,7 @@ QuicSocketBase::ReTxTimeout()
         m_tcb->m_rtoCount++;
         // the backoff doubled: measure the next PTO from the last probe
         SetReTxTimeout();
+        m_ptoTrace(m_tcb->m_rtoCount, m_rto);
 
         // RFC 9002 §6.2.1: SHOULD abandon connection after repeated consecutive PTOs
         // with no new ACK.  m_rtoCount is reset in OnReceivedAckFrame whenever a new
@@ -2183,6 +2244,7 @@ QuicSocketBase::ReTxTimeout()
             NS_LOG_WARN("QuicSocketBase: disconnect timeout ("
                         << m_disconnectTimeout << ") reached — connection unreachable, closing");
             // Cancel timers before state change to prevent re-entry
+            QlogClosed("local", "unspecified", 0, false, false, "disconnect timeout");
             m_tcb->m_lossDetectionAlarm.Cancel();
             m_idleTimeoutEvent.Cancel();
             SetState(CLOSING);
@@ -2194,6 +2256,7 @@ QuicSocketBase::ReTxTimeout()
             return;
         }
     }
+    NotifyMetrics();
 }
 
 uint32_t
@@ -2326,6 +2389,7 @@ QuicSocketBase::Close(void)
     if (IdleTimerArmed() and m_socketState != IDLE and
         m_socketState != CLOSING) // Connection Close from application signal
     {
+        QlogClosed("local", "application", 0, false, false, "");
         SetState(CLOSING);
         if (m_flushOnClose)
         {
@@ -2343,6 +2407,7 @@ QuicSocketBase::Close(void)
     else if (!IdleTimerArmed() and m_socketState != CLOSING and m_socketState != IDLE and
              m_socketState != LISTENING) // Connection Close due to Idle Period termination
     {
+        QlogClosed("local", "idle_timeout", 0, false, false, "");
         SetState(CLOSING);
         if (!m_closeNotified)
         {
@@ -2393,7 +2458,7 @@ QuicSocketBase::SendConnectionClosePacket(uint64_t errorCode, std::string phrase
 
     NS_LOG_DEBUG("Send Connection Close packet with header " << head);
     m_quicl4->SendPacket(this, p, head);
-    m_txTrace(p, head, this);
+    NotifyPacketSent(p, head);
 
     return 0;
 }
@@ -2630,7 +2695,7 @@ QuicSocketBase::SendInitialHandshake(uint8_t type, const QuicHeader& quicHeader,
         m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
 
         m_quicl4->SendPacket(this, p, head);
-        m_txTrace(p, head, this);
+        NotifyPacketSent(p, head);
         NotifyDataSent(p->GetSize());
     }
     else if (type == QuicHeader::INITIAL)
@@ -2713,6 +2778,12 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
         NS_LOG_INFO("Received CONNECTION_CLOSE frame");
         if (m_socketState != CLOSING || m_closeOnEmpty)
         {
+            QlogClosed("remote",
+                       sub.GetErrorCode() == 0 ? "application" : "error",
+                       sub.GetErrorCode(),
+                       true,
+                       false,
+                       std::string(sub.GetReasonPhrase().begin(), sub.GetReasonPhrase().end()));
             EnterDraining();
         }
         break;
@@ -2721,6 +2792,12 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
         NS_LOG_INFO("Received CONNECTION_CLOSE_APP frame");
         if (m_socketState != CLOSING || m_closeOnEmpty)
         {
+            QlogClosed("remote",
+                       "application",
+                       sub.GetErrorCode(),
+                       true,
+                       true,
+                       std::string(sub.GetReasonPhrase().begin(), sub.GetReasonPhrase().end()));
             EnterDraining();
         }
         break;
@@ -3066,6 +3143,10 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
 
     std::vector<Ptr<QuicSocketTxItem>> ackedPackets =
         m_txBuffer->OnAckUpdate(m_tcb, largestAcknowledged, additionalAckBlocks, gaps);
+    for (const auto& item : ackedPackets)
+    {
+        m_packetAckedTrace(item->m_packetNumber.GetValue(), item->m_packet->GetSize());
+    }
 
     CheckSpuriousLosses(largestAcknowledged, additionalAckBlocks, gaps, ackFloor);
 
@@ -3130,6 +3211,7 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
 
     // Find lost packets
     std::vector<Ptr<QuicSocketTxItem>> lostPackets = m_txBuffer->DetectLostPackets();
+    NotifyPacketsLost(lostPackets);
     // Recover from losses
     if (!lostPackets.empty())
     {
@@ -3173,7 +3255,7 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
                 BytesInFlight();
             }
             ops->OnAckReceived(m_tcb, sub, ackedPackets, rs);
-            m_lastRtt = m_tcb->m_lastRtt;
+            SetLastRtt(m_tcb->m_lastRtt);
         }
         else
         {
@@ -3190,7 +3272,7 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
             {
                 Time ackDelay = MicroSeconds(sub.GetAckDelay());
                 m_tcb->m_lastRtt = Now() - lastAcked->m_lastSent - ackDelay;
-                m_lastRtt = m_tcb->m_lastRtt;
+                SetLastRtt(m_tcb->m_lastRtt);
             }
             if (m_tcb->m_congState != TcpSocketState::CA_RECOVERY &&
                 m_tcb->m_congState != TcpSocketState::CA_LOSS)
@@ -3252,6 +3334,7 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
 
     // Compute timers
     SetReTxTimeout();
+    NotifyMetrics();
 }
 
 QuicTransportParameters
@@ -3295,6 +3378,12 @@ QuicSocketBase::OnSendingTransportParameters()
     }
     // RFC 9000 §18.2: both endpoints set initial_source_connection_id = their own CID
     transportParameters.SetInitialSourceConnectionId(m_connectionId);
+    if (m_qlog && !m_qlogLocalParams)
+    {
+        m_qlogLocalParams = true;
+        QlogStart();
+        m_qlog->ParametersSet("local", transportParameters);
+    }
 
     return transportParameters;
 }
@@ -3311,6 +3400,11 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     }
     m_receivedTransportParameters = true;
     m_couldContainTransportParameters = false;
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->ParametersSet("remote", transportParameters);
+    }
 
     // RFC 9000 §18.2: a client MUST NOT include a stateless reset token, nor the connection ids
     // that only a server sends
@@ -3604,6 +3698,10 @@ QuicSocketBase::DoClose(void)
         }
     }
 
+    if (m_qlog)
+    {
+        m_qlog->Close();
+    }
     SetRecvCallback(MakeNullCallback<void, Ptr<Socket>>());
     return m_quicl4->RemoveSocket(this);
 }
@@ -3625,7 +3723,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         // RFC 9000 Section 7.2: the client sends to the id the server chose from now on
         m_peerCid = quicHeader.GetSourceConnectionId();
     }
-    m_rxTrace(p, quicHeader, this);
+    NotifyPacketReceived(p, quicHeader);
 
     NS_LOG_INFO("Received packet of size " << p->GetSize());
 
@@ -3949,6 +4047,13 @@ QuicSocketBase::SetState(TracedValue<QuicStates_t> newstate)
     }
 
     m_socketState = newstate;
+    if (newstate == OPEN && m_qlog)
+    {
+        QlogStart();
+        m_qlog->VersionInformation(m_vers,
+                                   {QUIC_VERSION, QUIC_VERSION_DRAFT_10, QUIC_VERSION_NS3_IMPL},
+                                   !m_isServerSide);
+    }
     if (newstate == OPEN && m_quicl5 != nullptr)
     {
         // Application data was held back during the handshake
@@ -4016,6 +4121,12 @@ QuicSocketBase::AbortConnection(uint16_t transportErrorCode,
 
     NS_LOG_INFO("Abort connection " << transportErrorCode << " because " << reasonPhrase);
 
+    QlogClosed("local",
+               applicationClose ? "application" : "error",
+               transportErrorCode,
+               true,
+               applicationClose,
+               reasonPhrase);
     m_transportErrorCode = transportErrorCode;
 
     QuicSubheader quicSubheader;
@@ -4072,7 +4183,7 @@ QuicSocketBase::AbortConnection(uint16_t transportErrorCode,
     uint32_t sz = packet->GetSize();
 
     m_quicl4->SendPacket(this, packet, quicHeader);
-    m_txTrace(packet, quicHeader, this);
+    NotifyPacketSent(packet, quicHeader);
     NotifyDataSent(sz);
 
     Close();
@@ -4426,7 +4537,7 @@ QuicSocketBase::SendMtuProbe(void)
     p->AddHeader(ping);
     NS_LOG_INFO("MTU probe " << m_pmtudProbeMtu << " (attempt " << m_pmtudProbeCount + 1 << ")");
     m_quicl4->SendPacket(this, p, head);
-    m_txTrace(p, head, this);
+    NotifyPacketSent(p, head, true);
     m_pmtudProbePn = pn.GetValue();
     Time pto = m_tcb->m_smoothedRtt > Seconds(0)
                    ? m_tcb->m_smoothedRtt + std::max(4 * m_tcb->m_rttVar, MilliSeconds(1)) +
@@ -4528,6 +4639,7 @@ QuicSocketBase::HandleStatelessReset(void)
     }
     // msquic QuicConnProcessUdpDatagrams: the connection is closed silently, without a
     // CONNECTION_CLOSE, and the application hears of a transport shutdown
+    QlogClosed("remote", "stateless_reset", 0, false, false, "");
     m_tcb->m_lossDetectionAlarm.Cancel();
     m_idleTimeoutEvent.Cancel();
     SetState(CLOSING);
@@ -4922,7 +5034,7 @@ QuicSocketBase::SendPathChallenge(QuicPath& path)
     NS_LOG_INFO("PATH_CHALLENGE on path " << path.id << " (" << p->GetSize()
                                           << " bytes, allowance left " << path.allowance << ")");
     m_quicl4->SendPacketOnPath(p, head, path.udp, path.remote);
-    m_txTrace(p, head, this);
+    NotifyPacketSent(p, head);
 }
 
 void
@@ -4942,7 +5054,7 @@ QuicSocketBase::SendPathResponse(QuicPath& path, uint64_t data)
                                               LargestAckedPacket());
     NS_LOG_INFO("PATH_RESPONSE on path " << path.id);
     m_quicl4->SendPacketOnPath(p, head, path.udp, path.remote);
-    m_txTrace(p, head, this);
+    NotifyPacketSent(p, head);
 }
 
 void
@@ -4978,6 +5090,7 @@ QuicSocketBase::OnPathValidationTimer(void)
             if (m_paths.size() == 1)
             {
                 // the last path failed: nothing left to talk over
+                QlogClosed("local", "error", 0x10, true, false, "path validation failed");
                 m_tcb->m_lossDetectionAlarm.Cancel();
                 SetState(CLOSING);
                 m_closeNotified = true;
@@ -5181,6 +5294,174 @@ QuicSocketBase::Migrate(const Address& newLocal)
     m_padNextPacket = true;
     AppendingTx(probe);
     return true;
+}
+
+void
+QuicSocketBase::SetQlogWriter(Ptr<QuicQlogWriter> writer)
+{
+    m_qlog = writer;
+    m_qlogStarted = false;
+    m_qlogLocalParams = false;
+    m_qlogClosed = false;
+}
+
+Ptr<QuicQlogWriter>
+QuicSocketBase::GetQlogWriter() const
+{
+    return m_qlog;
+}
+
+void
+QuicSocketBase::QlogStart()
+{
+    if (!m_qlog || m_qlogStarted)
+    {
+        return;
+    }
+    m_qlogStarted = true;
+    QuicConnectionId odcid = m_isServerSide ? m_originalDcid : m_initialDcid;
+    m_qlog->SetGroupId(odcid.IsEmpty() ? m_connectionId : odcid);
+    Address local;
+    Address remote;
+    if (GetSockName(local) != 0)
+    {
+        local = Address();
+    }
+    if (GetPeerName(remote) != 0)
+    {
+        remote = GetActiveRemote();
+    }
+    m_qlog->ConnectionStarted(local, remote, m_connectionId);
+}
+
+void
+QuicSocketBase::QlogClosed(const std::string& initiator,
+                           const std::string& trigger,
+                           uint64_t code,
+                           bool hasCode,
+                           bool application,
+                           const std::string& reason)
+{
+    if (!m_qlog || m_qlogClosed)
+    {
+        return;
+    }
+    QlogStart();
+    m_qlogClosed = true;
+    m_qlog->ConnectionClosed(initiator, trigger, code, hasCode, application, reason);
+}
+
+void
+QuicSocketBase::NotifyPacketSent(Ptr<const Packet> p, const QuicHeader& head, bool mtuProbe)
+{
+    m_txTrace(p, head, this);
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->PacketSent(head, p, m_ack_delay_exponent, mtuProbe);
+    }
+}
+
+void
+QuicSocketBase::NotifyPacketReceived(Ptr<const Packet> p, const QuicHeader& head)
+{
+    m_rxTrace(p, head, this);
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->PacketReceived(head, p, m_peerAckDelayExponent);
+    }
+}
+
+void
+QuicSocketBase::NotifyUdpDatagram(bool sent, uint32_t size)
+{
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->UdpDatagram(sent, size);
+    }
+}
+
+void
+QuicSocketBase::NotifyPacketDropped(const QuicHeader* header,
+                                    uint32_t size,
+                                    const std::string& trigger,
+                                    const std::string& detail)
+{
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->PacketDropped(header, size, trigger, detail);
+    }
+}
+
+void
+QuicSocketBase::NotifyPacketsLost(const std::vector<Ptr<QuicSocketTxItem>>& lost)
+{
+    for (const auto& item : lost)
+    {
+        if (item->m_lossReported)
+        {
+            continue;
+        }
+        item->m_lossReported = true;
+        std::string trigger = "pto_expired";
+        if (item->m_lossTrigger == QuicSocketTxItem::LOSS_REORDERING)
+        {
+            trigger = "reordering_threshold";
+        }
+        else if (item->m_lossTrigger == QuicSocketTxItem::LOSS_TIME)
+        {
+            trigger = "time_threshold";
+        }
+        m_packetLostTrace(item->m_packetNumber.GetValue(), item->m_packet->GetSize(), trigger);
+        if (m_qlog)
+        {
+            QlogStart();
+            m_qlog->PacketLost(item->m_packetNumber.GetValue(), trigger);
+        }
+    }
+}
+
+void
+QuicSocketBase::NotifyMetrics()
+{
+    m_metricsTrace(m_tcb);
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->RecoveryMetrics(m_tcb->m_minRtt,
+                                m_tcb->m_smoothedRtt,
+                                m_tcb->m_latestRtt,
+                                m_tcb->m_rttVar,
+                                m_tcb->m_rtoCount,
+                                m_tcb->m_cWnd.Get(),
+                                m_tcb->m_bytesInFlight.Get(),
+                                m_tcb->m_ssThresh.Get());
+    }
+}
+
+void
+QuicSocketBase::NotifyLossTimer(const std::string& event, const std::string& type, Time delta)
+{
+    m_lossTimerTrace(event, type, delta);
+    if (m_qlog)
+    {
+        QlogStart();
+        m_qlog->TimerUpdated(type, event, delta);
+    }
+}
+
+void
+QuicSocketBase::SetLastRtt(Time rtt)
+{
+    if (rtt != m_lastRtt)
+    {
+        Time old = m_lastRtt;
+        m_lastRtt = rtt;
+        m_rttTrace(old, rtt);
+    }
 }
 
 } // namespace ns3

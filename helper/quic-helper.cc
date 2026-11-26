@@ -9,9 +9,11 @@
 
 #include "quic-helper.h"
 
+#include "ns3/abort.h"
 #include "ns3/log.h"
 #include "ns3/node.h"
 #include "ns3/object-factory.h"
+#include "ns3/quic-l4-protocol.h"
 
 namespace ns3
 {
@@ -26,6 +28,17 @@ QuicHelper::InstallQuic(NodeContainer c) const
         Install(*i);
         CreateAndAggregateObjectFromTypeId(*i, "ns3::QuicL4Protocol");
         NS_LOG_INFO("QuicHelper: installed QUIC stack on node " << (*i)->GetId());
+    }
+}
+
+void
+QuicHelper::EnableQlog(NodeContainer c, const std::string& directory)
+{
+    for (NodeContainer::Iterator i = c.Begin(); i != c.End(); ++i)
+    {
+        Ptr<QuicL4Protocol> l4 = (*i)->GetObject<QuicL4Protocol>();
+        NS_ABORT_MSG_IF(l4 == nullptr, "EnableQlog needs the QUIC stack installed on the node");
+        l4->EnableQlog(directory);
     }
 }
 

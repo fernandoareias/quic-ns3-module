@@ -960,6 +960,12 @@ class QuicSubheader : public Header
      */
     static QuicSubheader CreateNewToken(const std::vector<uint8_t>& token);
 
+    /** @return the type of the frame that triggered a CONNECTION_CLOSE frame. */
+    uint64_t GetTriggerFrameType() const
+    {
+        return m_triggerFrameType;
+    }
+
     /** @return the token of a NEW_TOKEN frame. */
     const std::vector<uint8_t>& GetToken() const
     {

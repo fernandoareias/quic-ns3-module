@@ -23,9 +23,10 @@
 #include "ns3/socket.h"
 
 #include <map>
+#include <stdint.h>
+#include <string>
 #include <utility>
 #include <vector>
-#include <stdint.h>
 
 namespace ns3
 {
@@ -338,6 +339,20 @@ class QuicL4Protocol : public IpL4Protocol
     }
 
     /**
+     * Log the connections of this stack in qlog format, one file per connection. It applies to the
+     * connections created after the call. The same is done by setting the QlogDirectory attribute.
+     *
+     * @param directory where the files go, empty to stop logging.
+     */
+    void EnableQlog(const std::string& directory);
+
+    /** @return the directory of the qlog files, empty when the connections are not logged. */
+    std::string GetQlogDirectory(void) const
+    {
+        return m_qlogDirectory;
+    }
+
+    /**
      * \\brief Route packets that carry this connection id to a connection (msquic: the lookup
      * table)
      * \\param connectionId the id
@@ -404,12 +419,22 @@ class QuicL4Protocol : public IpL4Protocol
      * @param header the header of the packet.
      * @param packet the frames of the packet followed by its AEAD tag.
      * @param datagramSize the bytes of the whole datagram.
+     * @param firstInDatagram true for the first packet of the datagram.
      */
     void ForwardUpPacket(Ptr<Socket> sock,
                          Address& from,
                          const QuicHeader& header,
                          Ptr<Packet> packet,
-                         uint32_t datagramSize);
+                         uint32_t datagramSize,
+                         bool firstInDatagram = true);
+
+    /**
+     * Give a socket the writer of its qlog trace, when the stack logs its connections.
+     *
+     * @param socket the socket.
+     * @param vantage "client" or "server".
+     */
+    void AttachQlog(Ptr<QuicSocketBase> socket, const std::string& vantage);
 
     /**
      * Build the datagram of a packet: the payload, its AEAD tag and the header.
@@ -641,6 +666,7 @@ class QuicL4Protocol : public IpL4Protocol
     std::map<QuicConnectionId, Ptr<QuicSocketBase>>
         m_cidMap;            //!< Connection id -> connection (every id issued to a peer)
     uint8_t m_connectionIdLength{8}; //!< Attribute ConnectionIdLength
+    std::string m_qlogDirectory;     //!< Attribute QlogDirectory
     uint64_t m_resetKeyA{0};         //!< Secret of the stateless reset token function
     uint64_t m_resetKeyB{0}; //!< Secret of the stateless reset token function
 

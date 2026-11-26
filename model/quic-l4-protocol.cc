@@ -14,6 +14,7 @@
 #include "quic-congestion-ops.h"
 #include "quic-cubic.h"
 #include "quic-header.h"
+#include "quic-qlog-writer.h"
 #include "quic-socket-base.h"
 #include "quic-socket-factory.h"
 
@@ -38,6 +39,7 @@
 #include "ns3/random-variable-stream.h"
 #include "ns3/rtt-estimator.h"
 #include "ns3/simulator.h"
+#include "ns3/string.h"
 #include "ns3/tcp-congestion-ops.h"
 
 #include <algorithm>
@@ -129,6 +131,13 @@ QuicL4Protocol::GetTypeId(void)
                           UintegerValue(8),
                           MakeUintegerAccessor(&QuicL4Protocol::m_connectionIdLength),
                           MakeUintegerChecker<uint8_t>(1, QuicConnectionId::MAX_LENGTH))
+            .AddAttribute("QlogDirectory",
+                          "Directory where the connections of this stack are logged in qlog format "
+                          "(draft-ietf-quic-qlog-main-schema), one .sqlog file per connection. "
+                          "Empty disables the log.",
+                          StringValue(""),
+                          MakeStringAccessor(&QuicL4Protocol::m_qlogDirectory),
+                          MakeStringChecker())
             .AddAttribute("SocketList",
                           "The list of UDP and QUIC sockets associated to this protocol.",
                           ObjectVectorValue(),
@@ -564,6 +573,7 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
     {
         NS_LOG_INFO("Receiving a datagram on a UDP socket");
         const uint32_t datagramSize = datagram->GetSize();
+        bool firstPacket = true;
 
         // RFC 9000 Section 12.2: a datagram holds one or more packets, each long header packet
         // with the Length of its own; the last packet runs to the end of the datagram
@@ -599,7 +609,8 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
                 packet = datagram;
                 datagram = Create<Packet>();
             }
-            ForwardUpPacket(sock, from, header, packet, datagramSize);
+            ForwardUpPacket(sock, from, header, packet, datagramSize, firstPacket);
+            firstPacket = false;
         }
     }
 }
@@ -609,7 +620,8 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
                                 Address& from,
                                 const QuicHeader& header,
                                 Ptr<Packet> packet,
-                                uint32_t datagramSize)
+                                uint32_t datagramSize,
+                                bool firstInDatagram)
 {
     if (header.IsInitial() && m_isServer && datagramSize < QuicSocketBase::MIN_INITIAL_PACKET_SIZE)
     {
@@ -822,6 +834,7 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
                                     datagramSize,
                                     header.GetDestinationConnectionId()))
         {
+            socket->NotifyPacketDropped(&header, packet->GetSize(), "rejected", "path not usable");
             return;
         }
     }
@@ -830,10 +843,18 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
         if (packet->GetSize() < QUIC_AEAD_TAG_SIZE)
         {
             NS_LOG_WARN(this << " dropping a packet shorter than its AEAD tag");
+            socket->NotifyPacketDropped(&header,
+                                        packet->GetSize(),
+                                        "invalid",
+                                        "shorter than the AEAD tag");
             return;
         }
         QuicAeadTrailer tag;
         packet->RemoveTrailer(tag);
+    }
+    if (firstInDatagram)
+    {
+        socket->NotifyUdpDatagram(false, datagramSize);
     }
     if (!m_socketHandlers[socket].IsNull())
     {
@@ -1213,6 +1234,7 @@ QuicL4Protocol::CloneSocket(Ptr<QuicSocketBase> oldsock)
     NS_LOG_FUNCTION(this);
     Ptr<QuicSocketBase> newsock = CopyObject<QuicSocketBase>(oldsock);
     newsock->SetServerSide(true);
+    AttachQlog(newsock, "server");
     NS_LOG_LOGIC(this << " cloned socket " << oldsock << " to socket " << newsock);
     Ptr<QuicUdpBinding> udpBinding = CreateObject<QuicUdpBinding>();
 
@@ -1262,6 +1284,7 @@ QuicL4Protocol::CreateSocket(TypeId congestionTypeId)
 
     socket->SetNode(m_node);
     socket->SetQuicL4(this);
+    AttachQlog(socket, "client");
 
     socket->InitializeScheduling();
 
@@ -1404,8 +1427,27 @@ QuicL4Protocol::SendDatagram(
 }
 
 void
+QuicL4Protocol::EnableQlog(const std::string& directory)
+{
+    m_qlogDirectory = directory;
+}
+
+void
+QuicL4Protocol::AttachQlog(Ptr<QuicSocketBase> socket, const std::string& vantage)
+{
+    if (m_qlogDirectory.empty() || m_node == nullptr)
+    {
+        return;
+    }
+    Ptr<QuicQlogWriter> writer = CreateObject<QuicQlogWriter>();
+    writer->Configure(m_qlogDirectory, vantage, m_node->GetId());
+    socket->SetQlogWriter(writer);
+}
+
+void
 QuicL4Protocol::SendBytes(Ptr<QuicSocketBase> socket, Ptr<Packet> datagram) const
 {
+    socket->NotifyUdpDatagram(true, datagram->GetSize());
     QuicUdpBindingList::const_iterator it;
     for (it = m_quicUdpBindingList.begin(); it != m_quicUdpBindingList.end(); ++it)
     {

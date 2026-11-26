@@ -84,9 +84,22 @@ class QuicSocketTxItem : public Object
      */
     void Print(std::ostream& os) const;
 
+    /**
+     * \brief Why a packet was declared lost (the trigger of the qlog packet_lost event)
+     */
+    enum LossTrigger : uint8_t
+    {
+        LOSS_NONE = 0,       //!< not declared lost
+        LOSS_REORDERING = 1, //!< packet threshold (RFC 9002 s6.1.1)
+        LOSS_TIME = 2,       //!< time threshold (RFC 9002 s6.1.2)
+        LOSS_PTO = 3         //!< given up on by a probe timeout or a handshake retransmission
+    };
+
     Ptr<Packet> m_packet;            //!< packet associated to this QuicSocketTxItem
     SequenceNumber32 m_packetNumber; //!< sequence number
     bool m_lost;                     //!< true if the packet is lost
+    uint8_t m_lossTrigger{LOSS_NONE}; //!< why the packet was declared lost
+    bool m_lossReported{false};       //!< true once the loss was published on the trace sources
     bool m_retrans;                  //!< true if it is a retx
     bool m_sacked;                   //!< true if already acknowledged
     bool m_acked;                    //!< true if already passed to the application

@@ -84,6 +84,8 @@ QuicSocketTxItem::QuicSocketTxItem(const QuicSocketTxItem& other)
     : m_packet(other.m_packet),
       m_packetNumber(other.m_packetNumber),
       m_lost(other.m_lost),
+      m_lossTrigger(other.m_lossTrigger),
+      m_lossReported(other.m_lossReported),
       m_retrans(other.m_retrans),
       m_sacked(other.m_sacked),
       m_acked(other.m_acked),
@@ -148,6 +150,10 @@ QuicSocketTxItem::MergeItems(QuicSocketTxItem& t1, QuicSocketTxItem& t2)
     if (t2.m_lost)
     {
         t1.m_lost = true;
+        if (t1.m_lossTrigger == LOSS_NONE)
+        {
+            t1.m_lossTrigger = t2.m_lossTrigger;
+        }
     }
     if (t1.m_ackTime > t2.m_ackTime)
     {
@@ -170,6 +176,8 @@ QuicSocketTxItem::SplitItems(QuicSocketTxItem& t1, QuicSocketTxItem& t2, uint32_
     t2.m_retrans = t1.m_retrans;
     t2.m_lastSent = t1.m_lastSent;
     t2.m_lost = t1.m_lost;
+    t2.m_lossTrigger = t1.m_lossTrigger;
+    t2.m_lossReported = t1.m_lossReported;
     if (t1.m_lastSent < t2.m_lastSent)
     {
         t1.m_lastSent = t2.m_lastSent;
@@ -478,6 +486,7 @@ QuicSocketTxBuffer::OnAckUpdate(Ptr<TcpSocketState> tcb,
     // Mark packets as lost as in RFC (Sec. 4.2.1 of draft-ietf-quic-recovery-15)
     Time newLossTime = Seconds(0);
     bool lost = false;
+    uint8_t lossTrigger = QuicSocketTxItem::LOSS_REORDERING;
     bool outstanding = false;
     // Iterate over the sent packet list in reverse
     for (auto sent_it = m_sentList.rbegin(); sent_it != m_sentList.rend() and !m_sentList.empty();
@@ -489,6 +498,7 @@ QuicSocketTxBuffer::OnAckUpdate(Ptr<TcpSocketState> tcb,
             if (!(*sent_it)->m_sacked)
             {
                 (*sent_it)->m_lost = true;
+                (*sent_it)->m_lossTrigger = lossTrigger;
                 NS_LOG_LOGIC("Packet " << (*sent_it)->m_packetNumber << " lost");
             }
         }
@@ -511,6 +521,8 @@ QuicSocketTxBuffer::OnAckUpdate(Ptr<TcpSocketState> tcb,
                     tcbd->m_kReorderingThreshold)
                 {
                     (*sent_it)->m_lost = true;
+                    (*sent_it)->m_lossTrigger = QuicSocketTxItem::LOSS_REORDERING;
+                    lossTrigger = QuicSocketTxItem::LOSS_REORDERING;
                     lost = true;
                     NS_LOG_INFO("Largest ACK " << largestAcknowledged << ", lost packet "
                                                << (*sent_it)->m_packetNumber.GetValue()
@@ -526,6 +538,8 @@ QuicSocketTxBuffer::OnAckUpdate(Ptr<TcpSocketState> tcb,
                     if (Now() >= deadline)
                     {
                         (*sent_it)->m_lost = true;
+                        (*sent_it)->m_lossTrigger = QuicSocketTxItem::LOSS_TIME;
+                        lossTrigger = QuicSocketTxItem::LOSS_TIME;
                         lost = true;
                     }
                     else if (newLossTime == Seconds(0) || deadline < newLossTime)
@@ -554,6 +568,10 @@ QuicSocketTxBuffer::ResetSentList(uint32_t keepItems)
         if (kept >= keepItems && !(*sent_it)->m_sacked)
         {
             (*sent_it)->m_lost = true;
+            if ((*sent_it)->m_lossTrigger == QuicSocketTxItem::LOSS_NONE)
+            {
+                (*sent_it)->m_lossTrigger = QuicSocketTxItem::LOSS_PTO;
+            }
         }
     }
 }
@@ -571,6 +589,7 @@ QuicSocketTxBuffer::MarkOldestAsLost(uint32_t n)
         if (!item->m_sacked && !item->m_lost)
         {
             item->m_lost = true;
+            item->m_lossTrigger = QuicSocketTxItem::LOSS_PTO;
             marked.push_back(item);
         }
     }
@@ -707,6 +726,7 @@ QuicSocketTxBuffer::DetectTimeLoss(Ptr<TcpSocketState> tcb, uint32_t largestAckn
         if (Now() >= deadline)
         {
             item->m_lost = true;
+            item->m_lossTrigger = QuicSocketTxItem::LOSS_TIME;
         }
         else if (newLossTime == Seconds(0) || deadline < newLossTime)
         {

@@ -46,6 +46,16 @@ class QuicHelper : public InternetStackHelper
      */
     void InstallQuic(NodeContainer c) const;
 
+    /**
+     * Log the QUIC connections of some nodes in qlog format (draft-ietf-quic-qlog-main-schema-15
+     * and draft-ietf-quic-qlog-quic-events-14), one .sqlog file per connection and per end. It
+     * applies to the connections created after the call. Call it after InstallQuic.
+     *
+     * @param c the nodes.
+     * @param directory the directory of the files, created when it does not exist.
+     */
+    static void EnableQlog(NodeContainer c, const std::string& directory);
+
   private:
     /**
      * \brief create an object from its TypeId and aggregates it to the node

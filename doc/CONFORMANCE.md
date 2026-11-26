@@ -110,7 +110,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | draft-ietf-quic-reliable-stream-reset-11 | missing | F9 |
 | draft-ietf-quic-ack-frequency-14 | partial (the frames are done; the threshold is off by one) | F9 |
 | draft-ietf-quic-receive-ts-04 | missing | F10 |
-| draft-ietf-quic-qlog-main-schema-15, quic-events-14 | missing | F6 |
+| draft-ietf-quic-qlog-main-schema-15, quic-events-14 | partial (JSON-SEQ writer, connection, packet, recovery and timer events; no alpn, stream or path events, no drops for packets of unknown connections) | F6 (rest in F7 to F11) |
 | draft-ietf-ccwg-bbr-07 (BBRv3) | missing (the module has BBRv1) | F10 |
 | RFC 9308, 9312 (applicability, manageability) | checklist at the end of the work | F12 |
 | RFC 9114, 9204 (HTTP/3, QPACK), draft-ietf-quic-address-discovery, load-balancers, extended-key-update, qmux, retry-offload | out of scope | |

@@ -18,6 +18,7 @@ build_lib(
                  model/quic-header.cc
                  model/quic-l4-protocol.cc
                  model/quic-l5-protocol.cc
+                 model/quic-qlog-writer.cc
                  model/quic-socket.cc
                  model/quic-stream-id-tag.cc
                  model/quic-socket-base.cc
@@ -45,6 +46,7 @@ build_lib(
                  model/quic-header.h
                  model/quic-l4-protocol.h
                  model/quic-l5-protocol.h
+                 model/quic-qlog-writer.h
                  model/quic-socket.h
                  model/quic-socket-base.h
                  model/quic-socket-factory.h
@@ -73,5 +75,6 @@ build_lib(
                  test/quic-streams-test-suite.cc
                  test/quic-datagrams-test-suite.cc
                  test/quic-wire-test-suite.cc
+                 test/quic-qlog-test-suite.cc
                  ${examples_as_tests_sources}
 )

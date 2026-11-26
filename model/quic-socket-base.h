@@ -43,6 +43,7 @@ namespace ns3
 
 class QuicL5Protocol;
 class QuicL4Protocol;
+class QuicQlogWriter;
 
 /**
  * \brief RFC 9002 §2 Packet Number Space identifier.
@@ -642,6 +643,76 @@ class QuicSocketBase : public QuicSocket
     void MaybeQueueAck();
 
     /**
+     * Connect the sockets's handlers to the traces of its congestion state. The copy that a
+     * listener makes for an accepted connection has a state of its own and needs it too.
+     */
+    void ConnectStateTraces();
+
+    /**
+     * Fire the Tx trace and log the packet in qlog.
+     *
+     * @param p the frames of the packet.
+     * @param head the header of the packet.
+     * @param mtuProbe true when the packet only probes the path MTU.
+     */
+    void NotifyPacketSent(Ptr<const Packet> p, const QuicHeader& head, bool mtuProbe = false);
+
+    /**
+     * Fire the Rx trace and log the packet in qlog.
+     *
+     * @param p the frames of the packet.
+     * @param head the header of the packet.
+     */
+    void NotifyPacketReceived(Ptr<const Packet> p, const QuicHeader& head);
+
+    /**
+     * Fire the PacketLost trace and log in qlog the packets that were declared lost and not
+     * reported before.
+     *
+     * @param lost the packets declared lost.
+     */
+    void NotifyPacketsLost(const std::vector<Ptr<QuicSocketTxItem>>& lost);
+
+    /** Fire the Metrics trace and log the recovery metrics in qlog. */
+    void NotifyMetrics();
+
+    /**
+     * Fire the LossTimer trace and log the timer in qlog.
+     *
+     * @param event "set", "expired" or "cancelled".
+     * @param type "loss_timeout" or "pto".
+     * @param delta the time until the timer fires, for "set".
+     */
+    void NotifyLossTimer(const std::string& event, const std::string& type, Time delta);
+
+    /** Open the qlog trace of the connection at the first event. */
+    void QlogStart();
+
+    /**
+     * Log in qlog that the connection closes, once.
+     *
+     * @param initiator "local" or "remote".
+     * @param trigger the qlog trigger of the close.
+     * @param code the error code, when there is one.
+     * @param hasCode true when code is meaningful.
+     * @param application true when code belongs to the application protocol.
+     * @param reason a description of the cause.
+     */
+    void QlogClosed(const std::string& initiator,
+                    const std::string& trigger,
+                    uint64_t code,
+                    bool hasCode,
+                    bool application,
+                    const std::string& reason);
+
+    /**
+     * Change the latest RTT, and fire the RTT trace.
+     *
+     * @param rtt the new value.
+     */
+    void SetLastRtt(Time rtt);
+
+    /**
      * \brief Callback function to hook to QuicSocketState congestion window
      *
      * \param oldValue old cWnd value
@@ -898,6 +969,39 @@ class QuicSocketBase : public QuicSocket
         m_originalDcid = cid;
     }
 
+    /**
+     * Attach the writer that logs the events of this connection in qlog format. The socket does
+     * not copy it to the sockets it accepts.
+     *
+     * @param writer the writer, nullptr to stop logging.
+     */
+    void SetQlogWriter(Ptr<QuicQlogWriter> writer);
+
+    /** @return the qlog writer of this connection, nullptr when it is not logged. */
+    Ptr<QuicQlogWriter> GetQlogWriter() const;
+
+    /**
+     * Tell the qlog writer that a UDP datagram of this connection was sent or received.
+     *
+     * @param sent true for a datagram sent.
+     * @param size the size of the UDP payload.
+     */
+    void NotifyUdpDatagram(bool sent, uint32_t size);
+
+    /**
+     * Tell the qlog writer that a packet of this connection was dropped before its frames were
+     * processed.
+     *
+     * @param header the header of the packet, nullptr when it could not be read.
+     * @param size the number of bytes of the packet.
+     * @param trigger the qlog trigger of the drop.
+     * @param detail a description of the cause.
+     */
+    void NotifyPacketDropped(const QuicHeader* header,
+                             uint32_t size,
+                             const std::string& trigger,
+                             const std::string& detail);
+
     QuicConnectionId GetDestCid(void) const
     {
         if (!m_destCid.IsEmpty())
@@ -1064,6 +1168,50 @@ class QuicSocketBase : public QuicSocket
     typedef void (*QuicTxRxTracedCallback)(const Ptr<const Packet> packet,
                                            const QuicHeader& header,
                                            const Ptr<const QuicSocketBase> socket);
+
+    /**
+     * \brief TracedCallback signature for a packet declared lost.
+     *
+     * \param [in] packetNumber The packet number.
+     * \param [in] bytes The size of the packet.
+     * \param [in] trigger reordering_threshold, time_threshold or pto_expired.
+     */
+    typedef void (*QuicPacketLostCallback)(uint64_t packetNumber,
+                                           uint32_t bytes,
+                                           std::string trigger);
+
+    /**
+     * \brief TracedCallback signature for a packet acknowledged for the first time.
+     *
+     * \param [in] packetNumber The packet number.
+     * \param [in] bytes The size of the packet.
+     */
+    typedef void (*QuicPacketAckedCallback)(uint64_t packetNumber, uint32_t bytes);
+
+    /**
+     * \brief TracedCallback signature for a probe timeout.
+     *
+     * \param [in] count The number of consecutive probe timeouts, this one included.
+     * \param [in] next The time until the next probe timeout.
+     */
+    typedef void (*QuicPtoCallback)(uint32_t count, Time next);
+
+    /**
+     * \brief TracedCallback signature for the loss detection timer.
+     *
+     * \param [in] event "set", "expired" or "cancelled".
+     * \param [in] type "loss_timeout" or "pto".
+     * \param [in] delay The time until the timer fires, for "set".
+     */
+    typedef void (*QuicLossTimerCallback)(std::string event, std::string type, Time delay);
+
+    /**
+     * \brief TracedCallback signature for the recovery metrics.
+     *
+     * \param [in] state The congestion control state, with the RTT estimates, the congestion
+     *                   window and the bytes in flight.
+     */
+    typedef void (*QuicMetricsCallback)(Ptr<const QuicSocketState> state);
 
   protected:
     // Implementation of QuicSocket virtuals
@@ -1598,7 +1746,8 @@ class QuicSocketBase : public QuicSocket
                                     //!< expires the connection closes
     EventId m_drainingPeriodEvent;  //!< Event triggered upon idle timeout or immediate connection
                                     //!< close, when it expires all closes
-    TracedValue<Time> m_rto;        //!< Retransmit timeout
+    Time m_rto;                     //!< Probe timeout, as armed in the last loss detection timer
+    TracedCallback<Time, Time> m_rtoTrace; //!< Trace of the probe timeout
     EventId m_sendAckEvent;         //!< Send ACK timeout event
     EventId m_delAckEvent;          //!< Delayed ACK timeout event
     bool m_flushOnClose;            //!< Control behavior on connection close
@@ -1607,7 +1756,8 @@ class QuicSocketBase : public QuicSocket
     // Congestion Control
     Ptr<QuicSocketState> m_tcb;                //!< Congestion control informations
     Ptr<TcpCongestionOps> m_congestionControl; //!< Congestion control
-    TracedValue<Time> m_lastRtt;               //!< Latest measured RTT
+    Time m_lastRtt;                            //!< Latest measured RTT
+    TracedCallback<Time, Time> m_rttTrace;     //!< Trace of the latest measured RTT
     bool m_quicCongestionControlLegacy; //!< Quic Congestion control if true, TCP Congestion control
                                         //!< if false
     bool m_queue_ack;                   //!< Indicates a request for a queue ACK if true
@@ -1674,6 +1824,22 @@ class QuicSocketBase : public QuicSocket
                    const QuicHeader&,
                    Ptr<const QuicSocketBase>>
         m_rxTrace; //!< Trace of received packets
+
+    TracedCallback<uint64_t, uint32_t, std::string>
+        m_packetLostTrace; //!< Trace of packets declared lost: number, bytes, trigger
+    TracedCallback<uint64_t, uint32_t>
+        m_packetAckedTrace; //!< Trace of packets newly acknowledged: number, bytes
+    TracedCallback<uint32_t, Time> m_ptoTrace; //!< Trace of probe timeouts: count, next timeout
+    TracedCallback<std::string, std::string, Time>
+        m_lossTimerTrace; //!< Trace of the loss detection timer: event, type, delay
+    TracedCallback<Ptr<const QuicSocketState>>
+        m_metricsTrace; //!< Trace of the recovery metrics after an update
+
+    Ptr<QuicQlogWriter> m_qlog;    //!< writer of the qlog trace, null when the connection is not
+                                   //!< logged
+    bool m_qlogStarted{false};     //!< true once connection_started was logged
+    bool m_qlogLocalParams{false}; //!< true once the local transport parameters were logged
+    bool m_qlogClosed{false};      //!< true once connection_closed was logged
 };
 
 } // namespace ns3
