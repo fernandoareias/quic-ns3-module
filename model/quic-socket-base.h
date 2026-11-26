@@ -1399,6 +1399,9 @@ class QuicSocketBase : public QuicSocket
      */
     int64_t LargestAckedPacket(void) const;
 
+    /** @return the bytes a short header packet adds to its frames: header and AEAD tag. */
+    uint32_t ShortPacketOverhead(void) const;
+
     /** @return the spin bit to send: the value of the algorithm, or a random one when it is off. */
     bool SpinBitValue(void) const;
     void MaybeUpdateDestCid(void);

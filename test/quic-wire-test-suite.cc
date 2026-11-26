@@ -17,6 +17,7 @@
 
 #include "../model/quic-connection-id.h"
 #include "../model/quic-header.h"
+#include "../model/quic-transport-parameters.h"
 #include "../model/quic-wire.h"
 
 #include "ns3/buffer.h"
@@ -498,6 +499,236 @@ class QuicWireHeaderFormsTest : public TestCase
     }
 };
 
+/**
+ * Read transport parameters from bytes.
+ *
+ * @param bytes the bytes.
+ * @param parameters set to the parameters read.
+ * @return the number of bytes used.
+ */
+uint32_t
+ReadParameters(const std::vector<uint8_t>& bytes, QuicTransportParameters& parameters)
+{
+    Buffer buffer;
+    buffer.AddAtStart(bytes.size());
+    if (!bytes.empty())
+    {
+        buffer.Begin().Write(bytes.data(), bytes.size());
+    }
+    return parameters.Deserialize(buffer.Begin());
+}
+
+/**
+ * The transport parameters as RFC 9000, Section 18 lists them: the ones of the client Initial of
+ * RFC 9001 Appendix A.2, the defaults that are left out, and every way that they can be invalid.
+ */
+class QuicWireTransportParametersTest : public TestCase
+{
+  public:
+    QuicWireTransportParametersTest()
+        : TestCase("transport parameters: RFC 9001 appendix A.2, defaults, unknown and invalid")
+    {
+    }
+
+  private:
+    /** The list of parameters behind the length that this module writes in front of it. */
+    static std::vector<uint8_t> List(const std::string& entries)
+    {
+        std::vector<uint8_t> bytes = Hex(entries);
+        std::vector<uint8_t> list;
+        list.push_back(static_cast<uint8_t>(bytes.size())); // short lists: one-byte length
+        list.insert(list.end(), bytes.begin(), bytes.end());
+        return list;
+    }
+
+    void ExpectInvalid(const char* what, const std::string& entries)
+    {
+        QuicTransportParameters tp;
+        ReadParameters(List(entries), tp);
+        NS_TEST_ASSERT_MSG_EQ(tp.IsValid(), false, what);
+    }
+
+    void DoRun() override
+    {
+        // the parameters of the client in RFC 9001 appendix A.2, read from the ClientHello
+        const std::string rfc = "0408ffffffffffffffff"
+                                "05048000ffff"
+                                "07048000ffff"
+                                "080110"
+                                "010480007530"
+                                "090110"
+                                "0f088394c8f03e515708"
+                                "06048000ffff";
+        QuicTransportParameters a2;
+        const std::vector<uint8_t> a2Bytes = List(rfc);
+        NS_TEST_ASSERT_MSG_EQ(ReadParameters(a2Bytes, a2), a2Bytes.size(), "A.2: bytes used");
+        NS_TEST_ASSERT_MSG_EQ(a2.IsValid(), true, "A.2: valid");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialMaxData(), QUIC_VARINT_MAX, "A.2: initial_max_data");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialMaxStreamData(),
+                              65535u,
+                              "A.2: initial_max_stream_data_bidi_local");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialMaxStreamDataBidiRemote(),
+                              65535u,
+                              "A.2: initial_max_stream_data_bidi_remote");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialMaxStreamDataUni(),
+                              65535u,
+                              "A.2: initial_max_stream_data_uni");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialMaxStreamIdBidi(), 16u, "A.2: initial_max_streams_bidi");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialMaxStreamIdUni(), 16u, "A.2: initial_max_streams_uni");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetIdleTimeout(), 30000u, "A.2: max_idle_timeout");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetInitialSourceConnectionId().ToUint64(),
+                              0x8394c8f03e515708ULL,
+                              "A.2: initial_source_connection_id");
+        // a parameter that is not there has the default of RFC 9000
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)a2.GetAckDelayExponent(), 3u, "A.2: ack_delay_exponent");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetMaxAckDelay(), 25u, "A.2: max_ack_delay");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetActiveConnectionIdLimit(),
+                              2u,
+                              "A.2: active_connection_id_limit");
+        NS_TEST_ASSERT_MSG_EQ(a2.GetMaxUdpPayloadSize(), 65527u, "A.2: max_udp_payload_size");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)a2.GetDisableActiveMigration(),
+                              0u,
+                              "A.2: disable_active_migration");
+
+        // an empty list: every default
+        QuicTransportParameters empty;
+        empty.SetIdleTimeout(99);
+        ReadParameters(Hex("00"), empty);
+        NS_TEST_ASSERT_MSG_EQ(empty.IsValid(), true, "an empty list is valid");
+        NS_TEST_ASSERT_MSG_EQ(empty.GetIdleTimeout(), 0u, "no idle timeout when it is not given");
+
+        // what this module writes: the parameters that differ from the default, by identifier
+        QuicTransportParameters tp;
+        tp.SetIdleTimeout(30000);
+        tp.SetInitialMaxData(1000000);
+        tp.SetInitialMaxStreamIdBidi(16);
+        tp.SetInitialSourceConnectionId(QuicConnectionId(Hex("8394c8f03e515708").data(), 8));
+        const std::vector<uint8_t> want = Hex("19"
+                                              "010480007530"
+                                              "0404800f4240"
+                                              "080110"
+                                              "0f088394c8f03e515708");
+        std::vector<uint8_t> got(tp.GetSerializedSize());
+        {
+            Buffer buffer;
+            buffer.AddAtStart(tp.GetSerializedSize());
+            tp.Serialize(buffer.Begin());
+            buffer.CopyData(got.data(), got.size());
+        }
+        NS_TEST_ASSERT_MSG_EQ(got.size(), want.size(), "size of the parameters written");
+        for (size_t k = 0; k < std::min(got.size(), want.size()); ++k)
+        {
+            NS_TEST_ASSERT_MSG_EQ((uint32_t)got[k],
+                                  (uint32_t)want[k],
+                                  "parameters written, byte " << k);
+        }
+        QuicTransportParameters back;
+        ReadParameters(got, back);
+        NS_TEST_ASSERT_MSG_EQ(back == tp, true, "the parameters read back are the ones written");
+
+        // all of them, with ids that need two and eight bytes
+        QuicTransportParameters full;
+        full.SetIdleTimeout(1);
+        full.SetInitialMaxData(2);
+        full.SetInitialMaxStreamData(3);
+        full.SetInitialMaxStreamDataBidiRemote(4);
+        full.SetInitialMaxStreamDataUni(5);
+        full.SetInitialMaxStreamIdBidi(6);
+        full.SetInitialMaxStreamIdUni(7);
+        full.SetMaxUdpPayloadSize(1472);
+        full.SetAckDelayExponent(10);
+        full.SetMaxAckDelay(40);
+        full.SetMinAckDelay(1000);
+        full.SetActiveConnectionIdLimit(4);
+        full.SetDisableActiveMigration(1);
+        full.SetStatelessResetToken(0x0102030405060708ULL, 0x090a0b0c0d0e0f10ULL);
+        full.SetOriginalDestinationConnectionId(QuicConnectionId::FromUint64(1));
+        full.SetInitialSourceConnectionId(QuicConnectionId::FromUint64(2));
+        full.SetRetrySourceConnectionId(QuicConnectionId::FromUint64(3));
+        full.SetRawParameter(0x1b, {1, 2, 3}); // reserved: 31 * 0 + 27
+        Buffer buffer;
+        buffer.AddAtStart(full.GetSerializedSize() + 100);
+        full.Serialize(buffer.Begin());
+        QuicTransportParameters fullBack;
+        // padding follows the list, as in the handshake data
+        const uint32_t used = fullBack.Deserialize(buffer.Begin());
+        NS_TEST_ASSERT_MSG_EQ(used,
+                              full.GetSerializedSize(),
+                              "the list is read without the padding behind it");
+        NS_TEST_ASSERT_MSG_EQ(fullBack.IsValid(), true, "full: valid");
+        NS_TEST_ASSERT_MSG_EQ(fullBack == full, true, "full: read back");
+
+        // a parameter that is not known is ignored and kept
+        QuicTransportParameters unknown;
+        ReadParameters(List("c0000000"), unknown);
+        NS_TEST_ASSERT_MSG_EQ(unknown.IsValid(), false, "an identifier cut short is not valid");
+        ReadParameters(List("1b03010203"
+                            "6ab200"),
+                       unknown);
+        NS_TEST_ASSERT_MSG_EQ(unknown.IsValid(),
+                              true,
+                              "reserved and unknown parameters are ignored");
+        NS_TEST_ASSERT_MSG_EQ(unknown.GetRawParameters().size(), 2u, "and kept");
+
+        // RFC 9000 Section 7.4 and 18.2: these are errors
+        ExpectInvalid("a repeated parameter",
+                      "010100"
+                      "010101");
+        ExpectInvalid("ack_delay_exponent above 20", "0a0115");
+        ExpectInvalid("max_ack_delay of 2^14", "0b0480004000");
+        ExpectInvalid("max_udp_payload_size below 1200",
+                      "03024"
+                      "4af");
+        ExpectInvalid("active_connection_id_limit below 2", "0e0101");
+        ExpectInvalid("initial_max_streams_bidi above 2^60", "08081000000000000001");
+        ExpectInvalid("stateless_reset_token of 15 bytes",
+                      "020f"
+                      "000102030405060708090a0b0c0d0e");
+        ExpectInvalid("disable_active_migration with a value", "0c0100");
+        ExpectInvalid("a connection id of 21 bytes",
+                      "0f15"
+                      "000102030405060708090a0b0c0d0e0f1011121314");
+        ExpectInvalid("a number whose length is not the integer's",
+                      "0104"
+                      "4075"
+                      "0000");
+        ExpectInvalid("an entry that ends after the list", "01048000");
+        ExpectInvalid("an identifier with no length", "01");
+        // the list itself longer than the data
+        QuicTransportParameters longer;
+        ReadParameters(Hex("05"
+                           "0100"),
+                       longer);
+        NS_TEST_ASSERT_MSG_EQ(longer.IsValid(), false, "a list longer than the bytes");
+
+        // cut at every byte, and random bytes: never read past the data
+        for (size_t cut = 0; cut <= got.size(); ++cut)
+        {
+            std::vector<uint8_t> shorter(got.begin(), got.begin() + cut);
+            QuicTransportParameters partial;
+            const uint32_t n = ReadParameters(shorter, partial);
+            NS_TEST_ASSERT_MSG_LT_OR_EQ(n,
+                                        std::max<size_t>(shorter.size(), 1),
+                                        "the read stays inside the data");
+        }
+        for (uint32_t seed = 1; seed <= 3000; ++seed)
+        {
+            std::vector<uint8_t> noise(1 + seed % 50);
+            uint32_t x = seed * 2654435761u;
+            for (auto& b : noise)
+            {
+                x = x * 1664525u + 1013904223u;
+                b = static_cast<uint8_t>(x >> 24);
+            }
+            QuicTransportParameters parsed;
+            const uint32_t n = ReadParameters(noise, parsed);
+            NS_TEST_ASSERT_MSG_LT_OR_EQ(n,
+                                        noise.size(),
+                                        "random bytes: the read stays inside the data");
+        }
+    }
+};
+
 class QuicWireTestSuite : public TestSuite
 {
   public:
@@ -508,6 +739,7 @@ class QuicWireTestSuite : public TestSuite
         AddTestCase(new QuicWireConnectionIdTest, TestCase::Duration::QUICK);
         AddTestCase(new QuicWireHeaderVectorsTest, TestCase::Duration::QUICK);
         AddTestCase(new QuicWireHeaderFormsTest, TestCase::Duration::QUICK);
+        AddTestCase(new QuicWireTransportParametersTest, TestCase::Duration::QUICK);
     }
 };
 

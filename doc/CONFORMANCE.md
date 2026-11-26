@@ -32,8 +32,8 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 5.2 | Receiving packets: demultiplexing by connection id | partial | F5 | IPv4 only; no zero-length ids |
 | 6 | Version negotiation | partial | F9 | The client discards a list that holds its version; with no common version it sends CONNECTION_CLOSE instead of abandoning the attempt in silence |
 | 7.2 | The client picks a random Destination Connection ID of at least 8 bytes; the server picks its own id | done | | quic-features: connection ids |
-| 7.3 | Authenticating connection ids with transport parameters | missing | F3, F7 | |
-| 7.4 | Transport parameters; remembering them for 0-RTT | divergent | F3 | Fixed 72-byte structure |
+| 7.3 | Authenticating connection ids with transport parameters | partial | F7 | Checked for initial_source and original_destination (the handshake data is not authenticated); no Retry |
+| 7.4 | Transport parameters; remembering them for 0-RTT | done | | quic-wire: RFC 9001 appendix A.2, defaults, invalid values; the client remembers them for 0-RTT |
 | 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | partial | F7 | Limit on the server only; no Retry, no tokens |
 | 8.2 | Path validation | done | | quic: migration cases |
 | 9 | Connection migration | partial | F7, F11 | Client-initiated only; no `preferred_address` |
@@ -54,7 +54,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 17.2.5 | Retry | partial | F7 | The header is done (quic-wire: A.4); no endpoint sends or handles it |
 | 17.3 | Short header packets | done | | quic-wire: header forms |
 | 17.4 | Spin bit | done | | quic: spin bit; the `SpinBit` attribute turns it off (random values), the one-in-16 policy is left to the application |
-| 18.2 | Transport parameters | divergent | F3 | |
+| 18.2 | Transport parameters | partial | F7 | All but preferred_address (F11) and the extension parameters (F9); carried behind the handshake pseudo-stream until F7 |
 | 19.1 to 19.2 | PADDING, PING | done | | quic-frames |
 | 19.3 | ACK | done | | quic-frames: bytes, invalid ranges |
 | 19.3.2 | ACK with ECN counts | partial | F8 | Codec done and accepted on receipt (quic-frames); nothing sends or counts ECN yet |

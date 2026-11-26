@@ -3264,9 +3264,8 @@ QuicSocketBase::OnSendingTransportParameters()
         m_initial_max_stream_data,
         m_max_data,
         m_initial_max_stream_id_bidi,
-        (uint32_t)m_idleTimeout.Get().GetMilliSeconds(),
-        0,
-        (m_pmtudMaxSeg ? m_pmtudMaxSeg : m_tcb->m_segmentSize),
+        (uint64_t)m_idleTimeout.Get().GetMilliSeconds(),
+        (m_pmtudMaxSeg ? m_pmtudMaxSeg : m_tcb->m_segmentSize) + ShortPacketOverhead(),
         m_ack_delay_exponent,
         m_initial_max_stream_id_uni);
 
@@ -3313,13 +3312,55 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     m_receivedTransportParameters = true;
     m_couldContainTransportParameters = false;
 
-    // RFC 9000 §18.2: a client MUST NOT include a stateless reset token
-    if (m_socketState == CONNECTING_SVR && (transportParameters.GetStatelessResetTokenHi() != 0 ||
-                                            transportParameters.GetStatelessResetTokenLo() != 0))
+    // RFC 9000 §18.2: a client MUST NOT include a stateless reset token, nor the connection ids
+    // that only a server sends
+    if (m_isServerSide && (transportParameters.GetStatelessResetTokenHi() != 0 ||
+                           transportParameters.GetStatelessResetTokenLo() != 0 ||
+                           !transportParameters.GetOriginalDestinationConnectionId().IsEmpty() ||
+                           !transportParameters.GetRetrySourceConnectionId().IsEmpty()))
     {
         AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
-                        "A client must not send a stateless reset token");
+                        "A client must not send a stateless reset token or the connection ids of a "
+                        "server");
         return;
+    }
+
+    // RFC 9000 Section 7.3: the connection ids of the transport parameters are those of the
+    // handshake packets
+    if (transportParameters.GetInitialSourceConnectionId().IsEmpty())
+    {
+        AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
+                        "initial_source_connection_id is missing");
+        return;
+    }
+    if (!m_peerCid.IsEmpty() && transportParameters.GetInitialSourceConnectionId() != m_peerCid)
+    {
+        AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                        "initial_source_connection_id differs from the Source Connection ID");
+        return;
+    }
+    if (!m_isServerSide)
+    {
+        if (transportParameters.GetOriginalDestinationConnectionId().IsEmpty())
+        {
+            AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
+                            "original_destination_connection_id is missing");
+            return;
+        }
+        if (!m_initialDcid.IsEmpty() &&
+            transportParameters.GetOriginalDestinationConnectionId() != m_initialDcid)
+        {
+            AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                            "original_destination_connection_id differs from the first "
+                            "Destination Connection ID");
+            return;
+        }
+        if (!transportParameters.GetRetrySourceConnectionId().IsEmpty())
+        {
+            AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                            "retry_source_connection_id without a Retry packet");
+            return;
+        }
     }
     if (transportParameters.GetStatelessResetTokenHi() != 0 ||
         transportParameters.GetStatelessResetTokenLo() != 0)
@@ -3332,31 +3373,12 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     // The stream-id parameters are limits, not ids: their low bits carry no role information,
     // so the former role checks (which silently skipped all parameters) were removed.
 
-    if (transportParameters.GetMaxPacketSize() < QuicSocketBase::MIN_INITIAL_PACKET_SIZE or
-        transportParameters.GetMaxPacketSize() > 65527)
+    // RFC 9000 Section 7.4 and 18.2: a parameter that is repeated, of the wrong size or out of
+    // range is a TRANSPORT_PARAMETER_ERROR
+    if (!transportParameters.IsValid())
     {
         AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
-                        "Invalid Max Packet Size value provided");
-        return;
-    }
-
-    // RFC 9000 s18.2: out-of-range values are a TRANSPORT_PARAMETER_ERROR
-    if (transportParameters.GetAckDelayExponent() > 20)
-    {
-        AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
-                        "ack_delay_exponent above 20");
-        return;
-    }
-    if (transportParameters.GetMaxAckDelay() >= (1u << 14))
-    {
-        AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
-                        "max_ack_delay of 2^14 ms or more");
-        return;
-    }
-    if (transportParameters.GetActiveConnectionIdLimit() < 2)
-    {
-        AbortConnection(QuicSubheader::TransportErrorCodes_t::TRANSPORT_PARAMETER_ERROR,
-                        "active_connection_id_limit below 2");
+                        "Invalid transport parameters");
         return;
     }
 
@@ -3407,7 +3429,12 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
 
     {
         uint32_t cfgMax = m_pmtudMaxSeg ? m_pmtudMaxSeg : m_tcb->m_segmentSize;
-        cfgMax = std::min((uint32_t)transportParameters.GetMaxPacketSize(), cfgMax);
+        // max_udp_payload_size is what the peer reads in one datagram: the data of a packet is that
+        // minus the header and the tag
+        const uint64_t peerPayload = transportParameters.GetMaxUdpPayloadSize();
+        const uint64_t peerSegment =
+            peerPayload > ShortPacketOverhead() ? peerPayload - ShortPacketOverhead() : 0;
+        cfgMax = (uint32_t)std::min<uint64_t>(peerSegment, cfgMax);
         uint32_t newSeg = cfgMax;
         if (m_pmtudEnabled && cfgMax + kPmtudOverhead > kPmtudInitialMtu)
         {
@@ -3444,7 +3471,8 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     // delay)
     m_tcb->m_maxAckDelay = MilliSeconds(transportParameters.GetMaxAckDelay());
     m_peerSupportsAckFreq = transportParameters.GetMinAckDelay() > 0;
-    m_peerActiveCidLimit = transportParameters.GetActiveConnectionIdLimit();
+    m_peerActiveCidLimit =
+        (uint8_t)std::min<uint64_t>(transportParameters.GetActiveConnectionIdLimit(), 255);
     m_peerDisablesMigration = transportParameters.GetDisableActiveMigration() != 0;
 
     NS_LOG_DEBUG("After applying received transport parameters "
@@ -3485,15 +3513,16 @@ void
 QuicSocketBase::ApplyPeerLimits(const QuicTransportParameters& transportParameters)
 {
     // Peer limits for what we send; our own receive windows are left untouched
-    m_peerInitialMaxStreamData = transportParameters.GetInitialMaxStreamData();
-    m_peerStreamData[0] = transportParameters.GetInitialMaxStreamData(); // bidi, opened by the peer
-    m_peerStreamData[1] =
-        transportParameters.GetInitialMaxStreamDataBidiRemote();            // bidi, opened by us
-    m_peerStreamData[2] = transportParameters.GetInitialMaxStreamDataUni(); // uni, opened by us
-    m_peerMaxStreams[0] = transportParameters.GetInitialMaxStreamIdBidi();
-    m_peerMaxStreams[1] = transportParameters.GetInitialMaxStreamIdUni();
+    // the limits of the module are 32 bits for now
+    auto clamp = [](uint64_t value) { return (uint32_t)std::min<uint64_t>(value, UINT32_MAX); };
+    m_peerInitialMaxStreamData = clamp(transportParameters.GetInitialMaxStreamData());
+    m_peerStreamData[0] = clamp(transportParameters.GetInitialMaxStreamData()); // bidi, by the peer
+    m_peerStreamData[1] = clamp(transportParameters.GetInitialMaxStreamDataBidiRemote()); // by us
+    m_peerStreamData[2] = clamp(transportParameters.GetInitialMaxStreamDataUni());        // uni, us
+    m_peerMaxStreams[0] = clamp(transportParameters.GetInitialMaxStreamIdBidi());
+    m_peerMaxStreams[1] = clamp(transportParameters.GetInitialMaxStreamIdUni());
     m_quicl5->UpdateInitialMaxStreamData();
-    SetConnectionMaxData(transportParameters.GetInitialMaxData());
+    SetConnectionMaxData(clamp(transportParameters.GetInitialMaxData()));
 }
 
 int
@@ -4526,6 +4555,13 @@ QuicSocketBase::FinishStream(uint64_t streamId)
 // ------------------------------------------------------------------------------------------------
 // Connection ids and paths
 // ------------------------------------------------------------------------------------------------
+
+uint32_t
+QuicSocketBase::ShortPacketOverhead(void) const
+{
+    // first byte, destination connection id, packet number of 4 bytes and AEAD tag
+    return 1 + GetDestCid().GetLength() + 4 + QUIC_AEAD_TAG_SIZE;
+}
 
 bool
 QuicSocketBase::SpinBitValue(void) const

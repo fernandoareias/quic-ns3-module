@@ -16,344 +16,270 @@
 
 #include "ns3/buffer.h"
 #include "ns3/header.h"
-#include "ns3/ipv4-address.h"
-#include "ns3/ipv6-address.h"
-#include "ns3/sequence-number.h"
 
+#include <map>
 #include <stdint.h>
+#include <vector>
 
 namespace ns3
 {
 
 /**
- * \ingroup quic
- * \brief Transport Parameters for the QUIC Protocol
+ * @ingroup quic
+ * The transport parameters of an endpoint (RFC 9000, Section 18).
  *
- * This class has fields corresponding to those in QUIC Transport Parameters
- * as well as methods for serialization to and deserialization from a buffer.
+ * The parameters go on the wire as a list of (identifier, length, value) entries, with the
+ * identifier and the length as variable-length integers. A parameter that has its default value is
+ * left out, as real endpoints do. A parameter this class does not know is kept as bytes, which also
+ * holds the extensions that are added by identifier: see SetRawParameter().
  *
- * Transport Parameters [Quic IETF Draft 13 Transport - sec. 6.6]
- * --------------------------------------------------------------
+ * As the module does not carry a TLS handshake yet, the list is preceded by its length as a
+ * variable-length integer, so that it can be read from the front of the handshake data.
  *
- * During connection establishment, both endpoints make authenticated
- * declarations of their transport parameters. These declarations are
- * made unilaterally by each endpoint. Endpoints are required to comply
- * of with the restrictions implied by these parameters; the description
- * each parameter includes rules for its handling. QUIC encodes
- * transport parameters into a sequence of octets, which are then
- * included in the cryptographic handshake. Once the handshake
- * completes, the transport parameters declared by the peer are
- * available. Each endpoint validates the value provided by its peer.
- *
+ * Reading checks every parameter (RFC 9000, Section 7.4 and 18.2): a repeated parameter, a value of
+ * the wrong size and a value out of range make IsValid() false, and the connection has to be
+ * closed with TRANSPORT_PARAMETER_ERROR. The values that are not given have the default of
+ * RFC 9000, which is not always the value a new object holds for sending.
  */
 class QuicTransportParameters : public Header
 {
   public:
+    /** Identifier of original_destination_connection_id (RFC 9000, Section 18.2). */
+    static constexpr uint64_t ORIGINAL_DESTINATION_CONNECTION_ID = 0x00;
+    /** Identifier of max_idle_timeout. */
+    static constexpr uint64_t MAX_IDLE_TIMEOUT = 0x01;
+    /** Identifier of stateless_reset_token. */
+    static constexpr uint64_t STATELESS_RESET_TOKEN = 0x02;
+    /** Identifier of max_udp_payload_size. */
+    static constexpr uint64_t MAX_UDP_PAYLOAD_SIZE = 0x03;
+    /** Identifier of initial_max_data. */
+    static constexpr uint64_t INITIAL_MAX_DATA = 0x04;
+    /** Identifier of initial_max_stream_data_bidi_local. */
+    static constexpr uint64_t INITIAL_MAX_STREAM_DATA_BIDI_LOCAL = 0x05;
+    /** Identifier of initial_max_stream_data_bidi_remote. */
+    static constexpr uint64_t INITIAL_MAX_STREAM_DATA_BIDI_REMOTE = 0x06;
+    /** Identifier of initial_max_stream_data_uni. */
+    static constexpr uint64_t INITIAL_MAX_STREAM_DATA_UNI = 0x07;
+    /** Identifier of initial_max_streams_bidi. */
+    static constexpr uint64_t INITIAL_MAX_STREAMS_BIDI = 0x08;
+    /** Identifier of initial_max_streams_uni. */
+    static constexpr uint64_t INITIAL_MAX_STREAMS_UNI = 0x09;
+    /** Identifier of ack_delay_exponent. */
+    static constexpr uint64_t ACK_DELAY_EXPONENT = 0x0a;
+    /** Identifier of max_ack_delay. */
+    static constexpr uint64_t MAX_ACK_DELAY = 0x0b;
+    /** Identifier of disable_active_migration. */
+    static constexpr uint64_t DISABLE_ACTIVE_MIGRATION = 0x0c;
+    /** Identifier of preferred_address. */
+    static constexpr uint64_t PREFERRED_ADDRESS = 0x0d;
+    /** Identifier of active_connection_id_limit. */
+    static constexpr uint64_t ACTIVE_CONNECTION_ID_LIMIT = 0x0e;
+    /** Identifier of initial_source_connection_id. */
+    static constexpr uint64_t INITIAL_SOURCE_CONNECTION_ID = 0x0f;
+    /** Identifier of retry_source_connection_id. */
+    static constexpr uint64_t RETRY_SOURCE_CONNECTION_ID = 0x10;
+    /** Identifier of min_ack_delay (draft-ietf-quic-ack-frequency). */
+    static constexpr uint64_t MIN_ACK_DELAY = 0xff04de1b;
+
     QuicTransportParameters();
-    virtual ~QuicTransportParameters();
+    ~QuicTransportParameters() override;
 
     // Inherited from Header
     static TypeId GetTypeId(void);
-    virtual TypeId GetInstanceTypeId(void) const;
-    virtual void Print(std::ostream& os) const;
-    virtual uint32_t GetSerializedSize(void) const;
-    virtual void Serialize(Buffer::Iterator start) const;
-    virtual uint32_t Deserialize(Buffer::Iterator start);
+    TypeId GetInstanceTypeId(void) const override;
+    void Print(std::ostream& os) const override;
+    uint32_t GetSerializedSize(void) const override;
+    void Serialize(Buffer::Iterator start) const override;
+    uint32_t Deserialize(Buffer::Iterator start) override;
 
     /**
-     * \brief Print Quic Transport Parameters into an output stream
+     * Print the parameters into an output stream.
      *
-     * \param os output stream
-     * \param tc Quic Transport Parameters to print
-     * \return The ostream passed as first argument
+     * @param os output stream.
+     * @param tc the parameters.
+     * @return the stream.
      */
     friend std::ostream& operator<<(std::ostream& os, QuicTransportParameters& tc);
 
     /**
-     * Create the Transport Parameters block
+     * Create the parameters an endpoint announces.
      *
-     * \param initial_max_stream_data the initial value for the maximum data that can be sent on any
-     * newly created stream
-     * \param initial_max_data the initial value for the maximum amount of data that can be sent on
-     * the connection
-     * \param initial_max_stream_id_bidi the the initial maximum number of application-owned
-     * bidirectional streams the peer may initiate
-     * \param idleTimeout the max_idle_timeout value in milliseconds (0 disables it)
-     * \param omit_connection the flag that indicates if the connection id is required in the
-     * upcoming connection
-     * \param max_packet_size the limit on the size of packets that the endpoint is willing to
-     * receive
-     * \param stateless_reset_token the stateless reset token
-     * \param ack_delay_exponent the exponent used to decode the ack delay field in the ACK frame
-     * \param initial_max_stream_id_uni the initial maximum number of application-owned
-     * unidirectional streams the peer may initiate
-     * \return the generated QuicTransportParameters
+     * @param initial_max_stream_data initial_max_stream_data_bidi_local.
+     * @param initial_max_data initial_max_data.
+     * @param initial_max_stream_id_bidi initial_max_streams_bidi.
+     * @param idleTimeout max_idle_timeout in milliseconds.
+     * @param max_udp_payload_size max_udp_payload_size: the largest UDP payload the endpoint reads.
+     * @param ack_delay_exponent ack_delay_exponent.
+     * @param initial_max_stream_id_uni initial_max_streams_uni.
+     * @return the parameters.
      */
-    static QuicTransportParameters CreateTransportParameters(
-        uint32_t initial_max_stream_data,
-        uint32_t initial_max_data,
-        uint32_t initial_max_stream_id_bidi,
-        uint32_t idleTimeout,
-        uint8_t omit_connection,
-        uint16_t max_packet_size,
-        /*uint128_t stateless_reset_token,*/ uint8_t ack_delay_exponent,
-        uint32_t initial_max_stream_id_uni);
-
-    // Getters, Setters and Controls
+    static QuicTransportParameters CreateTransportParameters(uint64_t initial_max_stream_data,
+                                                             uint64_t initial_max_data,
+                                                             uint64_t initial_max_stream_id_bidi,
+                                                             uint64_t idleTimeout,
+                                                             uint64_t max_udp_payload_size,
+                                                             uint8_t ack_delay_exponent,
+                                                             uint64_t initial_max_stream_id_uni);
 
     /**
-     * \brief Get the ack delay exponent
-     * \return The ack delay exponent for this QuicTransportParameters
+     * @return false when the bytes read are not valid parameters: an entry is cut short, a
+     * parameter is repeated, a value has the wrong size or is out of range.
      */
+    bool IsValid() const
+    {
+        return m_valid;
+    }
+
+    /**
+     * Keep a parameter of any identifier, to send it as it is. Extensions use this for the
+     * parameters that have no accessor, and GREASE for the parameters nobody knows.
+     *
+     * @param id the identifier.
+     * @param value the bytes of the value.
+     */
+    void SetRawParameter(uint64_t id, const std::vector<uint8_t>& value);
+
+    /** @return the parameters that this class does not interpret, by identifier. */
+    const std::map<uint64_t, std::vector<uint8_t>>& GetRawParameters() const
+    {
+        return m_raw;
+    }
+
+    // Getters and setters
+
+    /** @return ack_delay_exponent. */
     uint8_t GetAckDelayExponent() const;
-
-    /**
-     * \brief Set the ack delay exponent
-     * \param ackDelayExponent the ack delay exponent for this QuicTransportParameters
-     */
+    /** @param ackDelayExponent ack_delay_exponent. */
     void SetAckDelayExponent(uint8_t ackDelayExponent);
 
-    /**
-     * \brief Get the idle timeout
-     * \return The idle timeout for this QuicTransportParameters
-     */
-    uint32_t GetIdleTimeout() const;
+    /** @return max_idle_timeout in milliseconds, 0 when there is none. */
+    uint64_t GetIdleTimeout() const;
+    /** @param idleTimeout max_idle_timeout in milliseconds. */
+    void SetIdleTimeout(uint64_t idleTimeout);
 
-    /**
-     * \brief Set the idle timeout
-     * \param idleTimeout the idle timeout for this QuicTransportParameters
-     */
-    void SetIdleTimeout(uint32_t idleTimeout);
+    /** @return initial_max_data. */
+    uint64_t GetInitialMaxData() const;
+    /** @param initialMaxData initial_max_data. */
+    void SetInitialMaxData(uint64_t initialMaxData);
 
-    /**
-     * \brief Get the initial max data limit
-     * \return The initial max data limit for this QuicTransportParameters
-     */
-    uint32_t GetInitialMaxData() const;
+    /** @return initial_max_stream_data_bidi_local. */
+    uint64_t GetInitialMaxStreamData() const;
+    /** @param initialMaxStreamData initial_max_stream_data_bidi_local. */
+    void SetInitialMaxStreamData(uint64_t initialMaxStreamData);
 
-    /**
-     * \brief Set the initial max data limit
-     * \param initialMaxData the initial max data limit for this QuicTransportParameters
-     */
-    void SetInitialMaxData(uint32_t initialMaxData);
+    /** @return initial_max_stream_data_bidi_remote. */
+    uint64_t GetInitialMaxStreamDataBidiRemote() const;
+    /** @param val initial_max_stream_data_bidi_remote. */
+    void SetInitialMaxStreamDataBidiRemote(uint64_t val);
 
-    /**
-     * \brief Get the initial max stream data limit (bidi_local, 0x05)
-     * \return The initial max stream data for locally-initiated bidi streams
-     */
-    uint32_t GetInitialMaxStreamData() const;
+    /** @return initial_max_stream_data_uni. */
+    uint64_t GetInitialMaxStreamDataUni() const;
+    /** @param val initial_max_stream_data_uni. */
+    void SetInitialMaxStreamDataUni(uint64_t val);
 
-    /**
-     * \brief Set the initial max stream data limit (bidi_local, 0x05)
-     * \param initialMaxStreamData the initial max stream data for locally-initiated bidi streams
-     */
-    void SetInitialMaxStreamData(uint32_t initialMaxStreamData);
+    /** @return max_ack_delay in milliseconds. */
+    uint64_t GetMaxAckDelay() const;
+    /** @param val max_ack_delay in milliseconds. */
+    void SetMaxAckDelay(uint64_t val);
 
-    /**
-     * \brief Get initial_max_stream_data_bidi_remote (RFC 9000 §18.2, 0x06)
-     * \return The initial max stream data for remotely-initiated bidi streams
-     */
-    uint32_t GetInitialMaxStreamDataBidiRemote() const;
+    /** @return min_ack_delay in microseconds, 0 when the endpoint does not support ACK_FREQUENCY. */
+    uint64_t GetMinAckDelay() const;
+    /** @param val min_ack_delay in microseconds. */
+    void SetMinAckDelay(uint64_t val);
 
-    /**
-     * \brief Set initial_max_stream_data_bidi_remote (RFC 9000 §18.2, 0x06)
-     * \param val the initial max stream data for remotely-initiated bidi streams
-     */
-    void SetInitialMaxStreamDataBidiRemote(uint32_t val);
+    /** @return initial_max_streams_bidi. */
+    uint64_t GetInitialMaxStreamIdBidi() const;
+    /** @param initialMaxStreamIdBidi initial_max_streams_bidi. */
+    void SetInitialMaxStreamIdBidi(uint64_t initialMaxStreamIdBidi);
 
-    /**
-     * \brief Get initial_max_stream_data_uni (RFC 9000 §18.2, 0x07)
-     * \return The initial max stream data for unidirectional streams
-     */
-    uint32_t GetInitialMaxStreamDataUni() const;
+    /** @return initial_max_streams_uni. */
+    uint64_t GetInitialMaxStreamIdUni() const;
+    /** @param initialMaxStreamIdUni initial_max_streams_uni. */
+    void SetInitialMaxStreamIdUni(uint64_t initialMaxStreamIdUni);
 
-    /**
-     * \brief Set initial_max_stream_data_uni (RFC 9000 §18.2, 0x07)
-     * \param val the initial max stream data for unidirectional streams
-     */
-    void SetInitialMaxStreamDataUni(uint32_t val);
+    /** @return max_udp_payload_size: the largest UDP payload the endpoint reads. */
+    uint64_t GetMaxUdpPayloadSize() const;
+    /** @param maxUdpPayloadSize max_udp_payload_size. */
+    void SetMaxUdpPayloadSize(uint64_t maxUdpPayloadSize);
 
-    /**
-     * \brief Get max_ack_delay (RFC 9000 §18.2, 0x0b) in milliseconds
-     * \return The max ack delay in ms (default 25)
-     */
-    uint16_t GetMaxAckDelay() const;
-
-    /**
-     * \brief Set max_ack_delay (RFC 9000 §18.2, 0x0b) in milliseconds
-     * \param val the max ack delay in ms
-     */
-    void SetMaxAckDelay(uint16_t val);
-
-    /**
-     * \brief Get the min_ack_delay transport parameter (ack-frequency draft), in microseconds
-     * \return the value; 0 means the peer does not support ACK_FREQUENCY
-     */
-    uint32_t GetMinAckDelay() const;
-
-    /**
-     * \brief Set the min_ack_delay transport parameter, in microseconds
-     * \param val the value
-     */
-    void SetMinAckDelay(uint32_t val);
-
-    /**
-     * \brief Get the initial max bidirectional stream id limit
-     * \return The initial max bidirectional stream id limit for this QuicTransportParameters
-     */
-    uint32_t GetInitialMaxStreamIdBidi() const;
-
-    /**
-     * \brief Set the initial max bidirectional stream id limit
-     * \param initialMaxStreamIdBidi the initial max bidirectional stream id limit for this
-     * QuicTransportParameters
-     */
-    void SetInitialMaxStreamIdBidi(uint32_t initialMaxStreamIdBidi);
-
-    /**
-     * \brief Get the initial max unidirectional stream id limit
-     * \return The initial max unidirectional stream id limit for this QuicTransportParameters
-     */
-    uint32_t GetInitialMaxStreamIdUni() const;
-
-    /**
-     * \brief Set the initial max unidirectional stream id limit
-     * \param initialMaxStreamIdUni the initial max unidirectional stream id limit for this
-     * QuicTransportParameters
-     */
-    void SetInitialMaxStreamIdUni(uint32_t initialMaxStreamIdUni);
-
-    /**
-     * \brief Get the max packet size limit
-     * \return The max packet size limit for this QuicTransportParameters
-     */
-    uint16_t GetMaxPacketSize() const;
-
-    /**
-     * \brief Set the max packet size limit
-     * \param maxPacketSize the max packet size limit for this QuicTransportParameters
-     */
-    void SetMaxPacketSize(uint16_t maxPacketSize);
-
-    /**
-     * \brief Get the omit connection id flag
-     * \return The omit connection id flag for this QuicTransportParameters
-     */
-    uint8_t GetOmitConnection() const;
-
-    /**
-     * \brief Set the omit connection id flag
-     * \param omitConnection the omit connection id flag for this QuicTransportParameters
-     */
-    void SetOmitConnection(uint8_t omitConnection);
-
-    /**
-     * \brief Get the stateless reset token (RFC 9000 §18.2)
-     */
+    /** @return the upper 64 bits of stateless_reset_token. */
     uint64_t GetStatelessResetTokenHi() const;
+    /** @return the lower 64 bits of stateless_reset_token. */
     uint64_t GetStatelessResetTokenLo() const;
-
     /**
-     * \brief Set the stateless reset token (RFC 9000 §18.2)
+     * Set stateless_reset_token. A token of zeros is not sent.
+     *
+     * @param hi the upper 64 bits.
+     * @param lo the lower 64 bits.
      */
     void SetStatelessResetToken(uint64_t hi, uint64_t lo);
 
-    /**
-     * \brief Get the active connection id limit (RFC 9000 §18.2)
-     * \return The active connection id limit (MUST be ≥2)
-     */
-    uint8_t GetActiveConnectionIdLimit() const;
+    /** @return active_connection_id_limit. */
+    uint64_t GetActiveConnectionIdLimit() const;
+    /** @param limit active_connection_id_limit. */
+    void SetActiveConnectionIdLimit(uint64_t limit);
 
-    /**
-     * \brief Set the active connection id limit (RFC 9000 §18.2)
-     * \param limit the active connection id limit (MUST be ≥2)
-     */
-    void SetActiveConnectionIdLimit(uint8_t limit);
-
-    /**
-     * \brief Get the disable active migration flag (RFC 9000 §18.2)
-     * \return true if active migration is disabled
-     */
+    /** @return 1 when disable_active_migration is present. */
     uint8_t GetDisableActiveMigration() const;
-
-    /**
-     * \brief Set the disable active migration flag (RFC 9000 §18.2)
-     * \param disable set to 1 to indicate migration is not supported
-     */
+    /** @param disable 1 to send disable_active_migration. */
     void SetDisableActiveMigration(uint8_t disable);
 
-    /**
-     * \brief Get initial_source_connection_id (RFC 9000 §18.2, 0x0f)
-     */
+    /** @return initial_source_connection_id. */
     QuicConnectionId GetInitialSourceConnectionId() const;
-
-    /**
-     * \brief Set initial_source_connection_id (RFC 9000 §18.2, 0x0f)
-     */
+    /** @param cid initial_source_connection_id. */
     void SetInitialSourceConnectionId(const QuicConnectionId& cid);
 
-    /**
-     * \brief Get original_destination_connection_id (RFC 9000 §18.2, 0x00)
-     * Set by server to the DCID from the first Initial received from the client.
-     */
+    /** @return original_destination_connection_id, empty when it is absent. */
     QuicConnectionId GetOriginalDestinationConnectionId() const;
-
-    /**
-     * \brief Set original_destination_connection_id (RFC 9000 §18.2, 0x00)
-     */
+    /** @param cid original_destination_connection_id, sent by a server. */
     void SetOriginalDestinationConnectionId(const QuicConnectionId& cid);
 
+    /** @return retry_source_connection_id, empty when it is absent. */
+    QuicConnectionId GetRetrySourceConnectionId() const;
+    /** @param cid retry_source_connection_id, sent by a server that sent a Retry packet. */
+    void SetRetrySourceConnectionId(const QuicConnectionId& cid);
+
     /**
-     * Comparison operator
-     * \param lhs left operand
-     * \param rhs right operand
-     * \return true if the operands are equal
+     * @param lhs parameters.
+     * @param rhs other parameters.
+     * @return true when every parameter is equal.
      */
     friend bool operator==(const QuicTransportParameters& lhs, const QuicTransportParameters& rhs);
 
   private:
     /**
-     * \brief Calculates the Transpor Parameters block length (in words)
+     * Write the entries of the list, which GetSerializedSize() and Serialize() send behind their
+     * length.
      *
-     * Given the standard size of the Transport Parameters block, the method checks for options
-     * and calculates the real length (in words).
-     *
-     * \return Transpor Parameters block length in 4-byte words
+     * @return the bytes.
      */
-    uint32_t CalculateHeaderLength() const;
+    std::vector<uint8_t> EncodeEntries() const;
 
-    uint32_t m_initial_max_stream_data; //!< initial_max_stream_data_bidi_local (0x05): max data on
-                                        //!< locally-initiated bidi streams
-    uint32_t m_initial_max_data; //!< The initial value for the maximum amount of data that can be
-                                 //!< sent on the connection
-    uint32_t m_initial_max_stream_id_bidi; //!< The the initial maximum number of application-owned
-                                           //!< bidirectional streams the peer may initiate
-    uint32_t m_idleTimeout;     //!< max_idle_timeout in milliseconds, 0 = disabled (RFC 9000 s18.2)
-    uint8_t m_omit_connection;  //!< The flag that indicates if the connection id is required in the
-                                //!< upcoming connection
-    uint16_t m_max_packet_size; //!< The limit on the size of packets that the endpoint is willing
-                                //!< to receive
-    uint64_t
-        m_stateless_reset_token_hi; //!< Upper 64 bits of the stateless reset token (RFC 9000 §18.2)
-    uint64_t
-        m_stateless_reset_token_lo; //!< Lower 64 bits of the stateless reset token (RFC 9000 §18.2)
-    uint8_t
-        m_ack_delay_exponent; //!< The exponent used to decode the ack delay field in the ACK frame
-    uint32_t m_initial_max_stream_id_uni; //!< The initial maximum number of application-owned
-                                          //!< unidirectional streams the peer may initiate
-    uint32_t m_initial_max_stream_data_bidi_remote; //!< initial_max_stream_data_bidi_remote (RFC
-                                                    //!< 9000 §18.2, 0x06)
-    uint32_t m_initial_max_stream_data_uni; //!< initial_max_stream_data_uni (RFC 9000 §18.2, 0x07)
-    uint32_t m_min_ack_delay; //!< min_ack_delay in us (ack-frequency draft), 0 = unsupported
-    uint16_t m_max_ack_delay; //!< max_ack_delay in ms (RFC 9000 §18.2, 0x0b), default 25
-    uint8_t m_active_connection_id_limit; //!< Active connection id limit ≥2 (RFC 9000 §18.2)
-    uint8_t m_disable_active_migration;   //!< Disable active migration flag (RFC 9000 §18.2)
-    QuicConnectionId
-        m_initial_source_connection_id; //!< initial_source_connection_id (RFC 9000 §18.2, 0x0f)
+    /** Give every parameter the default of RFC 9000, Section 18.2: what an absent one means. */
+    void ResetToDefaults();
+
+    uint64_t m_initial_max_stream_data{0};    //!< initial_max_stream_data_bidi_local
+    uint64_t m_initial_max_data{0};           //!< initial_max_data
+    uint64_t m_initial_max_stream_id_bidi{0}; //!< initial_max_streams_bidi
+    uint64_t m_idleTimeout{300000};           //!< max_idle_timeout in milliseconds, 0 = disabled
+    uint64_t m_max_udp_payload_size{65527};   //!< max_udp_payload_size
+    uint64_t m_stateless_reset_token_hi{0};   //!< upper 64 bits of stateless_reset_token
+    uint64_t m_stateless_reset_token_lo{0};   //!< lower 64 bits of stateless_reset_token
+    uint8_t m_ack_delay_exponent{3};          //!< ack_delay_exponent
+    uint64_t m_initial_max_stream_id_uni{0};  //!< initial_max_streams_uni
+    uint64_t m_initial_max_stream_data_bidi_remote{0}; //!< initial_max_stream_data_bidi_remote
+    uint64_t m_initial_max_stream_data_uni{0};         //!< initial_max_stream_data_uni
+    uint64_t m_min_ack_delay{0};                       //!< min_ack_delay in microseconds
+    uint64_t m_max_ack_delay{25};                      //!< max_ack_delay in milliseconds
+    uint64_t m_active_connection_id_limit{2};          //!< active_connection_id_limit
+    uint8_t m_disable_active_migration{0};             //!< disable_active_migration
+    QuicConnectionId m_initial_source_connection_id;   //!< initial_source_connection_id
     QuicConnectionId m_original_destination_connection_id; //!< original_destination_connection_id
-                                                           //!< (RFC 9000 §18.2, 0x00)
+    QuicConnectionId m_retry_source_connection_id;         //!< retry_source_connection_id
+    std::map<uint64_t, std::vector<uint8_t>> m_raw; //!< parameters that have no accessor
+    bool m_valid{true};                             //!< the bytes read were valid parameters
 };
 
 } // namespace ns3
 
-#endif /* QUIC_TRANSPORT_PARAMETERS_H_ */
+#endif /* QUICTRANSPORTPARAMETERS_H */
