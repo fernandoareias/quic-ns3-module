@@ -121,14 +121,17 @@ class FeatConnectionIdWireTest : public TestCase
   private:
     void DoRun() override
     {
-        QuicSubheader n = RoundTrip(QuicSubheader::CreateNewConnectionId(3,
-                                                                         2,
-                                                                         0xABCDEF0123456789ULL,
-                                                                         0x1111222233334444ULL,
-                                                                         0x5555666677778888ULL));
+        QuicSubheader n = RoundTrip(QuicSubheader::CreateNewConnectionId(
+            3,
+            2,
+            QuicConnectionId::FromUint64(0xABCDEF0123456789ULL),
+            0x1111222233334444ULL,
+            0x5555666677778888ULL));
         NS_TEST_ASSERT_MSG_EQ(n.GetSequence(), 3u, "sequence");
         NS_TEST_ASSERT_MSG_EQ(n.GetRetirePriorTo(), 2u, "retire prior to");
-        NS_TEST_ASSERT_MSG_EQ(n.GetConnectionId(), 0xABCDEF0123456789ULL, "cid");
+        NS_TEST_ASSERT_MSG_EQ(n.GetConnectionId(),
+                              QuicConnectionId::FromUint64(0xABCDEF0123456789ULL),
+                              "cid");
         NS_TEST_ASSERT_MSG_EQ(n.GetResetTokenHi(), 0x1111222233334444ULL, "token hi");
         NS_TEST_ASSERT_MSG_EQ(n.GetResetTokenLo(), 0x5555666677778888ULL, "token lo");
         QuicSubheader r = RoundTrip(QuicSubheader::CreateRetireConnectionId(9));
@@ -283,11 +286,12 @@ class FeatRfcWireBytesTest : public TestCase
                {0x04, 0x05, 0x0b, 0x50, 0x00});
         Expect("STOP_SENDING", QuicSubheader::CreateStopSending(9, 7), {0x05, 0x09, 0x07});
         Expect("NEW_CONNECTION_ID",
-               QuicSubheader::CreateNewConnectionId(3,
-                                                    2,
-                                                    0x0102030405060708ULL,
-                                                    0x1111111111111111ULL,
-                                                    0x2222222222222222ULL),
+               QuicSubheader::CreateNewConnectionId(
+                   3,
+                   2,
+                   QuicConnectionId::FromUint64(0x0102030405060708ULL),
+                   0x1111111111111111ULL,
+                   0x2222222222222222ULL),
                {0x18, 0x03, 0x02, 0x08, 1,    2,    3,    4,    5,    6,
                 7,    8,    0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11, 0x11,
                 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22, 0x22});
@@ -328,7 +332,7 @@ class FeatHeaderWireTest : public TestCase
 
     void DoRun() override
     {
-        const uint64_t cid = 0x0102030405060708ULL;
+        const QuicConnectionId cid = QuicConnectionId::FromUint64(0x0102030405060708ULL);
         // spin 1, key phase 1, 1-byte packet number
         Expect("short, spin and key phase",
                QuicHeader::CreateShort(cid, SequenceNumber32(5), true, true, true),

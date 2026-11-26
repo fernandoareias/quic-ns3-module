@@ -10,14 +10,16 @@
  * QUIC ns-3 module - wire layer suite ("quic-wire").
  *
  * The building blocks of the wire format with the vectors of the RFCs: variable-length integers
- * (RFC 9000, Section 16 and Appendix A.1).
+ * (RFC 9000, Section 16 and Appendix A.1) and connection ids (RFC 9000, Section 5.1).
  */
 
+#include "../model/quic-connection-id.h"
 #include "../model/quic-wire.h"
 
 #include "ns3/buffer.h"
 #include "ns3/test.h"
 
+#include <sstream>
 #include <vector>
 
 using namespace ns3;
@@ -124,6 +126,62 @@ class QuicWireVarIntTest : public TestCase
     }
 };
 
+/**
+ * Connection ids of 0 to 20 bytes: bytes, length, order, writing and reading.
+ */
+class QuicWireConnectionIdTest : public TestCase
+{
+  public:
+    QuicWireConnectionIdTest()
+        : TestCase("connection id: length, order, serialization and printing")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        QuicConnectionId empty;
+        NS_TEST_ASSERT_MSG_EQ(empty.IsEmpty(), true, "a default id is empty");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)empty.GetLength(), 0u, "length of the empty id");
+
+        QuicConnectionId eight = QuicConnectionId::FromUint64(0x0102030405060708ULL);
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)eight.GetLength(), 8u, "length of an id from a number");
+        NS_TEST_ASSERT_MSG_EQ(eight.ToUint64(), 0x0102030405060708ULL, "number of the id");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)eight.GetBytes()[0], 1u, "most significant byte first");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)eight.GetBytes()[7], 8u, "least significant byte last");
+
+        // ids of different lengths differ even when one is the prefix of the other
+        const uint8_t bytes[20] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
+                                   11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+        QuicConnectionId prefix(bytes, 8);
+        QuicConnectionId longest(bytes, 20);
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)longest.GetLength(), 20u, "longest id");
+        NS_TEST_ASSERT_MSG_EQ(prefix == eight, true, "same bytes, same id");
+        NS_TEST_ASSERT_MSG_EQ(prefix == longest, false, "a prefix is another id");
+        NS_TEST_ASSERT_MSG_EQ(prefix < longest, true, "the shorter id sorts first");
+        NS_TEST_ASSERT_MSG_EQ(longest < prefix, false, "the longer id sorts last");
+        NS_TEST_ASSERT_MSG_EQ(QuicConnectionId::FromUint64(255) < QuicConnectionId::FromUint64(256),
+                              true,
+                              "ids of one length sort as numbers");
+        NS_TEST_ASSERT_MSG_EQ(empty < prefix, true, "the empty id sorts first");
+
+        // write and read back
+        Buffer buffer;
+        buffer.AddAtStart(20);
+        Buffer::Iterator w = buffer.Begin();
+        longest.Serialize(w);
+        NS_TEST_ASSERT_MSG_EQ(w.GetDistanceFrom(buffer.Begin()), 20u, "bytes written");
+        Buffer::Iterator r = buffer.Begin();
+        QuicConnectionId back = QuicConnectionId::Deserialize(r, 20);
+        NS_TEST_ASSERT_MSG_EQ(back == longest, true, "read back the id written");
+        NS_TEST_ASSERT_MSG_EQ(r.GetDistanceFrom(buffer.Begin()), 20u, "bytes read");
+
+        std::ostringstream text;
+        text << QuicConnectionId::FromUint64(0x0a0b0c0d01020304ULL);
+        NS_TEST_ASSERT_MSG_EQ(text.str(), "0a0b0c0d01020304", "hexadecimal form");
+    }
+};
+
 class QuicWireTestSuite : public TestSuite
 {
   public:
@@ -131,6 +189,7 @@ class QuicWireTestSuite : public TestSuite
         : TestSuite("quic-wire", Type::UNIT)
     {
         AddTestCase(new QuicWireVarIntTest, TestCase::Duration::QUICK);
+        AddTestCase(new QuicWireConnectionIdTest, TestCase::Duration::QUICK);
     }
 };
 

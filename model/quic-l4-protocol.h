@@ -306,13 +306,15 @@ class QuicL4Protocol : public IpL4Protocol
      * \\param hi the upper 64 bits of the token
      * \\param lo the lower 64 bits of the token
      */
-    void GenerateStatelessResetToken(uint64_t connectionId, uint64_t& hi, uint64_t& lo) const;
+    void GenerateStatelessResetToken(const QuicConnectionId& connectionId,
+                                     uint64_t& hi,
+                                     uint64_t& lo) const;
 
     /**
      * \\brief Pick a connection id not used by any connection of this endpoint
      * \\return the new id
      */
-    uint64_t AllocateConnectionId(void);
+    QuicConnectionId AllocateConnectionId(void);
 
     /**
      * \\brief Route packets that carry this connection id to a connection (msquic: the lookup
@@ -320,13 +322,13 @@ class QuicL4Protocol : public IpL4Protocol
      * \\param connectionId the id
      * \\param socket the connection
      */
-    void RegisterConnectionId(uint64_t connectionId, Ptr<QuicSocketBase> socket);
+    void RegisterConnectionId(const QuicConnectionId& connectionId, Ptr<QuicSocketBase> socket);
 
     /**
      * \\brief Stop routing a connection id
      * \\param connectionId the id
      */
-    void UnregisterConnectionId(uint64_t connectionId);
+    void UnregisterConnectionId(const QuicConnectionId& connectionId);
 
     /**
      * \\brief Replace the local UDP socket of a client connection by one bound to a new local
@@ -555,7 +557,7 @@ class QuicL4Protocol : public IpL4Protocol
     std::vector<Address> m_authAddresses; //!< Authenticated addresses for this L4 Protocol
     std::map<Ipv4Address, QuicTransportParameters>
         m_rememberedParameters; //!< Parameters announced by servers this stack connected to
-    std::map<uint64_t, Ptr<QuicSocketBase>>
+    std::map<QuicConnectionId, Ptr<QuicSocketBase>>
         m_cidMap;            //!< Connection id -> connection (every id issued to a peer)
     uint64_t m_resetKeyA{0}; //!< Secret of the stateless reset token function
     uint64_t m_resetKeyB{0}; //!< Secret of the stateless reset token function

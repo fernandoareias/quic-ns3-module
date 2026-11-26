@@ -570,7 +570,7 @@ QuicSocketBase::QuicSocketBase(void)
       m_errno(ERROR_NOTERROR),
       m_connected(false),
       m_zeroRttConnect(false),
-      m_connectionId(0),
+      m_connectionId(),
       m_vers(QUIC_VERSION_NS3_IMPL),
       m_keyPhase(QuicHeader::PHASE_ZERO),
       m_spinBit(false),
@@ -669,7 +669,7 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
       m_errno(sock.m_errno),
       m_connected(sock.m_connected),
       m_zeroRttConnect(false),
-      m_connectionId(0),
+      m_connectionId(),
       m_vers(sock.m_vers),
       m_keyPhase(QuicHeader::PHASE_ZERO),
       m_spinBit(sock.m_spinBit),
@@ -2528,7 +2528,7 @@ QuicSocketBase::SetQuicL4(Ptr<QuicL4Protocol> quic)
 }
 
 void
-QuicSocketBase::SetConnectionId(uint64_t connectionId)
+QuicSocketBase::SetConnectionId(const QuicConnectionId& connectionId)
 {
     NS_LOG_FUNCTION_NOARGS();
 
@@ -2549,7 +2549,7 @@ QuicSocketBase::InitializeScheduling()
     SetDefaultLatency(m_defaultLatency);
 }
 
-uint64_t
+QuicConnectionId
 QuicSocketBase::GetConnectionId(void) const
 {
     NS_LOG_FUNCTION_NOARGS();
@@ -4559,7 +4559,7 @@ QuicSocketBase::InitPaths(void)
 }
 
 QuicSocketBase::QuicCidEntry*
-QuicSocketBase::FindSourceCid(uint64_t id)
+QuicSocketBase::FindSourceCid(const QuicConnectionId& id)
 {
     for (auto& cid : m_srcCids)
     {
@@ -4676,7 +4676,7 @@ QuicSocketBase::RetireCurrentDestCid(QuicPath& path)
     return true;
 }
 
-uint64_t
+QuicConnectionId
 QuicSocketBase::PathDestCid(QuicPath& path)
 {
     if (path.destCidSequence < 0)
@@ -4720,7 +4720,7 @@ bool
 QuicSocketBase::OnPacketOnPath(Ptr<Socket> udp,
                                const Address& from,
                                uint32_t bytes,
-                               uint64_t connectionId)
+                               const QuicConnectionId& connectionId)
 {
     m_rxPathIndex = -1;
     m_rxNonProbing = false;

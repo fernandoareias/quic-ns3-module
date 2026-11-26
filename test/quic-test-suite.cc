@@ -674,7 +674,7 @@ class QuicSpinBitTestCase : public TestCase
     void DoRun() override
     {
         // Create short header with spin bit = 0
-        QuicHeader h0 = QuicHeader::CreateShort(0xDEADBEEF,
+        QuicHeader h0 = QuicHeader::CreateShort(QuicConnectionId::FromUint64(0xDEADBEEF),
                                                 SequenceNumber32(42),
                                                 true,
                                                 QuicHeader::PHASE_ZERO,
@@ -682,7 +682,7 @@ class QuicSpinBitTestCase : public TestCase
         NS_TEST_ASSERT_MSG_EQ(h0.GetSpinBit(), false, "spin bit 0 set");
 
         // Create short header with spin bit = 1
-        QuicHeader h1 = QuicHeader::CreateShort(0xDEADBEEF,
+        QuicHeader h1 = QuicHeader::CreateShort(QuicConnectionId::FromUint64(0xDEADBEEF),
                                                 SequenceNumber32(43),
                                                 true,
                                                 QuicHeader::PHASE_ZERO,
@@ -2559,8 +2559,8 @@ class QuicDestCidUpdateTestCase : public TestCase
         Simulator::Run();
         Ptr<QuicSocketBase> cli = DynamicCast<QuicSocketBase>(m_client);
         Ptr<QuicSocketBase> srv = DynamicCast<QuicSocketBase>(m_server);
-        uint64_t cliAfter = cli->GetDestCid();
-        uint64_t srvAfter = srv->GetDestCid();
+        QuicConnectionId cliAfter = cli->GetDestCid();
+        QuicConnectionId srvAfter = srv->GetDestCid();
         uint32_t cliActive = cli->GetActiveDestCids();
         uint32_t srvActive = srv->GetActiveSourceCids();
         Simulator::Destroy();
@@ -2598,8 +2598,8 @@ class QuicDestCidUpdateTestCase : public TestCase
     }
 
     uint32_t m_rx{0};
-    uint64_t m_cidBefore{0};
-    uint64_t m_serverCidBefore{0};
+    QuicConnectionId m_cidBefore;
+    QuicConnectionId m_serverCidBefore;
     Ptr<Socket> m_listen;
     Ptr<Socket> m_server;
     Ptr<Socket> m_client;

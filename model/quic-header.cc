@@ -31,7 +31,7 @@ QuicHeader::QuicHeader()
       m_spinBit(false),
       m_k(PHASE_ZERO),
       m_type(0),
-      m_connectionId(0),
+      m_connectionId(),
       m_packetNumber(0),
       m_version(0)
 {
@@ -173,9 +173,9 @@ QuicHeader::Serialize(Buffer::Iterator start) const
         i.WriteU8(t);
         // RFC 9000 s17.2.1: a Version Negotiation packet is the one whose version is 0
         i.WriteHtonU32(IsVersionNegotiation() ? 0 : m_version);
-        i.WriteU8(8);                   // DCIL = 8 bytes
-        i.WriteHtonU64(m_connectionId); // DCID (8 bytes)
-        i.WriteU8(0);                   // SCIL = 0 (no source CID)
+        i.WriteU8(8);                // DCIL = 8 bytes
+        m_connectionId.Serialize(i); // DCID (8 bytes)
+        i.WriteU8(0);                // SCIL = 0 (no source CID)
         if (!IsVersionNegotiation())
         {
             i.WriteHtonU32(m_packetNumber.GetValue());
@@ -194,7 +194,7 @@ QuicHeader::Serialize(Buffer::Iterator start) const
 
         if (m_c)
         {
-            i.WriteHtonU64(m_connectionId);
+            m_connectionId.Serialize(i);
         }
 
         switch (m_type)
@@ -256,7 +256,7 @@ QuicHeader::Deserialize(Buffer::Iterator start)
         uint8_t dcil = i.ReadU8();
         if (dcil == 8)
         {
-            SetConnectionID(i.ReadNtohU64());
+            SetConnectionID(QuicConnectionId::Deserialize(i, 8));
         }
         else
         {
@@ -279,7 +279,7 @@ QuicHeader::Deserialize(Buffer::Iterator start)
     {
         if (m_c)
         {
-            SetConnectionID(i.ReadNtohU64());
+            SetConnectionID(QuicConnectionId::Deserialize(i, 8));
         }
         switch (m_type)
         {
@@ -330,7 +330,9 @@ QuicHeader::Print(std::ostream& os) const
 }
 
 QuicHeader
-QuicHeader::CreateInitial(uint64_t connectionId, uint32_t version, SequenceNumber32 packetNumber)
+QuicHeader::CreateInitial(const QuicConnectionId& connectionId,
+                          uint32_t version,
+                          SequenceNumber32 packetNumber)
 {
     NS_LOG_INFO("Create Initial Helper called");
 
@@ -345,7 +347,9 @@ QuicHeader::CreateInitial(uint64_t connectionId, uint32_t version, SequenceNumbe
 }
 
 QuicHeader
-QuicHeader::CreateRetry(uint64_t connectionId, uint32_t version, SequenceNumber32 packetNumber)
+QuicHeader::CreateRetry(const QuicConnectionId& connectionId,
+                        uint32_t version,
+                        SequenceNumber32 packetNumber)
 {
     NS_LOG_INFO("Create Retry Helper called");
 
@@ -360,7 +364,9 @@ QuicHeader::CreateRetry(uint64_t connectionId, uint32_t version, SequenceNumber3
 }
 
 QuicHeader
-QuicHeader::CreateHandshake(uint64_t connectionId, uint32_t version, SequenceNumber32 packetNumber)
+QuicHeader::CreateHandshake(const QuicConnectionId& connectionId,
+                            uint32_t version,
+                            SequenceNumber32 packetNumber)
 {
     NS_LOG_INFO("Create Handshake Helper called ");
 
@@ -375,7 +381,9 @@ QuicHeader::CreateHandshake(uint64_t connectionId, uint32_t version, SequenceNum
 }
 
 QuicHeader
-QuicHeader::Create0RTT(uint64_t connectionId, uint32_t version, SequenceNumber32 packetNumber)
+QuicHeader::Create0RTT(const QuicConnectionId& connectionId,
+                       uint32_t version,
+                       SequenceNumber32 packetNumber)
 {
     NS_LOG_INFO("Create 0RTT Helper called");
 
@@ -390,7 +398,7 @@ QuicHeader::Create0RTT(uint64_t connectionId, uint32_t version, SequenceNumber32
 }
 
 QuicHeader
-QuicHeader::CreateShort(uint64_t connectionId,
+QuicHeader::CreateShort(const QuicConnectionId& connectionId,
                         SequenceNumber32 packetNumber,
                         bool connectionIdFlag,
                         bool keyPhaseBit,
@@ -413,7 +421,7 @@ QuicHeader::CreateShort(uint64_t connectionId,
 }
 
 QuicHeader
-QuicHeader::CreateVersionNegotiation(uint64_t connectionId,
+QuicHeader::CreateVersionNegotiation(const QuicConnectionId& connectionId,
                                      uint32_t version,
                                      std::vector<uint32_t>& supportedVersions)
 {
@@ -468,7 +476,7 @@ QuicHeader::SetFormat(bool form)
     m_form = form;
 }
 
-uint64_t
+QuicConnectionId
 QuicHeader::GetConnectionId() const
 {
     NS_ASSERT(HasConnectionId());
@@ -476,7 +484,7 @@ QuicHeader::GetConnectionId() const
 }
 
 void
-QuicHeader::SetConnectionID(uint64_t connID)
+QuicHeader::SetConnectionID(const QuicConnectionId& connID)
 {
     m_connectionId = connID;
     if (IsShort())

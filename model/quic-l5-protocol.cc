@@ -60,7 +60,7 @@ QuicL5Protocol::QuicL5Protocol()
     NS_LOG_LOGIC("Made a QuicL5Protocol " << this);
     m_socket = 0;
     m_node = 0;
-    m_connectionId = 0;
+    m_connectionId = QuicConnectionId();
 }
 
 QuicL5Protocol::~QuicL5Protocol()
@@ -443,7 +443,7 @@ QuicL5Protocol::SetNode(Ptr<Node> node)
 }
 
 void
-QuicL5Protocol::SetConnectionId(uint64_t connId)
+QuicL5Protocol::SetConnectionId(const QuicConnectionId& connId)
 {
     NS_LOG_FUNCTION(this << connId);
     m_connectionId = connId;

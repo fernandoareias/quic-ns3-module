@@ -76,7 +76,7 @@ class QuicL5Protocol : public Object
      *
      * \param connId the connection id to be associated with
      */
-    void SetConnectionId(uint64_t connId);
+    void SetConnectionId(const QuicConnectionId& connId);
 
     /**
      * \brief Send a packet to the streams associated to this L5 protocol
@@ -328,7 +328,7 @@ class QuicL5Protocol : public Object
                               //!< the socket owns this stack and a Ptr here would be a cycle that
                               //!< keeps both alive for good
     Ptr<Node> m_node;         //!< The node this stack is associated with
-    uint64_t m_connectionId;  //!< The connection id this stack is associated with
+    QuicConnectionId m_connectionId; //!< The connection id this stack is associated with
     std::vector<Ptr<QuicStreamBase>>
         m_streams; //!< The streams this stack is associated with (handshake first)
     std::map<uint64_t, Ptr<QuicStreamBase>> m_streamById; //!< The streams by RFC 9000 stream id

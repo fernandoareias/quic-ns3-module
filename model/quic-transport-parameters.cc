@@ -43,8 +43,8 @@ QuicTransportParameters::QuicTransportParameters()
       m_active_connection_id_limit(2), // RFC 9000 §18.2: MUST be ≥2
       m_disable_active_migration(
           0), // RFC 9000 §18.2: active migration is supported (msquic default)
-      m_initial_source_connection_id(0),
-      m_original_destination_connection_id(0)
+      m_initial_source_connection_id(),
+      m_original_destination_connection_id()
 {
 }
 
@@ -116,13 +116,14 @@ QuicTransportParameters::Serialize(Buffer::Iterator start) const
     i.WriteHtonU16(m_max_packet_size);
     i.WriteHtonU16(m_max_ack_delay); // 0x0b max_ack_delay (ms)
     i.WriteU8(m_omit_connection);
-    i.WriteU8(m_ack_delay_exponent);                      // 0x0a ack_delay_exponent
-    i.WriteU8(m_active_connection_id_limit);              // 0x0e active_connection_id_limit
-    i.WriteU8(m_disable_active_migration);                // 0x0c disable_active_migration
-    i.WriteHtonU64(m_stateless_reset_token_hi);           // 0x02 stateless_reset_token (hi 64 bits)
-    i.WriteHtonU64(m_stateless_reset_token_lo);           //      stateless_reset_token (lo 64 bits)
-    i.WriteHtonU64(m_initial_source_connection_id);       // 0x0f initial_source_connection_id
-    i.WriteHtonU64(m_original_destination_connection_id); // 0x00 original_destination_connection_id
+    i.WriteU8(m_ack_delay_exponent);            // 0x0a ack_delay_exponent
+    i.WriteU8(m_active_connection_id_limit);    // 0x0e active_connection_id_limit
+    i.WriteU8(m_disable_active_migration);      // 0x0c disable_active_migration
+    i.WriteHtonU64(m_stateless_reset_token_hi); // 0x02 stateless_reset_token (hi 64 bits)
+    i.WriteHtonU64(m_stateless_reset_token_lo); //      stateless_reset_token (lo 64 bits)
+    i.WriteHtonU64(m_initial_source_connection_id.ToUint64()); // 0x0f initial_source_connection_id
+    i.WriteHtonU64(
+        m_original_destination_connection_id.ToUint64()); // 0x00 original_destination_connection_id
 }
 
 uint32_t
@@ -148,8 +149,8 @@ QuicTransportParameters::Deserialize(Buffer::Iterator start)
     m_disable_active_migration = i.ReadU8();
     m_stateless_reset_token_hi = i.ReadNtohU64();
     m_stateless_reset_token_lo = i.ReadNtohU64();
-    m_initial_source_connection_id = i.ReadNtohU64();
-    m_original_destination_connection_id = i.ReadNtohU64();
+    m_initial_source_connection_id = QuicConnectionId::FromUint64(i.ReadNtohU64());
+    m_original_destination_connection_id = QuicConnectionId::FromUint64(i.ReadNtohU64());
 
     NS_LOG_INFO("Deserialize::Serialized Size " << CalculateHeaderLength());
 
@@ -373,26 +374,26 @@ QuicTransportParameters::SetStatelessResetToken(uint64_t hi, uint64_t lo)
     m_stateless_reset_token_lo = lo;
 }
 
-uint64_t
+QuicConnectionId
 QuicTransportParameters::GetInitialSourceConnectionId() const
 {
     return m_initial_source_connection_id;
 }
 
 void
-QuicTransportParameters::SetInitialSourceConnectionId(uint64_t cid)
+QuicTransportParameters::SetInitialSourceConnectionId(const QuicConnectionId& cid)
 {
     m_initial_source_connection_id = cid;
 }
 
-uint64_t
+QuicConnectionId
 QuicTransportParameters::GetOriginalDestinationConnectionId() const
 {
     return m_original_destination_connection_id;
 }
 
 void
-QuicTransportParameters::SetOriginalDestinationConnectionId(uint64_t cid)
+QuicTransportParameters::SetOriginalDestinationConnectionId(const QuicConnectionId& cid)
 {
     m_original_destination_connection_id = cid;
 }

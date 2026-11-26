@@ -83,7 +83,7 @@ QuicStreamBase::QuicStreamBase(void)
       m_streamStateSend(IDLE),
       m_streamStateRecv(IDLE),
       m_node(0),
-      m_connectionId(0),
+      m_connectionId(),
       m_streamId(0),
       m_quicl5(0),
       m_maxStreamData(0),
@@ -1024,7 +1024,7 @@ QuicStreamBase::GetStreamId(void)
 }
 
 void
-QuicStreamBase::SetConnectionId(uint64_t connId)
+QuicStreamBase::SetConnectionId(const QuicConnectionId& connId)
 {
     NS_LOG_FUNCTION(this << connId);
     m_connectionId = connId;

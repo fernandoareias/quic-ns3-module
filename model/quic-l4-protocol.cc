@@ -167,10 +167,13 @@ Mix64(uint64_t x)
 } // namespace
 
 void
-QuicL4Protocol::GenerateStatelessResetToken(uint64_t connectionId, uint64_t& hi, uint64_t& lo) const
+QuicL4Protocol::GenerateStatelessResetToken(const QuicConnectionId& connectionId,
+                                            uint64_t& hi,
+                                            uint64_t& lo) const
 {
-    hi = Mix64(connectionId ^ m_resetKeyA);
-    lo = Mix64(hi ^ m_resetKeyB ^ (connectionId << 1));
+    const uint64_t value = connectionId.ToUint64();
+    hi = Mix64(value ^ m_resetKeyA);
+    lo = Mix64(hi ^ m_resetKeyB ^ (value << 1));
 }
 
 QuicL4Protocol::~QuicL4Protocol()
@@ -560,7 +563,7 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
         QuicHeader header;
         packet->RemoveHeader(header);
 
-        uint64_t connectionId;
+        QuicConnectionId connectionId;
         if (header.HasConnectionId())
         {
             connectionId = header.GetConnectionId();
@@ -807,15 +810,16 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
     }
 }
 
-uint64_t
+QuicConnectionId
 QuicL4Protocol::AllocateConnectionId(void)
 {
     Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
     for (;;)
     {
-        uint64_t cid =
+        const uint64_t value =
             ((uint64_t)rng->GetInteger(0, 0xffffffffu) << 32) | rng->GetInteger(0, 0xffffffffu);
-        if (cid == 0 || m_cidMap.count(cid) > 0)
+        const QuicConnectionId cid = QuicConnectionId::FromUint64(value);
+        if (value == 0 || m_cidMap.count(cid) > 0)
         {
             continue;
         }
@@ -832,13 +836,14 @@ QuicL4Protocol::AllocateConnectionId(void)
 }
 
 void
-QuicL4Protocol::RegisterConnectionId(uint64_t connectionId, Ptr<QuicSocketBase> socket)
+QuicL4Protocol::RegisterConnectionId(const QuicConnectionId& connectionId,
+                                     Ptr<QuicSocketBase> socket)
 {
     m_cidMap[connectionId] = socket;
 }
 
 void
-QuicL4Protocol::UnregisterConnectionId(uint64_t connectionId)
+QuicL4Protocol::UnregisterConnectionId(const QuicConnectionId& connectionId)
 {
     m_cidMap.erase(connectionId);
 }
@@ -952,8 +957,8 @@ QuicL4Protocol::SendStatelessReset(Ptr<Socket> sock,
     {
         length = received - 1;
     }
-    uint64_t cid =
-        ((uint64_t)rng->GetInteger(0, 0xffffffffu) << 32) | rng->GetInteger(0, 0xffffffffu);
+    const QuicConnectionId cid = QuicConnectionId::FromUint64(
+        ((uint64_t)rng->GetInteger(0, 0xffffffffu) << 32) | rng->GetInteger(0, 0xffffffffu));
     QuicHeader head = QuicHeader::CreateShort(cid,
                                               SequenceNumber32(rng->GetInteger(0, 0xffffff)),
                                               true,
@@ -1146,10 +1151,10 @@ QuicL4Protocol::CreateSocket(TypeId congestionTypeId)
     Ptr<UniformRandomVariable> rand = CreateObject<UniformRandomVariable>();
 
     bool found = false;
-    uint64_t connectionId;
+    QuicConnectionId connectionId;
     while (not found)
     {
-        connectionId = uint64_t(rand->GetValue(0, pow(2, 64) - 1));
+        connectionId = QuicConnectionId::FromUint64(uint64_t(rand->GetValue(0, pow(2, 64) - 1)));
         found = true;
         for (auto it = m_quicUdpBindingList.begin(); it != m_quicUdpBindingList.end(); ++it)
         {

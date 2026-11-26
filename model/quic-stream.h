@@ -12,6 +12,8 @@
 #ifndef QUICSTREAM_H
 #define QUICSTREAM_H
 
+#include "quic-connection-id.h"
+
 // #include "ns3/stream.h"
 #include "ns3/node.h"
 
@@ -167,7 +169,7 @@ class QuicStream : public Object
      *
      * \param connId the connection ID
      */
-    virtual void SetConnectionId(uint64_t connId) = 0;
+    virtual void SetConnectionId(const QuicConnectionId& connId) = 0;
 
     /**
      * \brief Set the stream ID and the stream type using the 2 least significant bits

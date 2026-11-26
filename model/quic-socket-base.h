@@ -448,14 +448,14 @@ class QuicSocketBase : public QuicSocket
      *
      * \param connectionId the connection ID
      */
-    void SetConnectionId(uint64_t connectionId);
+    void SetConnectionId(const QuicConnectionId& connectionId);
 
     /**
      * \brief Get the connection ID
      *
      * \return the connection ID
      */
-    uint64_t GetConnectionId(void) const;
+    QuicConnectionId GetConnectionId(void) const;
 
     /**
      * \brief Set the Quic protocol version
@@ -831,7 +831,7 @@ class QuicSocketBase : public QuicSocket
     bool OnPacketOnPath(Ptr<Socket> udp,
                         const Address& from,
                         uint32_t bytes,
-                        uint64_t connectionId);
+                        const QuicConnectionId& connectionId);
 
     /** \\brief Note a frame of the packet being processed (non-probing frames can start a
      * migration) */
@@ -871,9 +871,9 @@ class QuicSocketBase : public QuicSocket
     uint32_t GetActiveDestCids(void) const;
 
     /** \\return the destination connection id used on the active path */
-    uint64_t GetDestCid(void) const
+    QuicConnectionId GetDestCid(void) const
     {
-        return m_destCid ? m_destCid : m_connectionId;
+        return m_destCid.IsEmpty() ? m_connectionId : m_destCid;
     }
 
     /** \\return the congestion window in bytes */
@@ -1309,7 +1309,7 @@ class QuicSocketBase : public QuicSocket
     struct QuicCidEntry
     {
         uint64_t sequence{0};
-        uint64_t id{0};
+        QuicConnectionId id;
         uint64_t tokenHi{0};
         uint64_t tokenLo{0};
         bool retired{false};
@@ -1344,11 +1344,11 @@ class QuicSocketBase : public QuicSocket
     uint64_t m_nextSrcCidSequence{1}; //!< sequence number of the next id we issue
     uint64_t m_peerRetirePriorTo{0};  //!< highest retire-prior-to the peer announced
     uint8_t m_peerActiveCidLimit{2};  //!< active_connection_id_limit announced by the peer
-    uint64_t m_destCid{0};            //!< destination id of the active path
+    QuicConnectionId m_destCid;       //!< destination id of the active path
     std::vector<QuicPath> m_paths;    //!< paths; the active one is first
     uint32_t m_nextPathId{1};         //!< id of the next path
     int m_rxPathIndex{-1};            //!< path of the packet being processed
-    uint64_t m_rxDcid{0};             //!< destination id carried by the packet being processed
+    QuicConnectionId m_rxDcid;        //!< destination id carried by the packet being processed
     bool m_rxNonProbing{false};       //!< the packet being processed holds a non-probing frame
     EventId m_pathTimer;              //!< path validation: challenge retransmission and timeout
     static constexpr uint32_t kMaxPaths = 4;      //!< QUIC_MAX_PATH_COUNT
@@ -1365,11 +1365,11 @@ class QuicSocketBase : public QuicSocket
     void InitPaths(void);
     void IssueSourceCids(void);
     void IssueSourceCid(void);
-    QuicCidEntry* FindSourceCid(uint64_t id);
+    QuicCidEntry* FindSourceCid(const QuicConnectionId& id);
     QuicCidEntry* UnusedDestCid(void);
     bool RetireCurrentDestCid(QuicPath& path);
     void RetireDestCid(QuicCidEntry& cid);
-    uint64_t PathDestCid(QuicPath& path);
+    QuicConnectionId PathDestCid(QuicPath& path);
     void SendControlFrame(const QuicSubheader& sub);
     void SendPathChallenge(QuicPath& path);
     void SendPathResponse(QuicPath& path, uint64_t data);
@@ -1476,9 +1476,9 @@ class QuicSocketBase : public QuicSocket
     bool m_serverBusy;                       //!< If true, server too busy to accept new connections
     mutable enum SocketErrno m_errno;        //!< Socket error code
     bool m_connected;                        //!< Check if connection is established
-    bool m_zeroRttConnect;   //!< True on a client socket that connected with a 0-RTT handshake
-    uint64_t m_connectionId; //!< Connection id
-    uint32_t m_vers;         //!< Quic protocol version
+    bool m_zeroRttConnect; //!< True on a client socket that connected with a 0-RTT handshake
+    QuicConnectionId m_connectionId;   //!< Connection id
+    uint32_t m_vers;                   //!< Quic protocol version
     QuicHeader::KeyPhase_t m_keyPhase; //!< Key phase
     bool m_spinBit;                    //!< Spin bit for latency measurement (RFC 9000 §17.3.1)
     Time m_lastReceived;               //!< Time of last received packet

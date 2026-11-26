@@ -12,6 +12,8 @@
 #ifndef QUICHEADER_H
 #define QUICHEADER_H
 
+#include "quic-connection-id.h"
+
 #include "ns3/buffer.h"
 #include "ns3/header.h"
 #include "ns3/ipv4-address.h"
@@ -110,7 +112,7 @@ class QuicHeader : public Header
      * \param packetNumber the packet number
      * \return the generated QuicHeader
      */
-    static QuicHeader CreateInitial(uint64_t connectionId,
+    static QuicHeader CreateInitial(const QuicConnectionId& connectionId,
                                     uint32_t version,
                                     SequenceNumber32 packetNumber);
 
@@ -122,7 +124,7 @@ class QuicHeader : public Header
      * \param packetNumber the packet number
      * \return the generated QuicHeader
      */
-    static QuicHeader CreateRetry(uint64_t connectionId,
+    static QuicHeader CreateRetry(const QuicConnectionId& connectionId,
                                   uint32_t version,
                                   SequenceNumber32 packetNumber);
 
@@ -134,7 +136,7 @@ class QuicHeader : public Header
      * \param packetNumber the packet number
      * \return the generated QuicHeader
      */
-    static QuicHeader CreateHandshake(uint64_t connectionId,
+    static QuicHeader CreateHandshake(const QuicConnectionId& connectionId,
                                       uint32_t version,
                                       SequenceNumber32 packetNumber);
 
@@ -146,7 +148,7 @@ class QuicHeader : public Header
      * \param packetNumber the packet number
      * \return the generated QuicHeader
      */
-    static QuicHeader Create0RTT(uint64_t connectionId,
+    static QuicHeader Create0RTT(const QuicConnectionId& connectionId,
                                  uint32_t version,
                                  SequenceNumber32 packetNumber);
 
@@ -159,7 +161,7 @@ class QuicHeader : public Header
      * \param supportedVersions a vector of supported versions
      * \return the generated QuicHeader
      */
-    static QuicHeader CreateVersionNegotiation(uint64_t connectionId,
+    static QuicHeader CreateVersionNegotiation(const QuicConnectionId& connectionId,
                                                uint32_t version,
                                                std::vector<uint32_t>& supportedVersions);
 
@@ -173,7 +175,7 @@ class QuicHeader : public Header
      * protection keys that are used to protect the packet.
      * \return the generated QuicHeader
      */
-    static QuicHeader CreateShort(uint64_t connectionId,
+    static QuicHeader CreateShort(const QuicConnectionId& connectionId,
                                   SequenceNumber32 packetNumber,
                                   bool connectionIdFlag = true,
                                   bool keyPhaseBit = QuicHeader::PHASE_ZERO,
@@ -197,13 +199,13 @@ class QuicHeader : public Header
      * \brief Get the connection id
      * \return The connection id for this QuicHeader
      */
-    uint64_t GetConnectionId() const;
+    QuicConnectionId GetConnectionId() const;
 
     /**
      * \brief Set the connection id
      * \param connID the connection id for this QuicHeader
      */
-    void SetConnectionID(uint64_t connID);
+    void SetConnectionID(const QuicConnectionId& connID);
 
     /**
      * \brief Get the packet number
@@ -356,7 +358,7 @@ class QuicHeader : public Header
     bool m_spinBit;                  //!< Spin bit (RFC 9000 §17.3.1)
     bool m_k;                        //!< Key phase bit
     uint8_t m_type;                  //!< Type byte
-    uint64_t m_connectionId;         //!< Connection Id
+    QuicConnectionId m_connectionId; //!< Connection Id
     SequenceNumber32 m_packetNumber; //!< Packet number
     uint32_t m_version;              //!< Version
 };

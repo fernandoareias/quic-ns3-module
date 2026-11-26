@@ -12,6 +12,8 @@
 #ifndef QUICTRANSPORTPARAMETERS_H
 #define QUICTRANSPORTPARAMETERS_H
 
+#include "quic-connection-id.h"
+
 #include "ns3/buffer.h"
 #include "ns3/header.h"
 #include "ns3/ipv4-address.h"
@@ -283,23 +285,23 @@ class QuicTransportParameters : public Header
     /**
      * \brief Get initial_source_connection_id (RFC 9000 §18.2, 0x0f)
      */
-    uint64_t GetInitialSourceConnectionId() const;
+    QuicConnectionId GetInitialSourceConnectionId() const;
 
     /**
      * \brief Set initial_source_connection_id (RFC 9000 §18.2, 0x0f)
      */
-    void SetInitialSourceConnectionId(uint64_t cid);
+    void SetInitialSourceConnectionId(const QuicConnectionId& cid);
 
     /**
      * \brief Get original_destination_connection_id (RFC 9000 §18.2, 0x00)
      * Set by server to the DCID from the first Initial received from the client.
      */
-    uint64_t GetOriginalDestinationConnectionId() const;
+    QuicConnectionId GetOriginalDestinationConnectionId() const;
 
     /**
      * \brief Set original_destination_connection_id (RFC 9000 §18.2, 0x00)
      */
-    void SetOriginalDestinationConnectionId(uint64_t cid);
+    void SetOriginalDestinationConnectionId(const QuicConnectionId& cid);
 
     /**
      * Comparison operator
@@ -346,10 +348,10 @@ class QuicTransportParameters : public Header
     uint16_t m_max_ack_delay; //!< max_ack_delay in ms (RFC 9000 §18.2, 0x0b), default 25
     uint8_t m_active_connection_id_limit; //!< Active connection id limit ≥2 (RFC 9000 §18.2)
     uint8_t m_disable_active_migration;   //!< Disable active migration flag (RFC 9000 §18.2)
-    uint64_t
+    QuicConnectionId
         m_initial_source_connection_id; //!< initial_source_connection_id (RFC 9000 §18.2, 0x0f)
-    uint64_t m_original_destination_connection_id; //!< original_destination_connection_id (RFC 9000
-                                                   //!< §18.2, 0x00)
+    QuicConnectionId m_original_destination_connection_id; //!< original_destination_connection_id
+                                                           //!< (RFC 9000 §18.2, 0x00)
 };
 
 } // namespace ns3

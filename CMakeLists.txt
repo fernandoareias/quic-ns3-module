@@ -12,6 +12,7 @@ endif()
 build_lib(
     LIBNAME quic
     SOURCE_FILES model/quic-bbr.cc
+                 model/quic-connection-id.cc
                  model/quic-cubic.cc
                  model/quic-congestion-ops.cc
                  model/quic-header.cc
@@ -37,6 +38,7 @@ build_lib(
                  model/quic-wire.cc
                  helper/quic-helper.cc
     HEADER_FILES model/quic-stream-id-tag.h
+                 model/quic-connection-id.h
                  model/quic-cubic.h
                  model/quic-bbr.h
                  model/quic-congestion-ops.h

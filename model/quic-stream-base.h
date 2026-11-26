@@ -231,7 +231,7 @@ class QuicStreamBase : public QuicStream
     void SetStreamStateRecv(const QuicStreamStates_t& streamState);
     void SetStreamStateRecvIf(bool condition, const QuicStreamStates_t& streamState);
     void SetNode(Ptr<Node> node);
-    void SetConnectionId(uint64_t connId);
+    void SetConnectionId(const QuicConnectionId& connId);
     void SetStreamId(uint64_t streamId);
     uint64_t GetStreamId(void);
 
@@ -259,7 +259,7 @@ class QuicStreamBase : public QuicStream
     QuicStreamStates_t m_streamStateSend;             //!< The state of the send stream
     QuicStreamStates_t m_streamStateRecv;             //!< The state of the receive stream
     Ptr<Node> m_node;                                 //!< The node this stream is associated with
-    uint64_t m_connectionId;                          //!< The connection ID
+    QuicConnectionId m_connectionId;                  //!< The connection ID
     uint64_t m_streamId;                              //!< The stream ID
     QuicL5Protocol* m_quicl5; //!< The L5 Protocol this stack is associated with; not a Ptr, because
                               //!< the L5 Protocol owns its streams (a Ptr here would be a cycle)

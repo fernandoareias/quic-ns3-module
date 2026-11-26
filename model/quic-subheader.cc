@@ -38,7 +38,7 @@ QuicSubheader::QuicSubheader()
       m_maxStreamData(0),
       m_maxStreamId(0),
       m_sequence(0),
-      m_connectionId(0),
+      m_connectionId(),
       m_largestAcknowledged(0),
       m_ackDelay(0),
       m_ackBlockCount(0),
@@ -511,8 +511,8 @@ QuicSubheader::Serialize(Buffer::Iterator start) const
 
         WriteVarInt64(i, m_sequence);
         WriteVarInt64(i, m_retirePriorTo);
-        i.WriteU8(8); // RFC 9000 s19.15: connection id length
-        i.WriteHtonU64(m_connectionId);
+        i.WriteU8(m_connectionId.GetLength()); // RFC 9000 s19.15: connection id length
+        m_connectionId.Serialize(i);
         i.WriteHtonU64(m_resetTokenHi);
         i.WriteHtonU64(m_resetTokenLo);
         break;
@@ -685,14 +685,9 @@ QuicSubheader::Deserialize(Buffer::Iterator start)
         m_sequence = ReadVarInt64(i);
         m_retirePriorTo = ReadVarInt64(i);
         {
-            // RFC 9000 s19.15: the id comes with its length; this module issues 8-byte ids and
-            // keeps the last 8 bytes of a longer one
+            // RFC 9000 s19.15: the id comes with its length
             uint8_t cidLength = i.ReadU8();
-            m_connectionId = 0;
-            for (uint8_t k = 0; k < cidLength; ++k)
-            {
-                m_connectionId = (m_connectionId << 8) | i.ReadU8();
-            }
+            m_connectionId = QuicConnectionId::Deserialize(i, cidLength);
         }
         m_resetTokenHi = i.ReadNtohU64();
         m_resetTokenLo = i.ReadNtohU64();
@@ -1110,8 +1105,9 @@ QuicSubheader::CreateStreamIdBlocked(uint64_t streamId)
 }
 
 QuicSubheader
-QuicSubheader::CreateNewConnectionId(uint64_t sequence,
-                                     uint64_t connectionId) // uint128_t statelessResetToken);
+QuicSubheader::CreateNewConnectionId(
+    uint64_t sequence,
+    const QuicConnectionId& connectionId) // uint128_t statelessResetToken);
 {
     NS_LOG_INFO("Created NewConnectionId Header");
 
@@ -1126,7 +1122,7 @@ QuicSubheader::CreateNewConnectionId(uint64_t sequence,
 QuicSubheader
 QuicSubheader::CreateNewConnectionId(uint64_t sequence,
                                      uint64_t retirePriorTo,
-                                     uint64_t connectionId,
+                                     const QuicConnectionId& connectionId,
                                      uint64_t tokenHi,
                                      uint64_t tokenLo)
 {
@@ -1428,14 +1424,14 @@ QuicSubheader::SetAckDelay(uint64_t ackDelay)
     m_ackDelay = ackDelay;
 }
 
-uint64_t
+QuicConnectionId
 QuicSubheader::GetConnectionId() const
 {
     return m_connectionId;
 }
 
 void
-QuicSubheader::SetConnectionId(uint64_t connectionId)
+QuicSubheader::SetConnectionId(const QuicConnectionId& connectionId)
 {
     m_connectionId = connectionId;
 }

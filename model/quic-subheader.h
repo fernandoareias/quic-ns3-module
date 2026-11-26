@@ -12,6 +12,8 @@
 #ifndef QUICSUBHEADER_H
 #define QUICSUBHEADER_H
 
+#include "quic-connection-id.h"
+
 #include "ns3/buffer.h"
 #include "ns3/header.h"
 #include "ns3/ipv4-address.h"
@@ -362,7 +364,7 @@ class QuicSubheader : public Header
      */
     static QuicSubheader CreateNewConnectionId(
         uint64_t sequence,
-        uint64_t connectionId); // uint128_t statelessResetToken);
+        const QuicConnectionId& connectionId); // uint128_t statelessResetToken);
 
     /**
      * Create a NEW_CONNECTION_ID subheader with all its fields (RFC 9000 s19.15)
@@ -375,7 +377,7 @@ class QuicSubheader : public Header
      */
     static QuicSubheader CreateNewConnectionId(uint64_t sequence,
                                                uint64_t retirePriorTo,
-                                               uint64_t connectionId,
+                                               const QuicConnectionId& connectionId,
                                                uint64_t tokenHi,
                                                uint64_t tokenLo);
 
@@ -559,13 +561,13 @@ class QuicSubheader : public Header
      * \brief Get the connection id
      * \return The connection id for this QuicSubheader
      */
-    uint64_t GetConnectionId() const;
+    QuicConnectionId GetConnectionId() const;
 
     /**
      * \brief Set the connection id
      * \param connectionId the connection id for this QuicSubheader
      */
-    void SetConnectionId(uint64_t connectionId);
+    void SetConnectionId(const QuicConnectionId& connectionId);
 
     /**
      * \brief Get the data word
@@ -928,7 +930,7 @@ class QuicSubheader : public Header
     uint64_t m_maxStreamData;            //!< Max stream data limit
     uint64_t m_maxStreamId;              //!< Max stream id limit
     uint64_t m_sequence;                 //!< Sequence
-    uint64_t m_connectionId;             //!< Connection id
+    QuicConnectionId m_connectionId;     //!< Connection id
     // uint128_t statelessResetToken;              //!< Stateless reset token
     uint32_t m_largestAcknowledged;              //!< Largest acknowledged
     uint32_t m_ackDelay;                         //!< Ack delay
