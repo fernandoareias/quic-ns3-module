@@ -352,7 +352,7 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
 {
     NS_LOG_FUNCTION(this);
 
-    uint8_t frameType = sub.GetFrameType();
+    uint64_t frameType = sub.GetFrameType();
 
     switch (frameType)
     {

@@ -266,7 +266,7 @@ class QuicSubheader : public Header
      * \return the generated QuicSubheader
      */
     static QuicSubheader CreateRstStream(uint64_t streamId,
-                                         uint16_t applicationErrorCode,
+                                         uint64_t applicationErrorCode,
                                          uint64_t finalOffset);
 
     /**
@@ -276,7 +276,7 @@ class QuicSubheader : public Header
      * \param reasonPhrase the human-readable explanation for why the connection has been closed
      * \return the generated QuicSubheader
      */
-    static QuicSubheader CreateConnectionClose(uint16_t errorCode, const char* reasonPhrase);
+    static QuicSubheader CreateConnectionClose(uint64_t errorCode, const char* reasonPhrase);
 
     /**
      * Create a Application Close subheader
@@ -285,7 +285,7 @@ class QuicSubheader : public Header
      * \param reasonPhrase the human-readable explanation for why the connection has been closed
      * \return the generated QuicSubheader
      */
-    static QuicSubheader CreateApplicationClose(uint16_t errorCode, const char* reasonPhrase);
+    static QuicSubheader CreateApplicationClose(uint64_t errorCode, const char* reasonPhrase);
 
     /**
      * Create a Max Data subheader
@@ -414,7 +414,7 @@ class QuicSubheader : public Header
      * stream
      * \return the generated QuicSubheader
      */
-    static QuicSubheader CreateStopSending(uint64_t streamId, uint16_t applicationErrorCode);
+    static QuicSubheader CreateStopSending(uint64_t streamId, uint64_t applicationErrorCode);
 
     /**
      * Create an ACK_FREQUENCY subheader (draft-ietf-quic-ack-frequency, as msquic)
@@ -479,11 +479,11 @@ class QuicSubheader : public Header
      * acknowledged packets preceding the largest packet number
      * \return the generated QuicSubheader
      */
-    static QuicSubheader CreateAck(uint32_t largestAcknowledged,
+    static QuicSubheader CreateAck(uint64_t largestAcknowledged,
                                    uint64_t ackDelay,
-                                   uint32_t firstAckBlock,
-                                   std::vector<uint32_t>& gaps,
-                                   std::vector<uint32_t>& additionalAckBlocks);
+                                   uint64_t firstAckBlock,
+                                   std::vector<uint64_t>& gaps,
+                                   std::vector<uint64_t>& additionalAckBlocks);
 
     /**
      * Create a Path Response subheader
@@ -525,25 +525,25 @@ class QuicSubheader : public Header
      * \brief Get the ack block count
      * \return The ack block count for this QuicSubheader
      */
-    uint32_t GetAckBlockCount() const;
+    uint64_t GetAckBlockCount() const;
 
     /**
      * \brief Set the ack block count
      * \param ackBlockCount the ack block count for this QuicSubheader
      */
-    void SetAckBlockCount(uint32_t ackBlockCount);
+    void SetAckBlockCount(uint64_t ackBlockCount);
 
     /**
      * \brief Get the additional ack block vector
      * \return The additional ack block vector for this QuicSubheader
      */
-    const std::vector<uint32_t>& GetAdditionalAckBlocks() const;
+    const std::vector<uint64_t>& GetAdditionalAckBlocks() const;
 
     /**
      * \brief Set the additional ack block vector
      * \param ackBlocks the additional ack block vector for this QuicSubheader
      */
-    void SetAdditionalAckBlocks(const std::vector<uint32_t>& ackBlocks);
+    void SetAdditionalAckBlocks(const std::vector<uint64_t>& ackBlocks);
 
     /**
      * \brief Get the ack delay
@@ -585,55 +585,64 @@ class QuicSubheader : public Header
      * \brief Get the error code
      * \return The data word for this QuicSubheader
      */
-    uint16_t GetErrorCode() const;
+    uint64_t GetErrorCode() const;
 
     /**
      * \brief Set the error code
      * \param errorCode the error code for this QuicSubheader
      */
-    void SetErrorCode(uint16_t errorCode);
+    void SetErrorCode(uint64_t errorCode);
 
     /**
      * \brief Get the frame type
      * \return The frame type for this QuicSubheader
      */
-    uint8_t GetFrameType() const;
+    uint64_t GetFrameType() const;
 
     /**
      * \brief Set the frame type
      * \param frameType the frame type for this QuicSubheader
      */
-    void SetFrameType(uint8_t frameType);
+    void SetFrameType(uint64_t frameType);
 
     /**
      * \brief Get the gap vector
      * \return The gap vector for this QuicSubheader
      */
-    const std::vector<uint32_t>& GetGaps() const;
+    const std::vector<uint64_t>& GetGaps() const;
 
     /**
      * \brief Set the gap vector
      * \param gaps the gap for this QuicSubheader
      */
-    void SetGaps(const std::vector<uint32_t>& gaps);
+    void SetGaps(const std::vector<uint64_t>& gaps);
 
     /**
      * \brief Get the largest acknowledged
      * \return The largest acknowledged for this QuicSubheader
      */
-    uint32_t GetLargestAcknowledged() const;
+    uint64_t GetLargestAcknowledged() const;
 
     /**
      * \brief Set the largest acknowledged
      * \param largestAcknowledged the largest acknowledged for this QuicSubheader
      */
-    void SetLargestAcknowledged(uint32_t largestAcknowledged);
+    void SetLargestAcknowledged(uint64_t largestAcknowledged);
 
     /**
      * \brief Get the ECT(0) count from an ACK_ECN frame (RFC 9000 §19.3.2)
      * \return m_ect0Count
      */
     uint64_t GetEct0Count() const;
+
+    /**
+     * Make an ACK frame an ACK frame with ECN counts (RFC 9000, Section 19.3.2).
+     *
+     * @param ect0 the number of packets received with ECT(0).
+     * @param ect1 the number of packets received with ECT(1).
+     * @param ce the number of packets received with ECN-CE.
+     */
+    void SetEcnCounts(uint64_t ect0, uint64_t ect1, uint64_t ce);
 
     /**
      * \brief Get the ECT(1) count from an ACK_ECN frame (RFC 9000 §19.3.2)
@@ -897,7 +906,86 @@ class QuicSubheader : public Header
      */
     uint32_t CalculateSubHeaderLength() const;
 
+    /**
+     * @return false when the bytes read are not a well formed frame: it is truncated, a field
+     * does not fit, its type is not defined or it is not in its shortest form.
+     */
+    bool IsValid() const
+    {
+        return m_valid;
+    }
+
+    /**
+     * @return the transport error code to close the connection with when the frame read is not
+     * valid: FRAME_ENCODING_ERROR, or PROTOCOL_VIOLATION for a frame type that is longer than it
+     * has to be. Zero when the frame is valid.
+     */
+    uint64_t GetParseError() const
+    {
+        return m_parseError;
+    }
+
+    /**
+     * @return true when the length of the data that follows the frame is in the frame: a CRYPTO
+     * frame, and a STREAM frame with the LEN bit. A STREAM frame without it runs to the end of
+     * the packet.
+     */
+    bool HasLengthField() const;
+
+    /**
+     * The number of bytes of data that follow the frame in the packet: the Length of a CRYPTO
+     * frame or of a STREAM frame that has one, the rest of the packet for a STREAM frame without
+     * a Length, and zero for the other frames.
+     *
+     * @param remaining the bytes left in the packet after the frame.
+     * @return the bytes of data.
+     */
+    uint64_t GetPayloadLength(uint64_t remaining) const;
+
+    /**
+     * Create a CRYPTO frame (RFC 9000, Section 19.6). The data follows the frame in the packet.
+     *
+     * @param offset the offset of the data in the CRYPTO stream of the encryption level.
+     * @param length the number of bytes of data.
+     * @return the frame.
+     */
+    static QuicSubheader CreateCrypto(uint64_t offset, uint64_t length);
+
+    /**
+     * Create a NEW_TOKEN frame (RFC 9000, Section 19.7).
+     *
+     * @param token the token, not empty.
+     * @return the frame.
+     */
+    static QuicSubheader CreateNewToken(const std::vector<uint8_t>& token);
+
+    /** @return the token of a NEW_TOKEN frame. */
+    const std::vector<uint8_t>& GetToken() const
+    {
+        return m_token;
+    }
+
+    /** @return true for a CRYPTO frame. */
+    bool IsCrypto() const
+    {
+        return m_frameType == CRYPTO;
+    }
+
+    /** @return true for a NEW_TOKEN frame. */
+    bool IsNewToken() const
+    {
+        return m_frameType == NEW_TOKEN;
+    }
+
   private:
+    /**
+     * Write the fields of the frame to a writer, which counts them or writes them to a buffer.
+     *
+     * @param writer the writer.
+     */
+    template <typename Writer>
+    void Encode(Writer& writer) const;
+
     /**
      * \brief The ACK ranges as RFC 9000 s19.3.1 writes them: first range length, then (gap, length)
      * pairs
@@ -905,15 +993,9 @@ class QuicSubheader : public Header
      */
     std::vector<uint64_t> AckWireRanges() const;
 
-    /**
-     * \brief Read the range count and the ranges of an ACK frame, rebuilding the absolute ranges
-     * \param i the buffer iterator, positioned at the ACK Range Count
-     */
-    void ReadAckRanges(Buffer::Iterator& i);
-
-    uint8_t m_frameType;  //!< Frame type
+    uint64_t m_frameType; //!< Frame type
     uint64_t m_streamId;  //!< Stream id
-    uint16_t m_errorCode; //!< Error code
+    uint64_t m_errorCode; //!< Error code
     uint64_t m_triggerFrameType{
         0};            //!< CONNECTION_CLOSE: the frame type that triggered the error (0 = unknown)
     uint64_t m_offset; //!< Offset
@@ -932,18 +1014,21 @@ class QuicSubheader : public Header
     uint64_t m_sequence;                 //!< Sequence
     QuicConnectionId m_connectionId;     //!< Connection id
     // uint128_t statelessResetToken;              //!< Stateless reset token
-    uint32_t m_largestAcknowledged;              //!< Largest acknowledged
-    uint32_t m_ackDelay;                         //!< Ack delay
-    uint32_t m_ackBlockCount;                    //!< Ack block count
-    uint32_t m_firstAckBlock;                    //!< First Ack block
-    std::vector<uint32_t> m_additionalAckBlocks; //!< Additional ack blocks vector
-    std::vector<uint32_t> m_gaps;                //!< Gaps vector
+    uint64_t m_largestAcknowledged;              //!< Largest acknowledged
+    uint64_t m_ackDelay;                         //!< Ack delay
+    uint64_t m_ackBlockCount;                    //!< Ack block count
+    uint64_t m_firstAckBlock;                    //!< First Ack block
+    std::vector<uint64_t> m_additionalAckBlocks; //!< Additional ack blocks vector
+    std::vector<uint64_t> m_gaps;                //!< Gaps vector
     // RFC 9002 §9.2 / RFC 9000 §19.3.2: ECN counts carried in ACK_ECN frames
-    uint64_t m_ect0Count{0};  //!< ECT(0) count
-    uint64_t m_ect1Count{0};  //!< ECT(1) count
-    uint64_t m_ecnCeCount{0}; //!< ECN-CE count
-    uint64_t m_data;          //!< Data word (8 bytes, RFC 9000 §19.17/§19.18)
-    uint64_t m_length;        //!< Length
+    uint64_t m_ect0Count{0};      //!< ECT(0) count
+    uint64_t m_ect1Count{0};      //!< ECT(1) count
+    uint64_t m_ecnCeCount{0};     //!< ECN-CE count
+    uint64_t m_data;              //!< Data word (8 bytes, RFC 9000 §19.17/§19.18)
+    std::vector<uint8_t> m_token; //!< NEW_TOKEN: the token
+    bool m_valid{true};           //!< The bytes read were a well formed frame
+    uint64_t m_parseError{0};     //!< Error code for a frame that was not well formed
+    uint64_t m_length;            //!< Length
 };
 
 } // namespace ns3

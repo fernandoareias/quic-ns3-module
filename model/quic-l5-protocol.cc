@@ -245,7 +245,15 @@ int
 QuicL5Protocol::DispatchRecv(Ptr<Packet> data, Address& address)
 {
     NS_LOG_FUNCTION(this);
+    m_frameError = 0;
     auto disgregated = DisgregateRecv(data);
+
+    if (m_frameError != 0)
+    {
+        SignalAbortConnection(static_cast<QuicSubheader::TransportErrorCodes_t>(m_frameError),
+                              "Malformed frame");
+        return -1;
+    }
 
     if (m_socket->CheckIfPacketOverflowMaxDataLimit(disgregated))
     {
@@ -386,24 +394,25 @@ QuicL5Protocol::DisgregateRecv(Ptr<Packet> data)
 
         QuicSubheader sub;
         data->RemoveHeader(sub);
-
-        uint64_t frameDataLen = sub.GetLength();
-
-        // For STREAM frames without the LENGTH bit, m_length remains 0.
-        // In this case, the data extends to the end of the packet.
-        if (sub.IsStream() && frameDataLen == 0 && data->GetSize() > 0)
+        if (!sub.IsValid())
         {
-            frameDataLen = data->GetSize();
-            NS_LOG_INFO(
-                "STREAM frame without LENGTH bit, using remaining packet size: " << frameDataLen);
+            // RFC 9000 Section 12.4 and 19: the frame is truncated, malformed or of an unknown
+            // type; nothing behind it in the packet can be read
+            NS_LOG_WARN("Malformed frame, error " << sub.GetParseError());
+            m_frameError = sub.GetParseError();
+            break;
         }
 
-        // Ensure we don't read beyond available data
+        // a STREAM frame with the LEN bit says how many bytes of data follow, which can be none;
+        // one without it runs to the end of the packet
+        uint64_t frameDataLen = sub.GetPayloadLength(data->GetSize());
+
         if (frameDataLen > data->GetSize())
         {
             NS_LOG_WARN("Frame data length " << frameDataLen << " exceeds remaining packet size "
                                              << data->GetSize());
-            frameDataLen = data->GetSize();
+            m_frameError = QuicSubheader::FRAME_ENCODING_ERROR;
+            break;
         }
 
         NS_LOG_INFO("subheader " << sub << " dataSizeByte " << dataSizeByte << " remaining "

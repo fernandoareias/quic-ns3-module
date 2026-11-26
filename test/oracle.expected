@@ -1,31 +1,31 @@
-stress QuicCubic loss=0 run=1 e440cdd89ee71a6b
-stress QuicCubic loss=0 run=2 09430c56a490cb4d
-stress QuicCubic loss=0.02 run=1 b34fe7cda4ebb121
-stress QuicCubic loss=0.02 run=2 120eaa9c6e62a952
+stress QuicCubic loss=0 run=1 1c48122297262fcc
+stress QuicCubic loss=0 run=2 2577f8db1235959f
+stress QuicCubic loss=0.02 run=1 94bcb2dd6fd4b9fd
+stress QuicCubic loss=0.02 run=2 3c171676248e5f34
 stress QuicCubic loss=0.1 run=1 106dd14334b3e846
 stress QuicCubic loss=0.1 run=2 b823efbcfc3075c0
 stress QuicCubic zrtt loss=0.02 run=1 a7455369a7cb526c
 stress QuicCubic vn loss=0.05 run=1 eabd9d98c29215c8
-stress QuicBbr loss=0 run=1 7caf5417a8f10610
-stress QuicBbr loss=0 run=2 120d51158cee9b02
-stress QuicBbr loss=0.02 run=1 45b5cf3f6ba54c24
-stress QuicBbr loss=0.02 run=2 6dbc9272b6adefa7
+stress QuicBbr loss=0 run=1 ab1c5244e4c75dce
+stress QuicBbr loss=0 run=2 3620d7d269a51e34
+stress QuicBbr loss=0.02 run=1 46ff26551a75bcab
+stress QuicBbr loss=0.02 run=2 dbd06e62329eb556
 stress QuicBbr loss=0.1 run=1 a52e9a994d392df4
-stress QuicBbr loss=0.1 run=2 722e448d98f440f1
+stress QuicBbr loss=0.1 run=2 848fa59fbc910341
 stress QuicBbr zrtt loss=0.02 run=1 feebd4ae35365696
 stress QuicBbr vn loss=0.05 run=1 6cc1532752c8eae0
-stress QuicCongestionControl loss=0 run=1 5fce27f5ac365201
-stress QuicCongestionControl loss=0 run=2 65dd848c20eb11e7
-stress QuicCongestionControl loss=0.02 run=1 41b486a4688a8e2d
+stress QuicCongestionControl loss=0 run=1 b2636f6b93a6d7ae
+stress QuicCongestionControl loss=0 run=2 85ebe3f2a06f18b5
+stress QuicCongestionControl loss=0.02 run=1 a81c7afca418db86
 stress QuicCongestionControl loss=0.02 run=2 904fbd8ebae00bdc
 stress QuicCongestionControl loss=0.1 run=1 032ea61a1c1810ad
 stress QuicCongestionControl loss=0.1 run=2 64bbfc28ef8516e2
 stress QuicCongestionControl zrtt loss=0.02 run=1 226a54ef617078e0
 stress QuicCongestionControl vn loss=0.05 run=1 abe7a4fe0b8c5c8b
-erldp-mesh-exp1 quic de70542797bda777
+erldp-mesh-exp1 quic 590c0e0e52e99daa
 erldp-mesh-exp1 quic-bbr d26350c7e7a4eb08
 erldp-mesh-exp1 quic-newreno 5ecc04c85a0751b0
-erldp-mesh-exp2 quic a7bc4c85f759c380
+erldp-mesh-exp2 quic 835592b25e46194e
 erldp-mesh-exp2 quic-bbr d7bb4f42b249fc69
 erldp-mesh-exp2 quic-newreno ed503c2317c1c600
 epmd-experimento 1 quic 841facaa61141d0a

@@ -8,9 +8,10 @@ build/utils/ns3-dev-test-runner-debug --suite=quic          --verbose   # 46 cas
 build/utils/ns3-dev-test-runner-debug --suite=quic-features --verbose   # 57 cases, quic-features-test-suite.cc
 ```
 
-A third suite, `quic-gaps` (`quic-gaps-test-suite.cc`), holds reproductions of conformance gaps that
-are not fixed yet. Its cases do nothing unless `QUIC_GAPS` is set (`1` for all of them, or a list of
-case names), so the suite passes; see the comment at the top of the file.
+Two more suites cover the wire format with the vectors of the RFCs: `quic-wire` (variable-length
+integers, connection ids, packet numbers and the packet headers, with the unprotected packets of
+RFC 9001 Appendix A) and `quic-frames` (the bytes of every frame, frames that are not valid, and
+what a receiver does with them in a live connection).
 
 Two tools check the module from outside the test runner:
 

@@ -2699,11 +2699,12 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
 {
     NS_LOG_FUNCTION(this << (uint64_t)sub.GetFrameType());
 
-    uint8_t frameType = sub.GetFrameType();
+    uint64_t frameType = sub.GetFrameType();
 
     switch (frameType)
     {
     case QuicSubheader::ACK:
+    case QuicSubheader::ACK_ECN:
         NS_LOG_INFO("Received ACK frame");
         OnReceivedAckFrame(sub);
         break;
@@ -2996,8 +2997,8 @@ QuicSocketBase::OnSendingAckFrame()
     auto it = ranges.rbegin();
     uint32_t largestAcknowledged = it->second;
     m_largestPnAckedByUs = std::max(m_largestPnAckedByUs, largestAcknowledged);
-    std::vector<uint32_t> additionalAckBlocks;
-    std::vector<uint32_t> gaps;
+    std::vector<uint64_t> additionalAckBlocks;
+    std::vector<uint64_t> gaps;
     uint32_t ackFloor = it->first;
     for (auto prev = it++; it != ranges.rend() && gaps.size() < m_maxTrackedGaps; prev = it++)
     {
@@ -3043,9 +3044,11 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
 
     uint32_t previousWindow = m_txBuffer->BytesInFlight();
 
-    std::vector<uint32_t> additionalAckBlocks = sub.GetAdditionalAckBlocks();
-    std::vector<uint32_t> gaps = sub.GetGaps();
-    uint32_t largestAcknowledged = sub.GetLargestAcknowledged();
+    // packet numbers are 32 bits in the sent packet list for now
+    std::vector<uint32_t> additionalAckBlocks(sub.GetAdditionalAckBlocks().begin(),
+                                              sub.GetAdditionalAckBlocks().end());
+    std::vector<uint32_t> gaps(sub.GetGaps().begin(), sub.GetGaps().end());
+    uint32_t largestAcknowledged = (uint32_t)sub.GetLargestAcknowledged();
     uint32_t ackFloor = (uint32_t)sub.GetFirstAckBlock();
     m_txBuffer->SetAckFloor(ackFloor);
     m_tcb->m_lastAckedSeq = largestAcknowledged;

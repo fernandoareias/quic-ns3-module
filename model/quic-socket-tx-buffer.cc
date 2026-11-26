@@ -615,11 +615,11 @@ QuicSocketTxBuffer::Retransmission(SequenceNumber32 packetNumber)
                 {
                     QuicSubheader sub;
                     pkt->RemoveHeader(sub);
-                    uint64_t len = sub.GetLength();
-                    if (sub.IsStream() && len == 0)
+                    if (!sub.IsValid())
                     {
-                        len = pkt->GetSize();
+                        break;
                     }
+                    uint64_t len = sub.GetPayloadLength(pkt->GetSize());
                     len = std::min<uint64_t>(len, pkt->GetSize());
                     Ptr<Packet> data = CopyRange(pkt, 0, len);
                     pkt->RemoveAtStart(len);

@@ -329,6 +329,7 @@ class QuicL5Protocol : public Object
                               //!< keeps both alive for good
     Ptr<Node> m_node;         //!< The node this stack is associated with
     QuicConnectionId m_connectionId; //!< The connection id this stack is associated with
+    uint64_t m_frameError{0};        //!< Error of the packet being read: a frame is not valid
     std::vector<Ptr<QuicStreamBase>>
         m_streams; //!< The streams this stack is associated with (handshake first)
     std::map<uint64_t, Ptr<QuicStreamBase>> m_streamById; //!< The streams by RFC 9000 stream id

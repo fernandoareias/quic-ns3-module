@@ -47,8 +47,8 @@ QuicSubheader::QuicSubheader()
       m_length(0)
 {
     m_reasonPhrase = std::vector<uint8_t>();
-    m_additionalAckBlocks = std::vector<uint32_t>();
-    m_gaps = std::vector<uint32_t>();
+    m_additionalAckBlocks = std::vector<uint64_t>();
+    m_gaps = std::vector<uint64_t>();
 }
 
 QuicSubheader::~QuicSubheader()
@@ -196,580 +196,557 @@ QuicSubheader::AckWireRanges() const
     return wire;
 }
 
-void
-QuicSubheader::ReadAckRanges(Buffer::Iterator& i)
+namespace
 {
-    // inverse of AckWireRanges ()
-    m_ackBlockCount = ReadVarInt64(i);
-    m_gaps.clear();
-    m_additionalAckBlocks.clear();
-    int64_t lo = (int64_t)m_largestAcknowledged -
-                 (int64_t)ReadVarInt64(i); // lowest packet of the first range
-    for (uint64_t k = 1; k <= m_ackBlockCount; ++k)
+
+/** Counts the bytes a frame writes: the size of a frame is what it serializes to. */
+class SizeWriter
+{
+  public:
+    void U8(uint8_t)
     {
-        m_gaps.push_back((uint32_t)std::max<int64_t>(lo - 1, 0));
-        int64_t hi = lo - (int64_t)ReadVarInt64(i) - 2;
-        lo = hi - (int64_t)ReadVarInt64(i);
-        m_additionalAckBlocks.push_back((uint32_t)std::max<int64_t>(hi, 0));
+        ++m_size;
     }
-    m_firstAckBlock = (uint32_t)std::max<int64_t>(lo, 0);
+
+    void U64(uint64_t)
+    {
+        m_size += 8;
+    }
+
+    void VarInt(uint64_t value)
+    {
+        m_size += QuicVarIntLength(value);
+    }
+
+    void Bytes(const uint8_t*, uint32_t count)
+    {
+        m_size += count;
+    }
+
+    uint32_t Size() const
+    {
+        return m_size;
+    }
+
+  private:
+    uint32_t m_size{0}; //!< bytes written so far
+};
+
+/** Writes a frame into a buffer. */
+class BufferWriter
+{
+  public:
+    explicit BufferWriter(Buffer::Iterator& i)
+        : m_i(i)
+    {
+    }
+
+    void U8(uint8_t value)
+    {
+        m_i.WriteU8(value);
+    }
+
+    void U64(uint64_t value)
+    {
+        m_i.WriteHtonU64(value);
+    }
+
+    void VarInt(uint64_t value)
+    {
+        QuicWriteVarInt(m_i, value);
+    }
+
+    void Bytes(const uint8_t* bytes, uint32_t count)
+    {
+        m_i.Write(bytes, count);
+    }
+
+  private:
+    Buffer::Iterator& m_i; //!< where the frame goes
+};
+
+/** Reads a frame and never goes past the bytes that are left. */
+class FrameReader
+{
+  public:
+    explicit FrameReader(Buffer::Iterator start)
+        : m_i(start),
+          m_total(start.GetRemainingSize()),
+          m_left(m_total)
+    {
+    }
+
+    bool U8(uint8_t& value)
+    {
+        if (m_left < 1)
+        {
+            return false;
+        }
+        value = m_i.ReadU8();
+        --m_left;
+        return true;
+    }
+
+    bool U64(uint64_t& value)
+    {
+        if (m_left < 8)
+        {
+            return false;
+        }
+        value = m_i.ReadNtohU64();
+        m_left -= 8;
+        return true;
+    }
+
+    bool VarInt(uint64_t& value, uint32_t* length = nullptr)
+    {
+        if (m_left < 1)
+        {
+            return false;
+        }
+        Buffer::Iterator peek = m_i;
+        const uint32_t size = 1U << (peek.ReadU8() >> 6);
+        if (m_left < size)
+        {
+            return false;
+        }
+        value = QuicReadVarInt(m_i);
+        m_left -= size;
+        if (length != nullptr)
+        {
+            *length = size;
+        }
+        return true;
+    }
+
+    bool Bytes(std::vector<uint8_t>& out, uint64_t count)
+    {
+        if (count > m_left)
+        {
+            return false;
+        }
+        out.resize(count);
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            out[k] = m_i.ReadU8();
+        }
+        m_left -= count;
+        return true;
+    }
+
+    /** Skip the zero bytes that follow: a run of PADDING frames is one frame. */
+    void SkipZeros()
+    {
+        while (m_left > 0)
+        {
+            Buffer::Iterator peek = m_i;
+            if (peek.ReadU8() != 0)
+            {
+                break;
+            }
+            m_i.ReadU8();
+            --m_left;
+        }
+    }
+
+    uint32_t Left() const
+    {
+        return m_left;
+    }
+
+    uint32_t Total() const
+    {
+        return m_total;
+    }
+
+    uint32_t Consumed() const
+    {
+        return m_total - m_left;
+    }
+
+  private:
+    Buffer::Iterator m_i; //!< position
+    uint32_t m_total;     //!< bytes at the start
+    uint32_t m_left;      //!< bytes left
+};
+
+} // namespace
+
+template <typename Writer>
+void
+QuicSubheader::Encode(Writer& w) const
+{
+    w.VarInt(m_frameType);
+
+    switch (m_frameType)
+    {
+    case PADDING:
+    case PING:
+    case HANDSHAKE_DONE:
+    case IMMEDIATE_ACK:
+        break;
+
+    case RESET_STREAM: // RFC 9000 Section 19.4
+        w.VarInt(m_streamId);
+        w.VarInt(m_errorCode);
+        w.VarInt(m_offset); // Final Size
+        break;
+
+    case STOP_SENDING: // RFC 9000 Section 19.5
+        w.VarInt(m_streamId);
+        w.VarInt(m_errorCode);
+        break;
+
+    case CRYPTO: // RFC 9000 Section 19.6: the data follows in the packet
+        w.VarInt(m_offset);
+        w.VarInt(m_length);
+        break;
+
+    case NEW_TOKEN: // RFC 9000 Section 19.7
+        w.VarInt(m_token.size());
+        w.Bytes(m_token.data(), m_token.size());
+        break;
+
+    case CONNECTION_CLOSE:     // RFC 9000 Section 19.19: error code, frame type, reason
+    case CONNECTION_CLOSE_APP: // error code, reason
+        w.VarInt(m_errorCode);
+        if (m_frameType == CONNECTION_CLOSE)
+        {
+            w.VarInt(m_triggerFrameType);
+        }
+        w.VarInt(m_reasonPhraseLength);
+        w.Bytes(m_reasonPhrase.data(), m_reasonPhrase.size());
+        break;
+
+    case MAX_DATA:
+        w.VarInt(m_maxData);
+        break;
+
+    case MAX_STREAM_DATA:
+        w.VarInt(m_streamId);
+        w.VarInt(m_maxStreamData);
+        break;
+
+    case MAX_STREAMS_BIDI:
+    case MAX_STREAMS_UNI:
+        w.VarInt(m_maxStreamId);
+        break;
+
+    case DATA_BLOCKED:
+        w.VarInt(m_offset);
+        break;
+
+    case STREAM_DATA_BLOCKED:
+        w.VarInt(m_streamId);
+        w.VarInt(m_offset);
+        break;
+
+    case STREAMS_BLOCKED_BIDI:
+    case STREAMS_BLOCKED_UNI:
+        w.VarInt(m_streamId);
+        break;
+
+    case NEW_CONNECTION_ID: // RFC 9000 Section 19.15
+        w.VarInt(m_sequence);
+        w.VarInt(m_retirePriorTo);
+        w.U8(m_connectionId.GetLength());
+        w.Bytes(m_connectionId.GetBytes(), m_connectionId.GetLength());
+        w.U64(m_resetTokenHi);
+        w.U64(m_resetTokenLo);
+        break;
+
+    case RETIRE_CONNECTION_ID:
+        w.VarInt(m_sequence);
+        break;
+
+    case PATH_CHALLENGE:
+    case PATH_RESPONSE:
+        w.U64(m_data); // 8 bytes of opaque data
+        break;
+
+    case ACK_FREQUENCY:
+        w.VarInt(m_ackFreqSeq);
+        w.VarInt(m_ackFreqThreshold);
+        w.VarInt(m_ackFreqMaxDelayUs);
+        w.VarInt(m_ackFreqReordering);
+        break;
+
+    case ACK: // RFC 9000 Section 19.3
+    case ACK_ECN:
+        w.VarInt(m_largestAcknowledged);
+        w.VarInt(m_ackDelay);
+        w.VarInt(m_ackBlockCount);
+        for (uint64_t v : AckWireRanges())
+        {
+            w.VarInt(v);
+        }
+        if (m_frameType == ACK_ECN)
+        {
+            w.VarInt(m_ect0Count);
+            w.VarInt(m_ect1Count);
+            w.VarInt(m_ecnCeCount);
+        }
+        break;
+
+    default: // STREAM, 0x08 to 0x0f (RFC 9000 Section 19.8)
+        NS_ABORT_MSG_UNLESS(m_frameType >= STREAM && m_frameType <= STREAM_OFF_LEN_FIN,
+                            "cannot serialize a frame of type " << m_frameType);
+        w.VarInt(m_streamId);
+        if (m_frameType & 0x04)
+        {
+            w.VarInt(m_offset);
+        }
+        if (m_frameType & 0x02)
+        {
+            w.VarInt(m_length);
+        }
+        break;
+    }
 }
 
 uint32_t
 QuicSubheader::GetSerializedSize(void) const
 {
-    NS_LOG_FUNCTION(this << (uint64_t)m_frameType);
-
-    return CalculateSubHeaderLength();
+    SizeWriter writer;
+    Encode(writer);
+    return writer.Size();
 }
 
 uint32_t
 QuicSubheader::CalculateSubHeaderLength() const
 {
-    NS_LOG_FUNCTION(this);
-    NS_ASSERT(m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
-    uint32_t len = 8;
-
-    switch (m_frameType)
-    {
-    case PADDING:
-
-        break;
-
-    case RESET_STREAM: // 0x04 RFC 9000 §19.4
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_errorCode);
-        len += GetVarInt64Size(m_offset);
-        break;
-
-    case CONNECTION_CLOSE: // 0x1c RFC 9000 §19.19: error code, frame type, reason
-
-        len += GetVarInt64Size(m_errorCode);
-        len += GetVarInt64Size(m_triggerFrameType);
-        len += GetVarInt64Size(m_reasonPhraseLength);
-        len += (m_reasonPhraseLength * 8);
-        break;
-
-    case CONNECTION_CLOSE_APP: // 0x1d RFC 9000 §19.19: error code, reason
-
-        len += GetVarInt64Size(m_errorCode);
-        len += GetVarInt64Size(m_reasonPhraseLength);
-        len += (m_reasonPhraseLength * 8);
-        break;
-
-    case MAX_DATA: // 0x10 RFC 9000 §19.9
-
-        len += GetVarInt64Size(m_maxData);
-        break;
-
-    case MAX_STREAM_DATA: // 0x11 RFC 9000 §19.10
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_maxStreamData);
-        break;
-
-    case MAX_STREAMS_BIDI: // 0x12 RFC 9000 §19.11
-    case MAX_STREAMS_UNI:  // 0x13 RFC 9000 §19.11
-
-        len += GetVarInt64Size(m_maxStreamId);
-        break;
-
-    case PING:           // 0x01 RFC 9000 §19.2
-    case HANDSHAKE_DONE: // 0x1e RFC 9000 §19.20
-    case IMMEDIATE_ACK:  // 0x1f ack-frequency draft
-
-        break;
-
-    case ACK_FREQUENCY: // 0xaf ack-frequency draft
-
-        len += GetVarInt64Size(m_ackFreqSeq);
-        len += GetVarInt64Size(m_ackFreqThreshold);
-        len += GetVarInt64Size(m_ackFreqMaxDelayUs);
-        len += GetVarInt64Size(m_ackFreqReordering);
-        break;
-
-    case DATA_BLOCKED: // 0x14 RFC 9000 §19.12
-
-        len += GetVarInt64Size(m_offset);
-        break;
-
-    case STREAM_DATA_BLOCKED: // 0x15 RFC 9000 §19.13
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_offset);
-        break;
-
-    case STREAMS_BLOCKED_BIDI: // 0x16 RFC 9000 §19.14
-    case STREAMS_BLOCKED_UNI:  // 0x17 RFC 9000 §19.14
-
-        len += GetVarInt64Size(m_streamId);
-        break;
-
-    case NEW_CONNECTION_ID: // 0x18 RFC 9000 §19.15
-
-        len += GetVarInt64Size(m_sequence);
-        len += GetVarInt64Size(m_retirePriorTo);
-        len += 8;                              // connection id length (RFC 9000 s19.15)
-        len += 8 * m_connectionId.GetLength(); // connection id
-        len += 128;                            // stateless reset token
-        break;
-
-    case RETIRE_CONNECTION_ID: // 0x19 RFC 9000 §19.16
-
-        len += GetVarInt64Size(m_sequence);
-        break;
-
-    case STOP_SENDING: // 0x05 RFC 9000 §19.5
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_errorCode);
-        break;
-
-    case ACK: // 0x02 RFC 9000 §19.3
-
-        len += GetVarInt64Size(m_largestAcknowledged);
-        len += GetVarInt64Size(m_ackDelay);
-        len += GetVarInt64Size(m_ackBlockCount);
-        for (uint64_t v : AckWireRanges())
-        {
-            len += GetVarInt64Size(v);
-        }
-        break;
-
-    case ACK_ECN: // 0x03 RFC 9000 §19.3 + §19.3.2
-
-        len += GetVarInt64Size(m_largestAcknowledged);
-        len += GetVarInt64Size(m_ackDelay);
-        len += GetVarInt64Size(m_ackBlockCount);
-        for (uint64_t v : AckWireRanges())
-        {
-            len += GetVarInt64Size(v);
-        }
-        // ECN Counts section (RFC 9000 §19.3.2)
-        len += GetVarInt64Size(m_ect0Count);
-        len += GetVarInt64Size(m_ect1Count);
-        len += GetVarInt64Size(m_ecnCeCount);
-        break;
-
-    case PATH_CHALLENGE: // 0x1a RFC 9000 §19.17
-
-        len += 64; // 8 octets of opaque data, RFC 9000 §19.17
-        break;
-
-    case PATH_RESPONSE: // 0x1b RFC 9000 §19.18
-
-        len += 64; // 8 octets of opaque data, RFC 9000 §19.18
-        break;
-
-    // STREAM variants 0x08–0x0f: base + OFF(0x04) + LEN(0x02) + FIN(0x01)
-    case STREAM: // 0x08 no offset, no length
-
-        len += GetVarInt64Size(m_streamId);
-        break;
-
-    case STREAM_FIN: // 0x09 FIN only
-
-        len += GetVarInt64Size(m_streamId);
-        break;
-
-    case STREAM_LEN: // 0x0a LEN only
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_length);
-        break;
-
-    case STREAM_LEN_FIN: // 0x0b LEN + FIN
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_length);
-        break;
-
-    case STREAM_OFF: // 0x0c OFF only
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_offset);
-        break;
-
-    case STREAM_OFF_FIN: // 0x0d OFF + FIN
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_offset);
-        break;
-
-    case STREAM_OFF_LEN: // 0x0e OFF + LEN
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_offset);
-        len += GetVarInt64Size(m_length);
-        break;
-
-    case STREAM_OFF_LEN_FIN: // 0x0f OFF + LEN + FIN
-
-        len += GetVarInt64Size(m_streamId);
-        len += GetVarInt64Size(m_offset);
-        len += GetVarInt64Size(m_length);
-        break;
-    }
-
-    NS_LOG_LOGIC("CalculateSubHeaderLength - len" << len << " " << len / 8);
-
-    NS_ABORT_MSG_IF(len % 8 != 0, "len not divisible by 8 " << len);
-    // NS_ABORT_MSG_IF (len > 255, "len too long " << len);
-
-    return (len / 8);
+    return GetSerializedSize();
 }
 
 void
 QuicSubheader::Serialize(Buffer::Iterator start) const
 {
-    NS_LOG_FUNCTION(this << (uint64_t)m_frameType);
-    NS_ASSERT(m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
-
+    NS_LOG_FUNCTION(this << m_frameType);
     Buffer::Iterator i = start;
-    i.WriteU8((uint8_t)m_frameType);
-
-    switch (m_frameType)
-    {
-    case PADDING:
-
-        break;
-
-    case RESET_STREAM:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_errorCode);
-        WriteVarInt64(i, m_offset);
-        break;
-
-    case CONNECTION_CLOSE:
-    case CONNECTION_CLOSE_APP:
-
-        WriteVarInt64(i, m_errorCode);
-        if (m_frameType == CONNECTION_CLOSE)
-        {
-            WriteVarInt64(
-                i,
-                m_triggerFrameType); // RFC 9000 s19.19: only the transport close names the frame
-        }
-        WriteVarInt64(i, m_reasonPhraseLength);
-        for (auto& elem : m_reasonPhrase)
-        {
-            i.WriteU8(elem);
-        }
-        break;
-
-    case MAX_DATA:
-
-        WriteVarInt64(i, m_maxData);
-        break;
-
-    case MAX_STREAM_DATA:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_maxStreamData);
-        break;
-
-    case MAX_STREAMS_BIDI:
-    case MAX_STREAMS_UNI:
-
-        WriteVarInt64(i, m_maxStreamId);
-        break;
-
-    case PING:
-    case HANDSHAKE_DONE:
-    case IMMEDIATE_ACK:
-
-        break;
-
-    case ACK_FREQUENCY:
-
-        WriteVarInt64(i, m_ackFreqSeq);
-        WriteVarInt64(i, m_ackFreqThreshold);
-        WriteVarInt64(i, m_ackFreqMaxDelayUs);
-        WriteVarInt64(i, m_ackFreqReordering);
-        break;
-
-    case DATA_BLOCKED:
-
-        WriteVarInt64(i, m_offset);
-        break;
-
-    case STREAM_DATA_BLOCKED:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_offset);
-        break;
-
-    case STREAMS_BLOCKED_BIDI:
-    case STREAMS_BLOCKED_UNI:
-
-        WriteVarInt64(i, m_streamId);
-        break;
-
-    case NEW_CONNECTION_ID:
-
-        WriteVarInt64(i, m_sequence);
-        WriteVarInt64(i, m_retirePriorTo);
-        i.WriteU8(m_connectionId.GetLength()); // RFC 9000 s19.15: connection id length
-        m_connectionId.Serialize(i);
-        i.WriteHtonU64(m_resetTokenHi);
-        i.WriteHtonU64(m_resetTokenLo);
-        break;
-
-    case RETIRE_CONNECTION_ID:
-
-        WriteVarInt64(i, m_sequence);
-        break;
-
-    case STOP_SENDING:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_errorCode);
-        break;
-
-    case ACK:
-
-        WriteVarInt64(i, m_largestAcknowledged);
-        WriteVarInt64(i, m_ackDelay);
-        WriteVarInt64(i, m_ackBlockCount);
-        for (uint64_t v : AckWireRanges())
-        {
-            WriteVarInt64(i, v);
-        }
-        break;
-
-    case ACK_ECN:
-
-        WriteVarInt64(i, m_largestAcknowledged);
-        WriteVarInt64(i, m_ackDelay);
-        WriteVarInt64(i, m_ackBlockCount);
-        for (uint64_t v : AckWireRanges())
-        {
-            WriteVarInt64(i, v);
-        }
-        // ECN Counts section (RFC 9000 §19.3.2)
-        WriteVarInt64(i, m_ect0Count);
-        WriteVarInt64(i, m_ect1Count);
-        WriteVarInt64(i, m_ecnCeCount);
-        break;
-
-    case PATH_CHALLENGE:
-
-        i.WriteHtonU64(m_data); // RFC 9000 §19.17: 8-octet opaque data
-        break;
-
-    case PATH_RESPONSE:
-
-        i.WriteHtonU64(m_data); // RFC 9000 §19.18: 8-octet opaque data
-        break;
-
-    case STREAM:
-    case STREAM_FIN:
-
-        WriteVarInt64(i, m_streamId);
-        break;
-
-    case STREAM_LEN:
-    case STREAM_LEN_FIN:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_length);
-        break;
-
-    case STREAM_OFF:
-    case STREAM_OFF_FIN:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_offset);
-        break;
-
-    case STREAM_OFF_LEN:
-    case STREAM_OFF_LEN_FIN:
-
-        WriteVarInt64(i, m_streamId);
-        WriteVarInt64(i, m_offset);
-        WriteVarInt64(i, m_length);
-        break;
-    }
+    BufferWriter writer(i);
+    Encode(writer);
 }
 
 uint32_t
 QuicSubheader::Deserialize(Buffer::Iterator start)
 {
-    Buffer::Iterator i = start;
-    m_frameType = i.ReadU8();
+    FrameReader r(start);
+    m_valid = true;
+    m_parseError = 0;
+    m_offset = 0;
+    m_length = 0;
+    m_token.clear();
+    m_reasonPhrase.clear();
 
-    NS_LOG_FUNCTION(this << (uint64_t)m_frameType);
+    // the frame is malformed: nothing behind it in the packet can be read
+    auto fail = [&](uint64_t error) {
+        m_valid = false;
+        m_parseError = error;
+        return r.Total();
+    };
 
-    NS_ASSERT(m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
+    uint32_t typeLength = 0;
+    if (!r.VarInt(m_frameType, &typeLength))
+    {
+        return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+    }
+    NS_LOG_FUNCTION(this << m_frameType);
+    if (typeLength > QuicVarIntLength(m_frameType))
+    {
+        // RFC 9000 Section 12.4: a frame type uses its shortest encoding
+        return fail(TransportErrorCodes_t::PROTOCOL_VIOLATION);
+    }
 
     switch (m_frameType)
     {
     case PADDING:
-
-        break;
-
-    case RESET_STREAM:
-
-        m_streamId = ReadVarInt64(i);
-        m_errorCode = (uint16_t)ReadVarInt64(i);
-        m_offset = ReadVarInt64(i);
-        break;
-
-    case CONNECTION_CLOSE:
-    case CONNECTION_CLOSE_APP:
-
-        m_errorCode = (uint16_t)ReadVarInt64(i);
-        if (m_frameType == CONNECTION_CLOSE)
-        {
-            m_triggerFrameType = ReadVarInt64(i);
-        }
-        m_reasonPhraseLength = ReadVarInt64(i);
-        for (uint64_t j = 0; j < m_reasonPhraseLength; j++)
-        {
-            m_reasonPhrase.push_back(i.ReadU8());
-        }
-        break;
-
-    case MAX_DATA:
-
-        m_maxData = ReadVarInt64(i);
-        break;
-
-    case MAX_STREAM_DATA:
-
-        m_streamId = ReadVarInt64(i);
-        m_maxStreamData = ReadVarInt64(i);
-        break;
-
-    case MAX_STREAMS_BIDI:
-    case MAX_STREAMS_UNI:
-
-        m_maxStreamId = ReadVarInt64(i);
+        r.SkipZeros();
         break;
 
     case PING:
     case HANDSHAKE_DONE:
     case IMMEDIATE_ACK:
-
         break;
 
-    case ACK_FREQUENCY:
+    case RESET_STREAM:
+        if (!r.VarInt(m_streamId) || !r.VarInt(m_errorCode) || !r.VarInt(m_offset))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
 
-        m_ackFreqSeq = ReadVarInt64(i);
-        m_ackFreqThreshold = ReadVarInt64(i);
-        m_ackFreqMaxDelayUs = ReadVarInt64(i);
-        m_ackFreqReordering = ReadVarInt64(i);
+    case STOP_SENDING:
+        if (!r.VarInt(m_streamId) || !r.VarInt(m_errorCode))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case CRYPTO:
+        if (!r.VarInt(m_offset) || !r.VarInt(m_length))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case NEW_TOKEN: {
+        uint64_t tokenLength = 0;
+        // RFC 9000 Section 19.7: a token is not empty
+        if (!r.VarInt(tokenLength) || tokenLength == 0 || !r.Bytes(m_token, tokenLength))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+    }
+
+    case CONNECTION_CLOSE:
+    case CONNECTION_CLOSE_APP:
+        if (!r.VarInt(m_errorCode) ||
+            (m_frameType == CONNECTION_CLOSE && !r.VarInt(m_triggerFrameType)) ||
+            !r.VarInt(m_reasonPhraseLength) || !r.Bytes(m_reasonPhrase, m_reasonPhraseLength))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case MAX_DATA:
+        if (!r.VarInt(m_maxData))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case MAX_STREAM_DATA:
+        if (!r.VarInt(m_streamId) || !r.VarInt(m_maxStreamData))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case MAX_STREAMS_BIDI:
+    case MAX_STREAMS_UNI:
+        if (!r.VarInt(m_maxStreamId))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
         break;
 
     case DATA_BLOCKED:
-
-        m_offset = ReadVarInt64(i);
+        if (!r.VarInt(m_offset))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
         break;
 
     case STREAM_DATA_BLOCKED:
-
-        m_streamId = ReadVarInt64(i);
-        m_offset = ReadVarInt64(i);
+        if (!r.VarInt(m_streamId) || !r.VarInt(m_offset))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
         break;
 
     case STREAMS_BLOCKED_BIDI:
     case STREAMS_BLOCKED_UNI:
-
-        m_streamId = ReadVarInt64(i);
-        break;
-
-    case NEW_CONNECTION_ID:
-
-        m_sequence = ReadVarInt64(i);
-        m_retirePriorTo = ReadVarInt64(i);
+        if (!r.VarInt(m_streamId))
         {
-            // RFC 9000 s19.15: the id comes with its length
-            uint8_t cidLength = i.ReadU8();
-            m_connectionId = QuicConnectionId::Deserialize(i, cidLength);
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
         }
-        m_resetTokenHi = i.ReadNtohU64();
-        m_resetTokenLo = i.ReadNtohU64();
         break;
 
-    case RETIRE_CONNECTION_ID:
-
-        m_sequence = ReadVarInt64(i);
-        break;
-
-    case STOP_SENDING:
-
-        m_streamId = ReadVarInt64(i);
-        m_errorCode = (uint16_t)ReadVarInt64(i);
-        break;
-
-    case ACK:
-
-        m_largestAcknowledged = ReadVarInt64(i);
-        m_ackDelay = ReadVarInt64(i);
-        ReadAckRanges(i);
-        break;
-
-    case ACK_ECN:
-
-        m_largestAcknowledged = ReadVarInt64(i);
-        m_ackDelay = ReadVarInt64(i);
-        ReadAckRanges(i);
-        // ECN Counts section (RFC 9000 §19.3.2)
-        m_ect0Count = ReadVarInt64(i);
-        m_ect1Count = ReadVarInt64(i);
-        m_ecnCeCount = ReadVarInt64(i);
-        break;
-
-    case PATH_CHALLENGE:
-
-        m_data = i.ReadNtohU64(); // RFC 9000 §19.17: 8-octet opaque data
-        break;
-
-    case PATH_RESPONSE:
-
-        m_data = i.ReadNtohU64(); // RFC 9000 §19.18: 8-octet opaque data
-        break;
-
-    case STREAM:
-    case STREAM_FIN:
-
-        m_streamId = ReadVarInt64(i);
-        break;
-
-    case STREAM_LEN:
-    case STREAM_LEN_FIN:
-
-        m_streamId = ReadVarInt64(i);
-        m_length = ReadVarInt64(i);
-        break;
-
-    case STREAM_OFF:
-    case STREAM_OFF_FIN:
-
-        m_streamId = ReadVarInt64(i);
-        m_offset = ReadVarInt64(i);
-        break;
-
-    case STREAM_OFF_LEN:
-    case STREAM_OFF_LEN_FIN:
-
-        m_streamId = ReadVarInt64(i);
-        m_offset = ReadVarInt64(i);
-        m_length = ReadVarInt64(i);
+    case NEW_CONNECTION_ID: {
+        uint8_t cidLength = 0;
+        std::vector<uint8_t> cid;
+        if (!r.VarInt(m_sequence) || !r.VarInt(m_retirePriorTo) || !r.U8(cidLength) ||
+            cidLength < 1 || cidLength > QuicConnectionId::MAX_LENGTH || !r.Bytes(cid, cidLength) ||
+            !r.U64(m_resetTokenHi) || !r.U64(m_resetTokenLo))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        m_connectionId = QuicConnectionId(cid.data(), cidLength);
         break;
     }
 
-    NS_LOG_INFO("Deserialized a subheader of size " << GetSerializedSize());
-    return GetSerializedSize();
+    case RETIRE_CONNECTION_ID:
+        if (!r.VarInt(m_sequence))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case PATH_CHALLENGE:
+    case PATH_RESPONSE:
+        if (!r.U64(m_data))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case ACK_FREQUENCY:
+        if (!r.VarInt(m_ackFreqSeq) || !r.VarInt(m_ackFreqThreshold) ||
+            !r.VarInt(m_ackFreqMaxDelayUs) || !r.VarInt(m_ackFreqReordering))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case ACK:
+    case ACK_ECN: {
+        uint64_t count = 0;
+        uint64_t firstRange = 0;
+        if (!r.VarInt(m_largestAcknowledged) || !r.VarInt(m_ackDelay) || !r.VarInt(count) ||
+            !r.VarInt(firstRange) || firstRange > m_largestAcknowledged || count > r.Left())
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        // the inverse of AckWireRanges (): from counts back to absolute packet numbers
+        m_ackBlockCount = count;
+        m_gaps.clear();
+        m_additionalAckBlocks.clear();
+        uint64_t lo = m_largestAcknowledged - firstRange;
+        for (uint64_t k = 0; k < count; ++k)
+        {
+            uint64_t gap = 0;
+            uint64_t length = 0;
+            if (!r.VarInt(gap) || !r.VarInt(length) || gap > lo || lo - gap < 2 ||
+                length > lo - gap - 2)
+            {
+                return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+            }
+            const uint64_t hi = lo - gap - 2;
+            m_gaps.push_back(lo > 0 ? lo - 1 : 0);
+            m_additionalAckBlocks.push_back(hi);
+            lo = hi - length;
+        }
+        m_firstAckBlock = lo;
+        if (m_frameType == ACK_ECN &&
+            (!r.VarInt(m_ect0Count) || !r.VarInt(m_ect1Count) || !r.VarInt(m_ecnCeCount)))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+    }
+
+    default:
+        if (m_frameType < STREAM || m_frameType > STREAM_OFF_LEN_FIN)
+        {
+            // RFC 9000 Section 12.4: a frame of an unknown type is a FRAME_ENCODING_ERROR
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        if (!r.VarInt(m_streamId) || ((m_frameType & 0x04) && !r.VarInt(m_offset)) ||
+            ((m_frameType & 0x02) && !r.VarInt(m_length)))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+    }
+
+    return r.Consumed();
 }
 
 void
 QuicSubheader::Print(std::ostream& os) const
 {
     NS_LOG_FUNCTION(this << (uint64_t)m_frameType);
-    NS_ASSERT(m_frameType <= IMMEDIATE_ACK or m_frameType == ACK_FREQUENCY);
 
     os << "|" << FrameTypeToString() << "|\n";
     switch (m_frameType)
@@ -962,7 +939,7 @@ QuicSubheader::CreatePadding(void)
 
 QuicSubheader
 QuicSubheader::CreateRstStream(uint64_t streamId,
-                               uint16_t applicationErrorCode,
+                               uint64_t applicationErrorCode,
                                uint64_t finalOffset)
 {
     NS_LOG_INFO("Created RstStream Header");
@@ -977,7 +954,7 @@ QuicSubheader::CreateRstStream(uint64_t streamId,
 }
 
 QuicSubheader
-QuicSubheader::CreateConnectionClose(uint16_t errorCode, const char* reasonPhrase)
+QuicSubheader::CreateConnectionClose(uint64_t errorCode, const char* reasonPhrase)
 {
     NS_LOG_INFO("Created ConnectionClose Header");
 
@@ -998,7 +975,7 @@ QuicSubheader::CreateConnectionClose(uint16_t errorCode, const char* reasonPhras
 }
 
 QuicSubheader
-QuicSubheader::CreateApplicationClose(uint16_t errorCode, const char* reasonPhrase)
+QuicSubheader::CreateApplicationClose(uint64_t errorCode, const char* reasonPhrase)
 {
     NS_LOG_INFO("Created ApplicationClose Header");
 
@@ -1146,7 +1123,7 @@ QuicSubheader::CreateRetireConnectionId(uint64_t sequence)
 }
 
 QuicSubheader
-QuicSubheader::CreateStopSending(uint64_t streamId, uint16_t applicationErrorCode)
+QuicSubheader::CreateStopSending(uint64_t streamId, uint64_t applicationErrorCode)
 {
     NS_LOG_INFO("Created StopSending Header");
 
@@ -1159,11 +1136,11 @@ QuicSubheader::CreateStopSending(uint64_t streamId, uint16_t applicationErrorCod
 }
 
 QuicSubheader
-QuicSubheader::CreateAck(uint32_t largestAcknowledged,
+QuicSubheader::CreateAck(uint64_t largestAcknowledged,
                          uint64_t ackDelay,
-                         uint32_t firstAckBlock,
-                         std::vector<uint32_t>& gaps,
-                         std::vector<uint32_t>& additionalAckBlocks)
+                         uint64_t firstAckBlock,
+                         std::vector<uint64_t>& gaps,
+                         std::vector<uint64_t>& additionalAckBlocks)
 {
     NS_LOG_INFO("Created Ack Header");
 
@@ -1360,7 +1337,51 @@ QuicSubheader::IsStopSending() const
 bool
 QuicSubheader::IsAck() const
 {
-    return m_frameType == ACK;
+    return m_frameType == ACK || m_frameType == ACK_ECN;
+}
+
+void
+QuicSubheader::SetEcnCounts(uint64_t ect0, uint64_t ect1, uint64_t ce)
+{
+    m_frameType = ACK_ECN;
+    m_ect0Count = ect0;
+    m_ect1Count = ect1;
+    m_ecnCeCount = ce;
+}
+
+bool
+QuicSubheader::HasLengthField() const
+{
+    return m_frameType == CRYPTO || (IsStream() && (m_frameType & 0x02));
+}
+
+uint64_t
+QuicSubheader::GetPayloadLength(uint64_t remaining) const
+{
+    if (IsStream())
+    {
+        return (m_frameType & 0x02) ? m_length : remaining;
+    }
+    return m_frameType == CRYPTO ? m_length : 0;
+}
+
+QuicSubheader
+QuicSubheader::CreateCrypto(uint64_t offset, uint64_t length)
+{
+    QuicSubheader sub;
+    sub.SetFrameType(CRYPTO);
+    sub.m_offset = offset;
+    sub.m_length = length;
+    return sub;
+}
+
+QuicSubheader
+QuicSubheader::CreateNewToken(const std::vector<uint8_t>& token)
+{
+    QuicSubheader sub;
+    sub.SetFrameType(NEW_TOKEN);
+    sub.m_token = token;
+    return sub;
 }
 
 bool
@@ -1388,26 +1409,26 @@ QuicSubheader::IsStreamFin() const
     return m_frameType & 0b00000001;
 }
 
-uint32_t
+uint64_t
 QuicSubheader::GetAckBlockCount() const
 {
     return m_ackBlockCount;
 }
 
 void
-QuicSubheader::SetAckBlockCount(uint32_t ackBlockCount)
+QuicSubheader::SetAckBlockCount(uint64_t ackBlockCount)
 {
     m_ackBlockCount = ackBlockCount;
 }
 
-const std::vector<uint32_t>&
+const std::vector<uint64_t>&
 QuicSubheader::GetAdditionalAckBlocks() const
 {
     return m_additionalAckBlocks;
 }
 
 void
-QuicSubheader::SetAdditionalAckBlocks(const std::vector<uint32_t>& ackBlocks)
+QuicSubheader::SetAdditionalAckBlocks(const std::vector<uint64_t>& ackBlocks)
 {
     m_additionalAckBlocks = ackBlocks;
 }
@@ -1448,50 +1469,50 @@ QuicSubheader::SetData(uint64_t data)
     m_data = data;
 }
 
-uint16_t
+uint64_t
 QuicSubheader::GetErrorCode() const
 {
     return m_errorCode;
 }
 
 void
-QuicSubheader::SetErrorCode(uint16_t errorCode)
+QuicSubheader::SetErrorCode(uint64_t errorCode)
 {
     m_errorCode = errorCode;
 }
 
-uint8_t
+uint64_t
 QuicSubheader::GetFrameType() const
 {
     return m_frameType;
 }
 
 void
-QuicSubheader::SetFrameType(uint8_t frameType)
+QuicSubheader::SetFrameType(uint64_t frameType)
 {
     m_frameType = frameType;
 }
 
-const std::vector<uint32_t>&
+const std::vector<uint64_t>&
 QuicSubheader::GetGaps() const
 {
     return m_gaps;
 }
 
 void
-QuicSubheader::SetGaps(const std::vector<uint32_t>& gaps)
+QuicSubheader::SetGaps(const std::vector<uint64_t>& gaps)
 {
     m_gaps = gaps;
 }
 
-uint32_t
+uint64_t
 QuicSubheader::GetLargestAcknowledged() const
 {
     return m_largestAcknowledged;
 }
 
 void
-QuicSubheader::SetLargestAcknowledged(uint32_t largestAcknowledged)
+QuicSubheader::SetLargestAcknowledged(uint64_t largestAcknowledged)
 {
     m_largestAcknowledged = largestAcknowledged;
 }

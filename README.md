@@ -31,7 +31,7 @@ contrib/quic/
 ├── examples/    # quic-example, quic-video-streaming, quic-loss-stress
 ├── scripts/     # streaming_experiment.py
 ├── results/     # streaming-loss.csv
-└── test/        # ns-3 suites "quic" and "quic-features" (see test/TESTS.md), "quic-gaps" (reproductions of known gaps), the packet linter and the behaviour oracle
+└── test/        # ns-3 suites "quic", "quic-features", "quic-wire" and "quic-frames" (see test/TESTS.md), the packet linter and the behaviour oracle
 ```
 
 ## Building and running
@@ -102,11 +102,11 @@ contrib/quic/scripts/streaming_experiment.py tables   # rows of the tables
 
 The frame layouts are those of RFC 9000, Section 19, and the first byte of the headers follows Section 17. What differs:
 
-- **No TLS:** there is no packet protection and no key update. Every packet ends with a 16-byte tag of zeros, which stands for the AEAD tag so that packets have their real size, and the headers are not protected. There are no CRYPTO frames, no Retry and no address-validation tokens. The frame types `CRYPTO` and `NEW_TOKEN` have codes but no codec, so a frame of either type cannot be parsed.
+- **No TLS:** there is no packet protection and no key update. Every packet ends with a 16-byte tag of zeros, which stands for the AEAD tag so that packets have their real size, and the headers are not protected. There are no CRYPTO frames in use, no Retry and no address-validation tokens: the `CRYPTO` and `NEW_TOKEN` frames have codecs, but no endpoint sends them yet.
 - **Handshake payload.** The transport parameters, padded with zeros to the initial packet size (1200 bytes by default), travel in STREAM frames on a pseudo-stream (2^62-1) inside Initial, Handshake and 0-RTT packets, which RFC 9000, Section 12.4 does not allow. The server answers the Initial with a packet of type Handshake and never sends an Initial packet.
 - **Packet numbers** come from one counter for every packet type, not from one space per encryption level, and ACK frames and the sender's counters hold 32 bits. Headers are as RFC 9000, Section 17: long headers carry both connection ids, a token in Initial packets and the Length field, the packet number is truncated to 1 to 4 bytes and recovered as in Appendix A, the Fixed Bit and the reserved bits are checked, and Version Negotiation echoes the connection ids of the client. Packets are not coalesced: every QUIC packet has its own UDP datagram.
 - **Connection ids** have `ns3::QuicL4Protocol::ConnectionIdLength` bytes (8 by default, from 1 to 20; zero-length ids are not supported). Each end picks its own id, and the client's first Destination Connection ID is random with at least 8 bytes (RFC 9000, Section 7.2). The connection-id transport parameters (RFC 9000, Section 7.3) are not checked.
-- **Frame types** are written as one byte, not as a variable-length integer, so `ACK_FREQUENCY` (0xaf) is not encoded as RFC 9000, Section 12.4 requires. Error codes in RESET_STREAM, STOP_SENDING and CONNECTION_CLOSE are limited to 16 bits.
+- **Frames** follow RFC 9000, Section 19: the frame type is a variable-length integer, error codes have up to 62 bits and a frame that is truncated, of an unknown type or not in its shortest form closes the connection (FRAME_ENCODING_ERROR or PROTOCOL_VIOLATION). The frames allowed in each packet type (Section 12.4) are not enforced yet, because the handshake still uses STREAM frames in Initial and Handshake packets. The packet number fields of the ACK frame hold 62 bits, and the sender's sent-packet list 32.
 - **Transport parameters** are a fixed 72-byte structure, not the TLV list of RFC 9000, Section 18, carried in the handshake payload.
 - **Persistent congestion** is detected as msquic does (a loss after more than 2 consecutive PTOs). The RFC 9002, Section 7.6 duration test is selected with `PersistentCongestionByPto=false`.
 - **ACK frequency** follows the ack-frequency draft as msquic does; it asks the peer for an ACK tolerance of up to 41 packets, beyond the one-ACK-per-two-packets of RFC 9000, Section 13.2.2.

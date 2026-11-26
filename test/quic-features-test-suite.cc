@@ -210,8 +210,8 @@ class FeatAckRangesWireTest : public TestCase
     void DoRun() override
     {
         // packets 996-1000, 990-993 and 980-985 received: in memory the ranges are packet numbers
-        std::vector<uint32_t> gaps = {995, 989};
-        std::vector<uint32_t> blocks = {993, 985};
+        std::vector<uint64_t> gaps = {995, 989};
+        std::vector<uint64_t> blocks = {993, 985};
         QuicSubheader ack = RoundTrip(QuicSubheader::CreateAck(1000, 250, 980, gaps, blocks));
         NS_TEST_ASSERT_MSG_EQ(ack.GetLargestAcknowledged(), 1000u, "largest");
         NS_TEST_ASSERT_MSG_EQ(ack.GetAckDelay(), 250u, "delay");
@@ -224,11 +224,11 @@ class FeatAckRangesWireTest : public TestCase
             NS_TEST_ASSERT_MSG_EQ(ack.GetAdditionalAckBlocks()[i], blocks[i], "block " << i);
         }
         // a single range, and ranges one packet apart
-        std::vector<uint32_t> noGaps, noBlocks;
+        std::vector<uint64_t> noGaps, noBlocks;
         QuicSubheader one = RoundTrip(QuicSubheader::CreateAck(5, 0, 3, noGaps, noBlocks));
         NS_TEST_ASSERT_MSG_EQ(one.GetFirstAckBlock(), 3u, "single range floor");
         NS_TEST_ASSERT_MSG_EQ(one.GetGaps().size(), 0u, "single range has no gap");
-        std::vector<uint32_t> g2 = {8}, b2 = {6}; // 9-10 received, 8 missing, 4-6 received
+        std::vector<uint64_t> g2 = {8}, b2 = {6}; // 9-10 received, 8 missing, 4-6 received
         QuicSubheader two = RoundTrip(QuicSubheader::CreateAck(10, 0, 4, g2, b2));
         NS_TEST_ASSERT_MSG_EQ(two.GetGaps()[0], 8u, "gap of one packet");
         NS_TEST_ASSERT_MSG_EQ(two.GetAdditionalAckBlocks()[0], 6u, "second range end");
@@ -265,11 +265,11 @@ class FeatRfcWireBytesTest : public TestCase
     {
         // largest 1000, delay 250, ranges 996-1000, 990-993, 980-985 (RFC 9000 s19.3.1: count 2,
         // first range 4, gap 1 / range 3, gap 3 / range 5)
-        std::vector<uint32_t> gaps = {995, 989}, blocks = {993, 985};
+        std::vector<uint64_t> gaps = {995, 989}, blocks = {993, 985};
         Expect("ACK",
                QuicSubheader::CreateAck(1000, 250, 980, gaps, blocks),
                {0x02, 0x43, 0xE8, 0x40, 0xFA, 0x02, 0x04, 0x01, 0x03, 0x03, 0x05});
-        std::vector<uint32_t> none;
+        std::vector<uint64_t> none;
         Expect("ACK, one range",
                QuicSubheader::CreateAck(5, 0, 5, none, none),
                {0x02, 0x05, 0x00, 0x00, 0x00});
@@ -1418,7 +1418,7 @@ class FeatRttSampleTest : public TestCase
         item->m_packet = Create<Packet>(500);
         item->m_packetNumber = SequenceNumber32(pn);
         item->m_lastSent = sent;
-        std::vector<uint32_t> gaps, blocks;
+        std::vector<uint64_t> gaps, blocks;
         QuicSubheader ack = QuicSubheader::CreateAck(pn, delayUs, pn, gaps, blocks);
         std::vector<Ptr<QuicSocketTxItem>> newAcks = {item};
         m_cc->OnAckReceived(m_tcb, ack, newAcks, nullptr);

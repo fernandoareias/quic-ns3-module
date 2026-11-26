@@ -10,7 +10,7 @@ Status: **done** follows the document; **partial** follows it in part; **diverge
 else; **missing** is not implemented; **n/a** does not apply to a simulator.
 
 Evidence: a test case of the suites `quic` and `quic-features` (see `test/TESTS.md`), a rule of the
-packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
+packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `quic-frames`.
 
 ## RFC 8999 (invariants)
 
@@ -40,7 +40,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 | 10.1 | Idle timeout | done | | quic: idle timeout cases |
 | 10.2 | Closing and draining | done | | |
 | 10.3 | Stateless reset | done | | quic: stateless reset |
-| 11 | Error handling | partial | F3 | A frame of an undefined type asserts in builds with assertions; error codes are 16 bits |
+| 11 | Error handling | partial | F4 | Malformed frames and unknown types close the connection (quic-frames); the stream-level errors of Section 4.5 are still to do |
 | 12.2 | Coalescing packets | missing | F5 | |
 | 12.3 | Packet numbers: one space per encryption level | divergent | F7 | One counter for all; the header truncates and recovers them as in Appendix A |
 | 12.4 | Frames allowed in each packet type | missing | F3 | STREAM frames travel in Initial and Handshake packets |
@@ -49,22 +49,22 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 | 14.1 | Initial datagrams of at least 1200 bytes | partial | F5 | By padding inside STREAM, not with PADDING frames; the datagram is longer than 1200 bytes |
 | 14.3 | Path MTU discovery | partial | F5 | msquic-style search; no black-hole detection |
 | 15 | Versions; reserved versions | partial | F9 | Version 2 is only in the header codec |
-| 16 | Variable-length integers | done | F1 | A value above 2^62-1 is dropped in silence |
+| 16 | Variable-length integers | done | | quic-wire: Appendix A.1 |
 | 17.2 | Long header packets | done | | quic-wire: RFC 9001 appendix A.2, A.3 |
 | 17.2.5 | Retry | partial | F7 | The header is done (quic-wire: A.4); no endpoint sends or handles it |
 | 17.3 | Short header packets | done | | quic-wire: header forms |
 | 17.4 | Spin bit | done | | quic: spin bit; the `SpinBit` attribute turns it off (random values), the one-in-16 policy is left to the application |
 | 18.2 | Transport parameters | divergent | F3 | |
-| 19.1 to 19.2 | PADDING, PING | done | | |
-| 19.3 | ACK | done | | quic-features: wire |
-| 19.3.2 | ACK with ECN counts | divergent | F3, F8 | Codec only; rejected on receipt |
-| 19.4, 19.5 | RESET_STREAM, STOP_SENDING | partial | F3, F4 | 16-bit error codes |
-| 19.6, 19.7 | CRYPTO, NEW_TOKEN | missing | F3, F7 | |
-| 19.8 | STREAM | partial | F3 | LEN always set; a length of zero is read as "to the end of the packet" |
+| 19.1 to 19.2 | PADDING, PING | done | | quic-frames |
+| 19.3 | ACK | done | | quic-frames: bytes, invalid ranges |
+| 19.3.2 | ACK with ECN counts | partial | F8 | Codec done and accepted on receipt (quic-frames); nothing sends or counts ECN yet |
+| 19.4, 19.5 | RESET_STREAM, STOP_SENDING | done | | quic-frames: 62-bit error codes |
+| 19.6, 19.7 | CRYPTO, NEW_TOKEN | partial | F7 | Codecs done (quic-frames); no endpoint sends them |
+| 19.8 | STREAM | done | | quic-frames: LEN, OFF and FIN bits; a length of zero is zero; the sender always writes LEN |
 | 19.9 to 19.14 | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, *_BLOCKED | done | | |
-| 19.15, 19.16 | NEW_CONNECTION_ID, RETIRE_CONNECTION_ID | partial | F3 | 8-byte ids only |
+| 19.15, 19.16 | NEW_CONNECTION_ID, RETIRE_CONNECTION_ID | done | | quic-frames: ids of 1 to 20 bytes |
 | 19.17, 19.18 | PATH_CHALLENGE, PATH_RESPONSE | done | | |
-| 19.19, 19.20 | CONNECTION_CLOSE, HANDSHAKE_DONE | partial | F3 | 16-bit error codes |
+| 19.19, 19.20 | CONNECTION_CLOSE, HANDSHAKE_DONE | done | | quic-frames |
 | 20 | Error codes | partial | F3, F4 | |
 
 ## RFC 9001 (TLS)
@@ -108,7 +108,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 | RFC 9406 HyStart++ | done (off by default) | |
 | RFC 8899 DPLPMTUD | partial | F5 |
 | draft-ietf-quic-reliable-stream-reset-11 | missing | F9 |
-| draft-ietf-quic-ack-frequency-14 | partial (type is not a varint; threshold off by one) | F9 |
+| draft-ietf-quic-ack-frequency-14 | partial (the frames are done; the threshold is off by one) | F9 |
 | draft-ietf-quic-receive-ts-04 | missing | F10 |
 | draft-ietf-quic-qlog-main-schema-15, quic-events-14 | missing | F6 |
 | draft-ietf-ccwg-bbr-07 (BBRv3) | missing (the module has BBRv1) | F10 |
