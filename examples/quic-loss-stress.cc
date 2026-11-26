@@ -23,6 +23,11 @@
  * Usage:
  *   ./ns3 run "quic-loss-stress --loss=0.05 --run=7 --nstreams=3 --bytes=200000 --cc=ns3::QuicBbr"
  *
+ * With `--digest` it also prints a hash of every packet that left a device (time and bytes), the
+ * number of packets and the time of the last delivery. Two builds that send the same packets at the
+ * same times print the same digest, which is how a refactor that must not change the behaviour is
+ * checked (see test/oracle.sh).
+ *
  * Note: --burst uses the ns-3 BurstErrorModel, which counts packets, not time. When only a few
  * packets cross the link (the sender backs off), one burst can last for many seconds, so failures
  * with --burst at high rates are not necessarily a protocol problem.
@@ -53,6 +58,40 @@ uint64_t g_clientRx = 0;            //!< bytes the client received
 std::vector<uint64_t> g_clientSent; //!< bytes the client wrote, per stream
 std::vector<uint64_t> g_serverSent; //!< bytes the server wrote, per stream
 bool g_transfer = true; //!< false during the warm-up connection of --zrtt, which moves no data
+uint64_t g_digest = 1469598103934665603ULL; //!< FNV-1a hash of every packet sent by a device
+uint64_t g_packets = 0;                     //!< packets sent by the devices
+Time g_lastRx;                              //!< time of the last delivery to an application
+
+/**
+ * Fold bytes into the digest (FNV-1a, 64 bits).
+ *
+ * @param data the bytes.
+ * @param size number of bytes.
+ */
+void
+Fold(const uint8_t* data, uint32_t size)
+{
+    for (uint32_t i = 0; i < size; ++i)
+    {
+        g_digest = (g_digest ^ data[i]) * 1099511628211ULL;
+    }
+}
+
+/**
+ * Record a packet that leaves a device.
+ *
+ * @param packet the packet.
+ */
+void
+OnPhyTxEnd(Ptr<const Packet> packet)
+{
+    std::vector<uint8_t> bytes(packet->GetSize());
+    packet->CopyData(bytes.data(), bytes.size());
+    const uint64_t now = Simulator::Now().GetNanoSeconds();
+    Fold(reinterpret_cast<const uint8_t*>(&now), sizeof(now));
+    Fold(bytes.data(), bytes.size());
+    ++g_packets;
+}
 
 void
 Drain(uint64_t* counter, Ptr<Socket> socket)
@@ -61,6 +100,7 @@ Drain(uint64_t* counter, Ptr<Socket> socket)
     while ((packet = socket->Recv()) && packet->GetSize() > 0)
     {
         *counter += packet->GetSize();
+        g_lastRx = Simulator::Now();
     }
 }
 
@@ -128,6 +168,7 @@ main(int argc, char* argv[])
     uint32_t maxData = 0;
     bool zrtt = false;
     bool vn = false;
+    bool digest = false;
 
     CommandLine cmd(__FILE__);
     cmd.AddValue("loss", "Packet loss probability (burst start probability with --burst)", loss);
@@ -149,6 +190,10 @@ main(int argc, char* argv[])
     cmd.AddValue("zrtt",
                  "Warm up with a first connection, then transfer over a 0-RTT connection",
                  zrtt);
+    cmd.AddValue("digest",
+                 "Also print a hash of every packet sent by the devices, their number and the time "
+                 "of the last delivery",
+                 digest);
     cmd.Parse(argc, argv);
 
     RngSeedManager::SetSeed(7);
@@ -190,6 +235,12 @@ main(int argc, char* argv[])
             model->SetAttribute("ErrorUnit", StringValue("ERROR_UNIT_PACKET"));
             devices.Get(i)->SetAttribute("ReceiveErrorModel", PointerValue(model));
         }
+    }
+
+    if (digest)
+    {
+        devices.Get(0)->TraceConnectWithoutContext("PhyTxEnd", MakeCallback(&OnPhyTxEnd));
+        devices.Get(1)->TraceConnectWithoutContext("PhyTxEnd", MakeCallback(&OnPhyTxEnd));
     }
 
     InternetStackHelper internet;
@@ -250,5 +301,10 @@ main(int argc, char* argv[])
     std::cout << (ok ? "OK" : "FAIL") << " loss=" << loss << " run=" << run
               << " streams=" << g_streams << " server=" << g_serverRx << " client=" << g_clientRx
               << " of " << expected << std::endl;
+    if (digest)
+    {
+        std::cout << "digest=" << std::hex << g_digest << std::dec << " packets=" << g_packets
+                  << " last_rx_ns=" << g_lastRx.GetNanoSeconds() << std::endl;
+    }
     return ok ? 0 : 1;
 }
