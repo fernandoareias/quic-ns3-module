@@ -31,7 +31,7 @@ contrib/quic/
 ├── examples/    # quic-example, quic-video-streaming, quic-loss-stress
 ├── scripts/     # streaming_experiment.py
 ├── results/     # streaming-loss.csv
-└── test/        # two ns-3 suites, "quic" and "quic-features" (see test/TESTS.md)
+└── test/        # ns-3 suites "quic" and "quic-features" (see test/TESTS.md), "quic-gaps" (reproductions of known gaps), the packet linter and the behaviour oracle
 ```
 
 ## Building and running
@@ -102,13 +102,16 @@ contrib/quic/scripts/streaming_experiment.py tables   # rows of the tables
 
 The frame layouts are those of RFC 9000, Section 19, and the first byte of the headers follows Section 17. What differs:
 
-- **No TLS:** no packet protection, no key update, no CRYPTO frames, no Retry and no address-validation tokens (`NEW_TOKEN` is ignored by clients and is a protocol violation for servers).
-- **Long headers** carry no Source Connection ID, Token or Length, and the packet number is always 4 bytes (32 bits, not 62).
-- **Connection ids** are always 8 bytes, and the connection-id transport parameters (RFC 9000, Section 7.3) are not checked. `OmitConnectionId` (short headers without the id) is flagged in a reserved bit.
+- **No TLS:** no packet protection, no AEAD tag, no key update, no CRYPTO frames, no Retry and no address-validation tokens. The frame types `CRYPTO` and `NEW_TOKEN` have codes but no codec, so a frame of either type cannot be parsed.
+- **Handshake payload.** The transport parameters, padded with zeros to the initial packet size (1200 bytes by default), travel in STREAM frames on a pseudo-stream (2^62-1) inside Initial, Handshake and 0-RTT packets, which RFC 9000, Section 12.4 does not allow. The server answers the Initial with a packet of type Handshake and never sends an Initial packet.
+- **Long headers** are 19 bytes: they carry a Destination Connection ID, a Source Connection ID Length that is always 0 (no Source Connection ID), no Token Length and no Length field, and a packet number of 4 bytes (32 bits, not 62). Short headers use 1, 2 or 4 packet number bytes, chosen by the value and not by the largest acknowledged number, and the packet number is not reconstructed as in RFC 9000, Appendix A.
+- **Packet numbers** come from one counter for every packet type, starting at 1, not from one space per encryption level.
+- **Connection ids** are always 8 bytes, and the connection-id transport parameters (RFC 9000, Section 7.3) are not checked. `OmitConnectionId` (short headers without the id) is flagged in a reserved bit, and a packet without the id stops the simulation with `NS_FATAL_ERROR`.
+- **Frame types** are written as one byte, not as a variable-length integer, so `ACK_FREQUENCY` (0xaf) is not encoded as RFC 9000, Section 12.4 requires. Error codes in RESET_STREAM, STOP_SENDING and CONNECTION_CLOSE are limited to 16 bits.
 - **Transport parameters** are a fixed 72-byte structure, not the TLV list of RFC 9000, Section 18, carried in the handshake payload.
 - **Persistent congestion** is detected as msquic does (a loss after more than 2 consecutive PTOs). The RFC 9002, Section 7.6 duration test is selected with `PersistentCongestionByPto=false`.
 - **ACK frequency** follows the ack-frequency draft as msquic does; it asks the peer for an ACK tolerance of up to 41 packets, beyond the one-ACK-per-two-packets of RFC 9000, Section 13.2.2.
-- No ECN marking (only the `ACK_ECN` counts are read) and no coalesced packets.
+- **ECN.** Nothing marks or reads the ECN bits of the IP header. An `ACK_ECN` frame is serialized and parsed, but the receive path has no case for it, so a peer that sends one closes the connection with FRAME_ENCODING_ERROR. There are no coalesced packets: every QUIC packet has its own UDP datagram.
 - **Segment size.** `MaxPacketSize` counts the frames of a packet, without the QUIC header. The default of 1459 fills a 1500 byte IP MTU exactly (IPv4 20 + UDP 8 + short header 13); the path MTU discovery sizes segments as the IP MTU minus 41. A larger segment makes the IP layer fragment every full datagram.
 - **Handshake loss.** The Handshake packet of the client is what lets the server leave `CONNECTING_SVR`; the client repeats it (with a PING, in a Handshake header, with exponential backoff) until it receives HANDSHAKE_DONE (RFC 9001, Section 4.9.2). A server that is already open treats the repeated packet like any other and acknowledges it.
 - **0-RTT.** With `QuicL4Protocol::0RTT-Handshake` on, a client that already connected to a server sends 0-RTT data right away, within the transport parameters the server announced the last time (kept by the client's `QuicL4Protocol`, RFC 9000, Section 7.4.1; without them it could not open a stream). Every packet of the client carries a 0-RTT header until the first answer arrives, so a lost first packet does not leave the server without a connection, and a server that has not yet received the client's parameters holds the writes of its application until it has. The server's stack must allow 0-RTT too (`0RTT-Handshake` on both nodes, as `quic-loss-stress --zrtt` does).
@@ -119,6 +122,7 @@ The frame layouts are those of RFC 9000, Section 19, and the first byte of the h
 - **Handshake under heavy loss.** The client repeats its Initial with exponential backoff (about 0.1, 1.1, 3.1, 7.1 and 15.1 s after the start) and gives up when the idle timeout (30 s) expires without an answer: the connection fails, the application hears of it through the connect-failed callback, and nothing more is sent (RFC 9000, Section 10.1). With a loss rate `L` in both directions the chance of that is roughly `(1 - (1 - L)^2)^5`: 0.03% with 10% loss, 0.2% with 15%, 0.6% with 20%, 3.5% with 30% (40 seeds of `quic-loss-stress` at 10, 15, 20, 25 and 30% lost 0, 0, 1, 1 and 1 connections, always the seed whose first five Initials were lost). A shorter idle timeout or a slower backoff would change the chance; the module follows RFC 9002, Section 6.2.
 - **Closing.** A connection closed by the application or by the idle timeout stays in the closing state for three PTOs (RFC 9000, Sections 10.1 and 10.2.1), answering the packets of the peer with CONNECTION_CLOSE, as a connection closed by the peer drains for three PTOs.
 - **Keep-alive.** Off by default. `KeepAliveInterval` (a `Time`, 0 disables it) sends a PING after that long without receiving a packet; the answer restarts the idle timers of both ends, so a silent connection does not close at the idle timeout. It has no effect when it is not shorter than the idle timeout, and an unreachable peer is still detected (the PING is lost, the probes follow, and the idle timeout or the disconnect timeout closes the connection).
+- **Traces.** The `RTO` trace source keeps its initial value of 30 s, and `RTT` reports the latest raw sample, set only when an ACK frees stream data.
 - Loopback support requires special handling due to ns-3's UDP socket internals.
 
 ## Original authors

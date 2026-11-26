@@ -1,12 +1,27 @@
 # Test evidence map
 
-Two suites, 93 test cases, all passing:
+Two suites, 103 test cases, all passing:
 
 ```
 ./ns3 build
 build/utils/ns3-dev-test-runner-debug --suite=quic          --verbose   # 46 cases, quic-test-suite.cc
-build/utils/ns3-dev-test-runner-debug --suite=quic-features --verbose   # 47 cases, quic-features-test-suite.cc
+build/utils/ns3-dev-test-runner-debug --suite=quic-features --verbose   # 57 cases, quic-features-test-suite.cc
 ```
+
+A third suite, `quic-gaps` (`quic-gaps-test-suite.cc`), holds reproductions of conformance gaps that
+are not fixed yet. Its cases do nothing unless `QUIC_GAPS` is set (`1` for all of them, or a list of
+case names), so the suite passes; see the comment at the top of the file.
+
+Two tools check the module from outside the test runner:
+
+- `test/oracle.sh` runs 34 short scenarios and compares a hash of every packet they send with the
+  recorded one (`test/oracle.expected`). It is for refactors that must not change the behaviour and
+  stops being valid when the wire format changes on purpose.
+- `test/tools/quic_pcap_lint.py` (self-test: `python3 -I test/tools/test_quic_pcap_lint.py`) checks the
+  QUIC packets of pcap files against RFC 8999, RFC 9000 and RFC 9001, rule by rule;
+  `test/tools/lint_examples.sh` runs it on the pcaps of the examples.
+
+`doc/CONFORMANCE.md` lists, section by section, what the module does of each RFC and draft.
 
 A suite stops at its first failing case, so the cases after it are not run until it is fixed.
 
