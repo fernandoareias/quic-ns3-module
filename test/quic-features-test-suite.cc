@@ -2421,6 +2421,112 @@ class FeatBbrProbeRttTest : public TestCase
 };
 
 /**
+ * RFC 9000 s7.2 and s5.1: the first Initial packet of a client has a random Destination Connection
+ * ID of at least 8 bytes and the Source Connection ID the client chose for itself. The server
+ * answers to that Source Connection ID with an id of its own, and from then on each side sends to
+ * the id the other chose. Run with the shortest and the longest ids.
+ */
+class FeatConnectionIdsTest : public TestCase
+{
+  public:
+    explicit FeatConnectionIdsTest(uint32_t length)
+        : TestCase("connection ids: each end chooses its own, " + std::to_string(length) +
+                   " bytes long (RFC 9000 s7.2)"),
+          m_length(length)
+    {
+    }
+
+  private:
+    void OnClientTx(Ptr<const Packet>, const QuicHeader& h, Ptr<const QuicSocketBase>)
+    {
+        if (h.IsInitial() && !m_clientInitialSeen)
+        {
+            m_clientInitialSeen = true;
+            m_clientDcid = h.GetDestinationConnectionId();
+            m_clientScid = h.GetSourceConnectionId();
+        }
+        if (h.IsShort())
+        {
+            m_clientShortDcids.insert(h.GetDestinationConnectionId());
+        }
+    }
+
+    void OnServerTx(Ptr<const Packet>, const QuicHeader& h, Ptr<const QuicSocketBase>)
+    {
+        if (h.IsLong() && !h.IsVersionNegotiation() && !m_serverLongSeen)
+        {
+            m_serverLongSeen = true;
+            m_serverFirstDcid = h.GetDestinationConnectionId();
+            m_serverScid = h.GetSourceConnectionId();
+        }
+        if (h.IsShort())
+        {
+            m_serverShortDcids.insert(h.GetDestinationConnectionId());
+        }
+    }
+
+    void DoRun() override
+    {
+        Config::SetDefault("ns3::QuicL4Protocol::ConnectionIdLength", UintegerValue(m_length));
+        FeatRig r;
+        r.serverStreams = 1;
+        r.serverBytesPerStream = 20000;
+        r.serverCloses = false;
+        r.stopAt = Seconds(5);
+        r.onAccept = [this](Ptr<Socket> s) {
+            FeatQuic(s)->TraceConnectWithoutContext(
+                "Tx",
+                MakeCallback(&FeatConnectionIdsTest::OnServerTx, this));
+            FeatRig::SendPattern(s, ServerStreamId(1), 20000);
+        };
+        r.Build();
+        FeatQuic(r.clients[0])
+            ->TraceConnectWithoutContext("Tx",
+                                         MakeCallback(&FeatConnectionIdsTest::OnClientTx, this));
+        r.Run();
+        Config::SetDefault("ns3::QuicL4Protocol::ConnectionIdLength", UintegerValue(8));
+
+        NS_TEST_ASSERT_MSG_EQ(m_clientInitialSeen, true, "the client sent an Initial packet");
+        NS_TEST_ASSERT_MSG_GT_OR_EQ((uint32_t)m_clientDcid.GetLength(),
+                                    8u,
+                                    "the first Destination Connection ID has at least 8 bytes");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)m_clientScid.GetLength(),
+                              m_length,
+                              "the client's Source Connection ID");
+        NS_TEST_ASSERT_MSG_EQ(m_clientDcid != m_clientScid, true, "the two ids differ");
+        NS_TEST_ASSERT_MSG_EQ(m_serverLongSeen, true, "the server answered with a long header");
+        NS_TEST_ASSERT_MSG_EQ(m_serverFirstDcid == m_clientScid,
+                              true,
+                              "the server answers to the Source Connection ID of the client");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)m_serverScid.GetLength(),
+                              m_length,
+                              "the server's Source Connection ID");
+        NS_TEST_ASSERT_MSG_EQ(m_serverScid != m_clientScid && m_serverScid != m_clientDcid,
+                              true,
+                              "the server chose an id of its own");
+        NS_TEST_ASSERT_MSG_EQ(m_serverShortDcids.size(), 1u, "the server sends to one id");
+        NS_TEST_ASSERT_MSG_EQ(*m_serverShortDcids.begin() == m_clientScid,
+                              true,
+                              "the server sends to the id the client chose");
+        NS_TEST_ASSERT_MSG_EQ(m_clientShortDcids.size(), 1u, "the client sends to one id");
+        NS_TEST_ASSERT_MSG_EQ(*m_clientShortDcids.begin() == m_serverScid,
+                              true,
+                              "the client sends to the id the server chose");
+        NS_TEST_ASSERT_MSG_EQ(r.rx[0][1].bytes, 20000u, "all the bytes arrived");
+    }
+
+    uint32_t m_length;
+    bool m_clientInitialSeen{false};
+    bool m_serverLongSeen{false};
+    QuicConnectionId m_clientDcid;
+    QuicConnectionId m_clientScid;
+    QuicConnectionId m_serverFirstDcid;
+    QuicConnectionId m_serverScid;
+    std::set<QuicConnectionId> m_clientShortDcids;
+    std::set<QuicConnectionId> m_serverShortDcids;
+};
+
+/**
  * RFC 9000 s6, RFC 8999 s6: the Version Negotiation packet lists the versions it supports, and a
  * client that proposed an unknown version carries on with one of them.
  */
@@ -2526,6 +2632,9 @@ class QuicFeaturesTestSuite : public TestSuite
         AddTestCase(new FeatAckRangesWireTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatRfcWireBytesTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatReservedVersionTest, TestCase::Duration::QUICK);
+        AddTestCase(new FeatConnectionIdsTest(8), TestCase::Duration::QUICK);
+        AddTestCase(new FeatConnectionIdsTest(20), TestCase::Duration::QUICK);
+        AddTestCase(new FeatConnectionIdsTest(1), TestCase::Duration::QUICK);
         AddTestCase(new FeatTransportParametersTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatCongestionDefaultsTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatSchedulerConservationTest, TestCase::Duration::QUICK);

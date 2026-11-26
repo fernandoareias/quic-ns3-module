@@ -317,6 +317,20 @@ class QuicL4Protocol : public IpL4Protocol
     QuicConnectionId AllocateConnectionId(void);
 
     /**
+     * Allocate a connection id for the peer to use as the Destination Connection ID of the first
+     * Initial packet, at least 8 bytes long (RFC 9000, Section 7.2).
+     *
+     * @return an unused id.
+     */
+    QuicConnectionId AllocateInitialDestinationId(void);
+
+    /** @return the length of the connection ids this stack issues. */
+    uint8_t GetConnectionIdLength(void) const
+    {
+        return m_connectionIdLength;
+    }
+
+    /**
      * \\brief Route packets that carry this connection id to a connection (msquic: the lookup
      * table)
      * \\param connectionId the id
@@ -355,6 +369,17 @@ class QuicL4Protocol : public IpL4Protocol
      * \\return false if the connection has no binding
      */
     bool GetPath(Ptr<QuicSocketBase> socket, Ptr<Socket>& udp, Address& remote) const;
+
+    /**
+     * Give a server connection created by an Initial or 0-RTT packet its connection ids.
+     *
+     * @param socket the new connection.
+     * @param header the header of the packet that created it.
+     * @param originalDcid the Destination Connection ID of that packet.
+     */
+    void SetUpServerConnection(Ptr<QuicSocketBase> socket,
+                               const QuicHeader& header,
+                               const QuicConnectionId& originalDcid);
 
     /**
      * Build the datagram of a packet: the payload, its AEAD tag and the header.
@@ -568,7 +593,8 @@ class QuicL4Protocol : public IpL4Protocol
         m_rememberedParameters; //!< Parameters announced by servers this stack connected to
     std::map<QuicConnectionId, Ptr<QuicSocketBase>>
         m_cidMap;            //!< Connection id -> connection (every id issued to a peer)
-    uint64_t m_resetKeyA{0}; //!< Secret of the stateless reset token function
+    uint8_t m_connectionIdLength{8}; //!< Attribute ConnectionIdLength
+    uint64_t m_resetKeyA{0};         //!< Secret of the stateless reset token function
     uint64_t m_resetKeyB{0}; //!< Secret of the stateless reset token function
 
     /**

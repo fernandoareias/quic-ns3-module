@@ -16,9 +16,9 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 
 | Section | Requirement | Status | Phase | Note |
 |---|---|---|---|---|
-| 5.1 | Long header: form bit, version, connection id lengths and ids | partial | F2 | The Source Connection ID Length is always 0 |
-| 5.2 | Short header: form bit, destination id of agreed length | partial | F2 | |
-| 5.4 | Version Negotiation packet | divergent | F2 | The connection ids of the client are not echoed; version 1 is listed twice |
+| 5.1 | Long header: form bit, version, connection id lengths and ids | done | | quic-wire: header vectors |
+| 5.2 | Short header: form bit, destination id of agreed length | done | | quic-wire: header forms |
+| 5.4 | Version Negotiation packet | done | | quic-wire: header forms; quic-features: version negotiation |
 | 6 | The client ignores a Version Negotiation packet that lists its version | done | | quic-loss-stress `--vn` |
 
 ## RFC 9000 (transport)
@@ -28,10 +28,10 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 | 2, 3 | Streams: ids, types, send and receive states | partial | F4 | The send states do not follow the ACKs |
 | 4.1, 4.2 | Flow control per stream and per connection | partial | F4 | Credit advances on in-order delivery, not on `Recv()` |
 | 4.5 | Final size | partial | F4 | Compared with the offset, not offset plus length; duplicates after DATA_READ abort the connection |
-| 5.1 | Connection ids: variable length, NEW and RETIRE_CONNECTION_ID | divergent | F1, F2 | Always 8 bytes; the first id is shared by both ends |
-| 5.2 | Receiving packets: demultiplexing by connection id | partial | F2 | IPv4 only |
-| 6 | Version negotiation | partial | F2 | |
-| 7.2 | The client picks a random Destination Connection ID of at least 8 bytes | done | | |
+| 5.1 | Connection ids: variable length, NEW and RETIRE_CONNECTION_ID | partial | F3 | Each end has its own id of 1 to 20 bytes (quic-features: connection ids); the NEW_CONNECTION_ID codec still stores the id as given |
+| 5.2 | Receiving packets: demultiplexing by connection id | partial | F5 | IPv4 only; no zero-length ids |
+| 6 | Version negotiation | partial | F9 | The client discards a list that holds its version; with no common version it sends CONNECTION_CLOSE instead of abandoning the attempt in silence |
+| 7.2 | The client picks a random Destination Connection ID of at least 8 bytes; the server picks its own id | done | | quic-features: connection ids |
 | 7.3 | Authenticating connection ids with transport parameters | missing | F3, F7 | |
 | 7.4 | Transport parameters; remembering them for 0-RTT | divergent | F3 | Fixed 72-byte structure |
 | 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | partial | F7 | Limit on the server only; no Retry, no tokens |
@@ -42,18 +42,18 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 | 10.3 | Stateless reset | done | | quic: stateless reset |
 | 11 | Error handling | partial | F3 | A frame of an undefined type asserts in builds with assertions; error codes are 16 bits |
 | 12.2 | Coalescing packets | missing | F5 | |
-| 12.3 | Packet numbers: one space per encryption level | divergent | F1, F7 | One counter for all |
+| 12.3 | Packet numbers: one space per encryption level | divergent | F7 | One counter for all; the header truncates and recovers them as in Appendix A |
 | 12.4 | Frames allowed in each packet type | missing | F3 | STREAM frames travel in Initial and Handshake packets |
 | 13.2 | Generating acknowledgements | done | | quic-features: delayed ACK |
 | 13.4 | ECN | missing | F8 | `ACK_ECN` closes the connection |
-| 14.1 | Initial datagrams of at least 1200 bytes | partial | F5 | By padding inside STREAM, not with PADDING frames |
+| 14.1 | Initial datagrams of at least 1200 bytes | partial | F5 | By padding inside STREAM, not with PADDING frames; the datagram is longer than 1200 bytes |
 | 14.3 | Path MTU discovery | partial | F5 | msquic-style search; no black-hole detection |
-| 15 | Versions; reserved versions | partial | F2, F9 | |
+| 15 | Versions; reserved versions | partial | F9 | Version 2 is only in the header codec |
 | 16 | Variable-length integers | done | F1 | A value above 2^62-1 is dropped in silence |
-| 17.2 | Long header packets | divergent | F2 | 19 fixed bytes; no Token Length, no Length |
-| 17.2.5 | Retry | missing | F7 | Dead code |
-| 17.3 | Short header packets | partial | F2 | PN length by value; reserved bit used for "no connection id" |
-| 17.4 | Spin bit | done | | quic: spin bit; cannot be disabled |
+| 17.2 | Long header packets | done | | quic-wire: RFC 9001 appendix A.2, A.3 |
+| 17.2.5 | Retry | partial | F7 | The header is done (quic-wire: A.4); no endpoint sends or handles it |
+| 17.3 | Short header packets | done | | quic-wire: header forms |
+| 17.4 | Spin bit | done | | quic: spin bit; the `SpinBit` attribute turns it off (random values), the one-in-16 policy is left to the application |
 | 18.2 | Transport parameters | divergent | F3 | |
 | 19.1 to 19.2 | PADDING, PING | done | | |
 | 19.3 | ACK | done | | quic-features: wire |
@@ -75,7 +75,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-gaps`.
 | 4.1.2 | The handshake is confirmed by HANDSHAKE_DONE | divergent | F8 | The client confirms on its first Handshake packet |
 | 4.6 | 0-RTT with session tickets | divergent | F7 | A flag, not a ticket |
 | 4.9 | Discarding Initial and Handshake keys | divergent | F7 | |
-| 5 | Packet protection (size: 16-byte tag) | missing | F5 | The cryptography itself stays emulated |
+| 5 | Packet protection (size: 16-byte tag) | partial | F5 | The tag is there (zeros) and counted in the path MTU; the cryptography stays emulated |
 | 5.8 | Retry integrity tag | missing | F7 | |
 | 6 | Key update | missing | F7 | |
 | 8.1 | ALPN | missing | F7 | |

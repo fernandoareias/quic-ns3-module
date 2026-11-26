@@ -871,9 +871,38 @@ class QuicSocketBase : public QuicSocket
     uint32_t GetActiveDestCids(void) const;
 
     /** \\return the destination connection id used on the active path */
+    /**
+     * Set the connection id the peer chose for itself: the Source Connection ID of its first
+     * packet (RFC 9000, Section 7.2).
+     *
+     * @param cid the id.
+     */
+    void SetPeerConnectionId(const QuicConnectionId& cid)
+    {
+        m_peerCid = cid;
+    }
+
+    /**
+     * Set, on a server, the Destination Connection ID of the first Initial packet.
+     *
+     * @param cid the id.
+     */
+    void SetOriginalDestinationConnectionId(const QuicConnectionId& cid)
+    {
+        m_originalDcid = cid;
+    }
+
     QuicConnectionId GetDestCid(void) const
     {
-        return m_destCid.IsEmpty() ? m_connectionId : m_destCid;
+        if (!m_destCid.IsEmpty())
+        {
+            return m_destCid;
+        }
+        if (!m_peerCid.IsEmpty())
+        {
+            return m_peerCid;
+        }
+        return m_initialDcid.IsEmpty() ? m_connectionId : m_initialDcid;
     }
 
     /** \\return the congestion window in bytes */
@@ -1345,6 +1374,9 @@ class QuicSocketBase : public QuicSocket
     uint64_t m_peerRetirePriorTo{0};  //!< highest retire-prior-to the peer announced
     uint8_t m_peerActiveCidLimit{2};  //!< active_connection_id_limit announced by the peer
     QuicConnectionId m_destCid;       //!< destination id of the active path
+    QuicConnectionId m_peerCid;       //!< id the peer chose for itself (Source Connection ID)
+    QuicConnectionId m_initialDcid;   //!< client: Destination Connection ID of the first Initial
+    QuicConnectionId m_originalDcid;  //!< server: Destination Connection ID of the first Initial
     std::vector<QuicPath> m_paths;    //!< paths; the active one is first
     uint32_t m_nextPathId{1};         //!< id of the next path
     int m_rxPathIndex{-1};            //!< path of the packet being processed
@@ -1366,6 +1398,9 @@ class QuicSocketBase : public QuicSocket
      * what the packet number of a new packet is truncated against (RFC 9000, Appendix A.2).
      */
     int64_t LargestAckedPacket(void) const;
+
+    /** @return the spin bit to send: the value of the algorithm, or a random one when it is off. */
+    bool SpinBitValue(void) const;
     void MaybeUpdateDestCid(void);
     void InitPaths(void);
     void IssueSourceCids(void);
@@ -1514,10 +1549,9 @@ class QuicSocketBase : public QuicSocket
                                            //!< bidirectional streams the peer may initiate
     TracedValue<Time> m_idleTimeout; //!< Idle timeout; 0 disables it (the negotiated value once the
                                      //!< transport parameters are in)
-    Time m_keepAliveInterval;  //!< Time without a received packet after which a PING is sent; 0
-                               //!< disables the keep-alive
-    bool m_omit_connection_id; //!< The flag that indicates if the connection id is required in the
-                               //!< upcoming connection
+    Time m_keepAliveInterval; //!< Time without a received packet after which a PING is sent; 0
+                              //!< disables the keep-alive
+    bool m_spinBitEnabled;    //!< Attribute SpinBit
     /*uint128_t  m_stateless_reset_token;*/ //!< The stateless reset token
     uint8_t m_ack_delay_exponent; //!< Our ack_delay_exponent: scales the ack delay of the ACK
                                   //!< frames we send (RFC 9000 s19.3)

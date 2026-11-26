@@ -310,9 +310,9 @@ QuicSubheader::CalculateSubHeaderLength() const
 
         len += GetVarInt64Size(m_sequence);
         len += GetVarInt64Size(m_retirePriorTo);
-        len += 8;   // connection id length (RFC 9000 s19.15)
-        len += 64;  // connection id (this module issues 8-byte ids)
-        len += 128; // stateless reset token
+        len += 8;                              // connection id length (RFC 9000 s19.15)
+        len += 8 * m_connectionId.GetLength(); // connection id
+        len += 128;                            // stateless reset token
         break;
 
     case RETIRE_CONNECTION_ID: // 0x19 RFC 9000 §19.16

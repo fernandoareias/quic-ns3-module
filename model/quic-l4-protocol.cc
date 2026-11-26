@@ -123,6 +123,12 @@ QuicL4Protocol::GetTypeId(void)
                           TypeIdValue(QuicCubic::GetTypeId()),
                           MakeTypeIdAccessor(&QuicL4Protocol::m_congestionTypeId),
                           MakeTypeIdChecker())
+            .AddAttribute("ConnectionIdLength",
+                          "Length in bytes of the connection ids this stack issues, from 1 to 20 "
+                          "(RFC 9000, Section 5.1). Zero-length ids are not supported.",
+                          UintegerValue(8),
+                          MakeUintegerAccessor(&QuicL4Protocol::m_connectionIdLength),
+                          MakeUintegerChecker<uint8_t>(1, QuicConnectionId::MAX_LENGTH))
             .AddAttribute("SocketList",
                           "The list of UDP and QUIC sockets associated to this protocol.",
                           ObjectVectorValue(),
@@ -561,6 +567,7 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
         //  NS_LOG_INFO ("");
 
         QuicHeader header;
+        header.SetShortHeaderConnectionIdLength(m_connectionIdLength);
         packet->RemoveHeader(header);
         if (!header.IsValid())
         {
@@ -625,7 +632,7 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
             Ptr<QuicSocketBase> listenerSocket = FindListener(sock);
             NS_LOG_LOGIC(this << " Cloning listening socket " << listenerSocket);
             socket = CloneSocket(listenerSocket);
-            socket->SetConnectionId(connectionId);
+            SetUpServerConnection(socket, header, connectionId);
 
             // Store the peer address on the cloned binding for SendTo
             for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
@@ -687,7 +694,7 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
             Ptr<QuicSocketBase> orttListener = FindListener(sock);
             NS_LOG_LOGIC(this << " Cloning listening socket " << orttListener);
             socket = CloneSocket(orttListener);
-            socket->SetConnectionId(connectionId);
+            SetUpServerConnection(socket, header, connectionId);
 
             // Store the peer address on the cloned binding for SendTo
             for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
@@ -804,16 +811,37 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
     }
 }
 
+namespace
+{
+
+/**
+ * Random bytes for a connection id.
+ *
+ * @param rng the random variable.
+ * @param length number of bytes.
+ * @return the id.
+ */
+QuicConnectionId
+RandomConnectionId(Ptr<UniformRandomVariable> rng, uint8_t length)
+{
+    uint8_t bytes[QuicConnectionId::MAX_LENGTH];
+    for (uint8_t k = 0; k < length; ++k)
+    {
+        bytes[k] = static_cast<uint8_t>(rng->GetInteger(0, 255));
+    }
+    return QuicConnectionId(bytes, length);
+}
+
+} // namespace
+
 QuicConnectionId
 QuicL4Protocol::AllocateConnectionId(void)
 {
     Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
     for (;;)
     {
-        const uint64_t value =
-            ((uint64_t)rng->GetInteger(0, 0xffffffffu) << 32) | rng->GetInteger(0, 0xffffffffu);
-        const QuicConnectionId cid = QuicConnectionId::FromUint64(value);
-        if (value == 0 || m_cidMap.count(cid) > 0)
+        const QuicConnectionId cid = RandomConnectionId(rng, m_connectionIdLength);
+        if (cid.ToUint64() == 0 || m_cidMap.count(cid) > 0)
         {
             continue;
         }
@@ -823,6 +851,21 @@ QuicL4Protocol::AllocateConnectionId(void)
             used = used || binding->m_quicSocket->GetConnectionId() == cid;
         }
         if (!used)
+        {
+            return cid;
+        }
+    }
+}
+
+QuicConnectionId
+QuicL4Protocol::AllocateInitialDestinationId(void)
+{
+    Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
+    for (;;)
+    {
+        const QuicConnectionId cid =
+            RandomConnectionId(rng, std::max<uint8_t>(m_connectionIdLength, 8));
+        if (m_cidMap.count(cid) == 0)
         {
             return cid;
         }
@@ -970,8 +1013,7 @@ QuicL4Protocol::SendStatelessReset(Ptr<Socket> sock,
     {
         length = received - 1;
     }
-    const QuicConnectionId cid = QuicConnectionId::FromUint64(
-        ((uint64_t)rng->GetInteger(0, 0xffffffffu) << 32) | rng->GetInteger(0, 0xffffffffu));
+    const QuicConnectionId cid = RandomConnectionId(rng, m_connectionIdLength);
     QuicHeader head = QuicHeader::CreateShort(cid,
                                               SequenceNumber32(rng->GetInteger(0, 0xffffff)),
                                               header.GetKeyPhaseBit(),
@@ -1100,6 +1142,20 @@ QuicL4Protocol::DoDispose(void)
     IpL4Protocol::DoDispose();
 }
 
+void
+QuicL4Protocol::SetUpServerConnection(Ptr<QuicSocketBase> socket,
+                                      const QuicHeader& header,
+                                      const QuicConnectionId& originalDcid)
+{
+    // RFC 9000 Section 7.2: the server picks its own connection id, answers to the one the client
+    // gave as Source Connection ID and keeps accepting the Destination Connection ID of the first
+    // Initial packet until the client switches to the id of the server
+    socket->SetConnectionId(AllocateConnectionId());
+    socket->SetPeerConnectionId(header.GetSourceConnectionId());
+    socket->SetOriginalDestinationConnectionId(originalDcid);
+    RegisterConnectionId(originalDcid, socket);
+}
+
 Ptr<QuicSocketBase>
 QuicL4Protocol::CloneSocket(Ptr<QuicSocketBase> oldsock)
 {
@@ -1158,26 +1214,8 @@ QuicL4Protocol::CreateSocket(TypeId congestionTypeId)
 
     socket->InitializeScheduling();
 
-    // generate a random connection ID and check that has not been assigned to other
-    // sockets associated to this L4 protocol
-    Ptr<UniformRandomVariable> rand = CreateObject<UniformRandomVariable>();
-
-    bool found = false;
-    QuicConnectionId connectionId;
-    while (not found)
-    {
-        connectionId = QuicConnectionId::FromUint64(uint64_t(rand->GetValue(0, pow(2, 64) - 1)));
-        found = true;
-        for (auto it = m_quicUdpBindingList.begin(); it != m_quicUdpBindingList.end(); ++it)
-        {
-            found = false;
-            if (connectionId == (*it)->m_quicSocket->GetConnectionId())
-            {
-                break;
-            }
-            found = true;
-        }
-    }
+    // generate a random connection ID that is not in use by other sockets of this stack
+    const QuicConnectionId connectionId = AllocateConnectionId();
     socket->SetConnectionId(connectionId);
     Ptr<QuicUdpBinding> udpBinding = CreateObject<QuicUdpBinding>();
     udpBinding->m_budpSocket = nullptr;
