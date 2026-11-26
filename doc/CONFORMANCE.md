@@ -25,9 +25,9 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 
 | Section | Requirement | Status | Phase | Note |
 |---|---|---|---|---|
-| 2, 3 | Streams: ids, types, send and receive states | partial | F4 | The send states do not follow the ACKs |
-| 4.1, 4.2 | Flow control per stream and per connection | partial | F4 | Credit advances on in-order delivery, not on `Recv()` |
-| 4.5 | Final size | partial | F4 | Compared with the offset, not offset plus length; duplicates after DATA_READ abort the connection |
+| 2, 3 | Streams: ids, types, send and receive states | partial | F4 | The receive states follow Section 3.2 (quic-streams); the send side does not reach DATA_RECVD or RESET_RECVD, because the ACKs are not tied to streams |
+| 4.1, 4.2 | Flow control per stream and per connection | partial | F4 | Credit advances on in-order delivery, not on `Recv()`; the limits of the module are 32 bits |
+| 4.5 | Final size | done | | quic-streams: offset plus length, copies after DATA_READ, RESET_STREAM after the data |
 | 5.1 | Connection ids: variable length, NEW and RETIRE_CONNECTION_ID | partial | F3 | Each end has its own id of 1 to 20 bytes (quic-features: connection ids); the NEW_CONNECTION_ID codec still stores the id as given |
 | 5.2 | Receiving packets: demultiplexing by connection id | partial | F5 | IPv4 only; no zero-length ids |
 | 6 | Version negotiation | partial | F9 | The client discards a list that holds its version; with no common version it sends CONNECTION_CLOSE instead of abandoning the attempt in silence |

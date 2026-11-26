@@ -747,7 +747,7 @@ class QuicSocketBase : public QuicSocket
      * \param errorCode application error code
      * \return true if the reset was issued
      */
-    bool ResetStream(uint64_t streamId, uint16_t errorCode);
+    bool ResetStream(uint64_t streamId, uint64_t errorCode);
 
     /**
      * \brief Ask the peer to stop sending on a stream (STOP_SENDING, RFC 9000 s19.5)
@@ -755,7 +755,7 @@ class QuicSocketBase : public QuicSocket
      * \param errorCode application error code
      * \return true if the request was issued
      */
-    bool StopSending(uint64_t streamId, uint16_t errorCode);
+    bool StopSending(uint64_t streamId, uint64_t errorCode);
 
     /**
      * \\brief Finish the sending side of a stream: the data already written is delivered and the
@@ -1225,7 +1225,7 @@ class QuicSocketBase : public QuicSocket
      * \param phrase human-readable error description
      * \return 0 on success
      */
-    uint32_t SendConnectionClosePacket(uint16_t errorCode, std::string phrase);
+    uint32_t SendConnectionClosePacket(uint64_t errorCode, std::string phrase);
 
     /**
      * \brief Send as much pending data as possible according to the Tx window.

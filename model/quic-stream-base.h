@@ -120,7 +120,7 @@ class QuicStreamBase : public QuicStream
      * \param errorCode application error code
      * \return true if a RESET_STREAM was generated
      */
-    bool Reset(uint16_t errorCode);
+    bool Reset(uint64_t errorCode);
 
     /**
      * \\brief Finish the sending side gracefully: the last byte is sent with the FIN bit
@@ -133,7 +133,7 @@ class QuicStreamBase : public QuicStream
      * \param errorCode application error code
      * \return true if a STOP_SENDING was generated
      */
-    bool StopSending(uint16_t errorCode);
+    bool StopSending(uint64_t errorCode);
 
     /**
      * \brief Whether the stream was reset by either side
@@ -154,7 +154,7 @@ class QuicStreamBase : public QuicStream
      * \param the size of the frame to be sent
      * \return the size of the frame sent
      */
-    uint32_t SendDataFrame(SequenceNumber32 seq, uint32_t maxSize);
+    uint32_t SendDataFrame(uint64_t offset, uint32_t maxSize);
 
     /**
      * \brief Calculate the maximum amount of data that can be received by this stream
@@ -272,7 +272,7 @@ class QuicStreamBase : public QuicStream
     uint64_t m_windowBytesDelivered{0}; //!< Bytes delivered since the last window update
     uint64_t m_windowBase{0}; //!< Delivered offset already accounted in m_windowBytesDelivered
     Time m_lastWindowUpdate;  //!< Last time MAX_STREAM_DATA was advanced
-    TracedCallback<uint64_t, uint16_t, bool>
+    TracedCallback<uint64_t, uint64_t, bool>
         m_streamResetTrace;       //!< Reset trace (id, error, by peer)
     bool m_finQueued{false};      //!< The application finished the sending side
     bool m_closedReported{false}; //!< The stream layer was told this stream is complete
@@ -281,6 +281,17 @@ class QuicStreamBase : public QuicStream
     uint64_t m_blockedReportedAt{
         UINT64_MAX};                 //!< Stream limit for which STREAM_DATA_BLOCKED was last sent
     uint64_t m_highestRecvOffset{0}; //!< Highest end offset received (connection-level accounting)
+    uint64_t m_finalSize{0};         //!< Final size of the stream, once it is known
+    bool m_finalSizeKnown{false};    //!< A FIN or a RESET_STREAM gave the final size
+    /**
+     * Take the final size that a frame gives (RFC 9000, Section 4.5).
+     *
+     * @param finalSize the final size.
+     * @param frame the name of the frame, for the error.
+     * @return false, after closing the connection, when it is another size than the one known or
+     * below the data already received.
+     */
+    bool CheckFinalSize(uint64_t finalSize, const char* frame);
     uint64_t m_deliveredReported; //!< Bytes already reported to the connection-level flow control
     uint32_t m_maxAdvertisedData; //!< Last advertised MaxData
     uint32_t m_maxDataInterval;   //!< Interval between MaxData frames

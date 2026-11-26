@@ -260,7 +260,7 @@ class QuicL5Protocol : public Object
      * \param errorCode application error code
      * \return true if the reset was issued
      */
-    bool ResetStream(uint64_t streamId, uint16_t errorCode);
+    bool ResetStream(uint64_t streamId, uint64_t errorCode);
 
     /**
      * \brief Report that a stream has (or no longer has) unsent data in its own buffer
@@ -281,7 +281,7 @@ class QuicL5Protocol : public Object
      * \param errorCode application error code
      * \return true if the request was issued
      */
-    bool StopSendingOnStream(uint64_t streamId, uint16_t errorCode);
+    bool StopSendingOnStream(uint64_t streamId, uint64_t errorCode);
 
     /**
      * \\brief Finish the sending side of a stream (FIN)

@@ -899,7 +899,7 @@ class QuicEndToEndTestCase : public TestCase
         NS_TEST_ASSERT_MSG_EQ(m_corrupt, false, "out-of-order or corrupted bytes");
     }
 
-    void ResetTrace(bool byPeer, uint64_t id, uint16_t err, bool peer)
+    void ResetTrace(bool byPeer, uint64_t id, uint64_t err, bool peer)
     {
         if (id == ServerStreamId(m_stopStream) && err == 7)
         {
@@ -962,7 +962,7 @@ class QuicEndToEndTestCase : public TestCase
     static void TraceThunk(QuicEndToEndTestCase* t,
                            bool byPeer,
                            uint64_t id,
-                           uint16_t err,
+                           uint64_t err,
                            bool peer)
     {
         t->ResetTrace(byPeer, id, err, peer);

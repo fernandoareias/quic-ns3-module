@@ -1,27 +1,27 @@
-stress QuicCubic loss=0 run=1 1c48122297262fcc
-stress QuicCubic loss=0 run=2 2577f8db1235959f
-stress QuicCubic loss=0.02 run=1 94bcb2dd6fd4b9fd
-stress QuicCubic loss=0.02 run=2 3c171676248e5f34
-stress QuicCubic loss=0.1 run=1 106dd14334b3e846
-stress QuicCubic loss=0.1 run=2 b823efbcfc3075c0
-stress QuicCubic zrtt loss=0.02 run=1 a7455369a7cb526c
-stress QuicCubic vn loss=0.05 run=1 eabd9d98c29215c8
-stress QuicBbr loss=0 run=1 ab1c5244e4c75dce
-stress QuicBbr loss=0 run=2 3620d7d269a51e34
-stress QuicBbr loss=0.02 run=1 46ff26551a75bcab
-stress QuicBbr loss=0.02 run=2 dbd06e62329eb556
-stress QuicBbr loss=0.1 run=1 a52e9a994d392df4
-stress QuicBbr loss=0.1 run=2 848fa59fbc910341
-stress QuicBbr zrtt loss=0.02 run=1 feebd4ae35365696
-stress QuicBbr vn loss=0.05 run=1 6cc1532752c8eae0
-stress QuicCongestionControl loss=0 run=1 b2636f6b93a6d7ae
-stress QuicCongestionControl loss=0 run=2 85ebe3f2a06f18b5
-stress QuicCongestionControl loss=0.02 run=1 a81c7afca418db86
-stress QuicCongestionControl loss=0.02 run=2 904fbd8ebae00bdc
-stress QuicCongestionControl loss=0.1 run=1 032ea61a1c1810ad
-stress QuicCongestionControl loss=0.1 run=2 64bbfc28ef8516e2
-stress QuicCongestionControl zrtt loss=0.02 run=1 226a54ef617078e0
-stress QuicCongestionControl vn loss=0.05 run=1 abe7a4fe0b8c5c8b
+stress QuicCubic loss=0 run=1 01acc7da6c2990bc
+stress QuicCubic loss=0 run=2 276d5e23b2b428da
+stress QuicCubic loss=0.02 run=1 178292c7ba88755d
+stress QuicCubic loss=0.02 run=2 44a02d4ec0ed369f
+stress QuicCubic loss=0.1 run=1 c1121de225b127a7
+stress QuicCubic loss=0.1 run=2 573cd389bc2b18cd
+stress QuicCubic zrtt loss=0.02 run=1 a80e47f18ea20b37
+stress QuicCubic vn loss=0.05 run=1 aad5c6d229427ff8
+stress QuicBbr loss=0 run=1 7946fab3838f6aee
+stress QuicBbr loss=0 run=2 373ed702c6685f07
+stress QuicBbr loss=0.02 run=1 ea75f3b13babe1ba
+stress QuicBbr loss=0.02 run=2 d44b3ecc1e66fb09
+stress QuicBbr loss=0.1 run=1 4494e76da2285e30
+stress QuicBbr loss=0.1 run=2 3c25e9abe0bdfd5b
+stress QuicBbr zrtt loss=0.02 run=1 84d772d4f1517b5d
+stress QuicBbr vn loss=0.05 run=1 258d32b735cd581e
+stress QuicCongestionControl loss=0 run=1 6dc1150f33b66edd
+stress QuicCongestionControl loss=0 run=2 5e0cf28f4c5fcc81
+stress QuicCongestionControl loss=0.02 run=1 69970e2b1b6c4073
+stress QuicCongestionControl loss=0.02 run=2 8e905649c13bb9cf
+stress QuicCongestionControl loss=0.1 run=1 47476ad0a286862a
+stress QuicCongestionControl loss=0.1 run=2 d023bcd8e76301b2
+stress QuicCongestionControl zrtt loss=0.02 run=1 51735e7f1bb9c100
+stress QuicCongestionControl vn loss=0.05 run=1 bf49e8b8878d65cc
 erldp-mesh-exp1 quic 590c0e0e52e99daa
 erldp-mesh-exp1 quic-bbr d26350c7e7a4eb08
 erldp-mesh-exp1 quic-newreno 5ecc04c85a0751b0

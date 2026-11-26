@@ -70,6 +70,7 @@ build_lib(
     TEST_SOURCES test/quic-test-suite.cc
                  test/quic-features-test-suite.cc
                  test/quic-frames-test-suite.cc
+                 test/quic-streams-test-suite.cc
                  test/quic-wire-test-suite.cc
                  ${examples_as_tests_sources}
 )

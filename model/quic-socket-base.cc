@@ -2369,7 +2369,7 @@ QuicSocketBase::Close(void)
 
 /* Send a CONNECTION_CLOSE frame */
 uint32_t
-QuicSocketBase::SendConnectionClosePacket(uint16_t errorCode, std::string phrase)
+QuicSocketBase::SendConnectionClosePacket(uint64_t errorCode, std::string phrase)
 {
     NS_LOG_FUNCTION(this);
 
@@ -4363,14 +4363,14 @@ QuicSocketBase::NotifyPacingPerformed(void)
 }
 
 bool
-QuicSocketBase::ResetStream(uint64_t streamId, uint16_t errorCode)
+QuicSocketBase::ResetStream(uint64_t streamId, uint64_t errorCode)
 {
     NS_LOG_FUNCTION(this << streamId << errorCode);
     return m_quicl5 != nullptr && m_quicl5->ResetStream(streamId, errorCode);
 }
 
 bool
-QuicSocketBase::StopSending(uint64_t streamId, uint16_t errorCode)
+QuicSocketBase::StopSending(uint64_t streamId, uint64_t errorCode)
 {
     NS_LOG_FUNCTION(this << streamId << errorCode);
     return m_quicl5 != nullptr && m_quicl5->StopSendingOnStream(streamId, errorCode);

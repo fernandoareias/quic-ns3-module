@@ -637,14 +637,14 @@ QuicL5Protocol::NotifyStreamBacklog(uint64_t streamId, bool backlogged)
 }
 
 bool
-QuicL5Protocol::ResetStream(uint64_t streamId, uint16_t errorCode)
+QuicL5Protocol::ResetStream(uint64_t streamId, uint64_t errorCode)
 {
     Ptr<QuicStreamBase> stream = SearchStream(streamId);
     return stream != nullptr && stream->Reset(errorCode);
 }
 
 bool
-QuicL5Protocol::StopSendingOnStream(uint64_t streamId, uint16_t errorCode)
+QuicL5Protocol::StopSendingOnStream(uint64_t streamId, uint64_t errorCode)
 {
     Ptr<QuicStreamBase> stream = SearchStream(streamId);
     return stream != nullptr && stream->StopSending(errorCode);

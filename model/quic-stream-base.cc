@@ -225,7 +225,7 @@ QuicStreamBase::SendPendingData(void)
                      << m_txBuffer->BytesInFlight() << "BufferedSize " << m_txBuffer->AppSize()
                      << "MaxPacketSize " << (uint32_t)m_quicl5->GetMaxPacketSize());
 
-        int success = SendDataFrame((SequenceNumber32)m_sentSize, s);
+        int success = SendDataFrame(m_sentSize, s);
 
         availableWindow = AvailableWindow();
 
@@ -276,7 +276,7 @@ QuicStreamBase::SendPendingData(void)
 }
 
 uint32_t
-QuicStreamBase::SendDataFrame(SequenceNumber32 seq, uint32_t maxSize)
+QuicStreamBase::SendDataFrame(uint64_t offset, uint32_t maxSize)
 {
     NS_LOG_FUNCTION(this);
 
@@ -286,14 +286,14 @@ QuicStreamBase::SendDataFrame(SequenceNumber32 seq, uint32_t maxSize)
         SetStreamStateSend(SEND);
     }
 
-    Ptr<Packet> frame = m_txBuffer->NextSequence(maxSize, seq);
+    Ptr<Packet> frame = m_txBuffer->NextSequence(maxSize, SequenceNumber32((uint32_t)offset));
 
     bool lengthBit = true;
 
     // the FIN goes with the last bytes of a stream the application finished
     bool finBit = m_finQueued && m_txBuffer->AppSize() == 0;
     QuicSubheader sub = QuicSubheader::CreateStreamSubHeader(m_streamId,
-                                                             (uint64_t)seq.GetValue(),
+                                                             offset,
                                                              frame->GetSize(),
                                                              m_sentSize != 0,
                                                              lengthBit,
@@ -373,33 +373,21 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
             return -1;
         }
 
-        if ((m_streamStateRecv == DATA_READ or m_streamStateRecv == RESET_READ))
+        // RFC 9000 Section 4.5: a final size that is not the one the stream already has is an
+        // error, whatever the state of the stream
+        if (!CheckFinalSize(sub.GetOffset(), "RESET_STREAM"))
         {
-            m_quicl5->SignalAbortConnection(
-                QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
-                "Receiving RST_STREAM Frames in DATA_READ or RESET_READ Stream State");
             return -1;
         }
 
-        if (m_fin and m_rxBuffer->GetFinalSize() != sub.GetOffset())
+        if (m_streamStateRecv == DATA_READ or m_streamStateRecv == RESET_READ or
+            m_streamStateRecv == RESET_RECVD)
         {
-            m_quicl5->SignalAbortConnection(
-                QuicSubheader::TransportErrorCodes_t::FINAL_SIZE_ERROR,
-                "RST_STREAM causes final offset to change for a Stream");
-            return -1;
+            // RFC 9000 Section 3.2: the application has read the data, or the stream was reset
+            // already: the frame has nothing left to do
+            break;
         }
 
-        if (m_streamStateRecv == RESET_RECVD)
-        {
-            break; // duplicate (retransmission)
-        }
-
-        if (sub.GetOffset() < m_highestRecvOffset)
-        {
-            m_quicl5->SignalAbortConnection(QuicSubheader::TransportErrorCodes_t::FINAL_SIZE_ERROR,
-                                            "RESET_STREAM final size below data already received");
-            return -1;
-        }
         if (sub.GetOffset() > m_maxAllowedRecvOffset)
         {
             m_quicl5->SignalAbortConnection(
@@ -504,28 +492,51 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
             return -1;
         }
 
+        // RFC 9000 Section 4.5 and 19.8: the end of the data of the frame, which the final size
+        // has to match when the frame ends the stream and has to bound when it does not
+        const uint64_t frameEnd = sub.GetOffset() + frame->GetSize();
+        if (!IsHandshake())
+        {
+            if (frameEnd > QUIC_VARINT_MAX)
+            {
+                m_quicl5->SignalAbortConnection(
+                    QuicSubheader::TransportErrorCodes_t::FRAME_ENCODING_ERROR,
+                    "STREAM frame reaches beyond 2^62-1");
+                return -1;
+            }
+            if (sub.IsStreamFin())
+            {
+                if (!CheckFinalSize(frameEnd, "STREAM"))
+                {
+                    return -1;
+                }
+            }
+            else if (m_finalSizeKnown && frameEnd > m_finalSize)
+            {
+                m_quicl5->SignalAbortConnection(
+                    QuicSubheader::TransportErrorCodes_t::FINAL_SIZE_ERROR,
+                    "STREAM data beyond the final size of the stream");
+                return -1;
+            }
+        }
+
         if (m_streamStateRecv == RESET_RECVD or m_streamStateRecv == RESET_READ)
         {
             NS_LOG_INFO("Discarding STREAM frame on a reset stream");
             break;
         }
 
-        if (!(m_streamStateRecv == IDLE or m_streamStateRecv == RECV or
-              m_streamStateRecv == SIZE_KNOWN))
+        if (m_streamStateRecv == DATA_RECVD or m_streamStateRecv == DATA_READ)
         {
-            m_quicl5->SignalAbortConnection(
-                QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
-                "Received STREAM in State unequal to IDLE, RECV, SIZE_KNOWN");
-            return -1;
+            // RFC 9000 Section 3.2: a copy of data that arrived already (a retransmission that
+            // crossed the acknowledgement) is ignored
+            NS_LOG_INFO("Discarding STREAM frame on a stream whose data arrived");
+            break;
         }
 
-        if (!IsHandshake() &&
-            sub.GetOffset() + std::max<uint64_t>(sub.GetLength(), frame->GetSize()) >
-                m_maxAllowedRecvOffset)
+        if (!IsHandshake() && frameEnd > m_maxAllowedRecvOffset)
         {
-            NS_LOG_WARN("stream " << m_streamId << " received up to "
-                                  << sub.GetOffset() +
-                                         std::max<uint64_t>(sub.GetLength(), frame->GetSize())
+            NS_LOG_WARN("stream " << m_streamId << " received up to " << frameEnd
                                   << " but the advertised limit is " << m_maxAllowedRecvOffset);
             m_quicl5->SignalAbortConnection(
                 QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
@@ -535,8 +546,7 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
 
         if (!IsHandshake())
         {
-            uint64_t endOffset =
-                sub.GetOffset() + std::max<uint64_t>(sub.GetLength(), frame->GetSize());
+            uint64_t endOffset = frameEnd;
             if (endOffset > m_highestRecvOffset)
             {
                 uint64_t delta = endOffset - m_highestRecvOffset;
@@ -560,14 +570,10 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
             m_quicl5->OnReceivedTransportParameters(transport);
         }
 
-        if (m_fin and sub.IsStreamFin() and m_rxBuffer->GetFinalSize() != sub.GetOffset())
+        if (sub.IsStreamFin())
         {
-            m_quicl5->SignalAbortConnection(QuicSubheader::TransportErrorCodes_t::FINAL_SIZE_ERROR,
-                                            "STREAM causes final offset to change for a Stream");
-            return -1;
+            m_fin = true;
         }
-
-        m_fin = sub.IsStreamFin();
 
         if (m_fin && IsHandshake())
         {
@@ -620,7 +626,8 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
             NS_LOG_LOGIC("Flushed RxBuffer - new offset "
                          << m_recvSize << ", " << m_rxBuffer->Available() << "bytes available");
 
-            SetStreamStateRecvIf(m_streamStateRecv == SIZE_KNOWN and m_rxBuffer->Size() == 0,
+            SetStreamStateRecvIf(m_streamStateRecv == SIZE_KNOWN and m_rxBuffer->Size() == 0 and
+                                     m_finalSizeKnown and m_recvSize == m_finalSize,
                                  DATA_RECVD);
             OnDelivered();
 
@@ -669,6 +676,24 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
     }
 
     return 0;
+}
+
+bool
+QuicStreamBase::CheckFinalSize(uint64_t finalSize, const char* frame)
+{
+    // RFC 9000 Section 4.5: the final size of a stream does not change, and it cannot be below
+    // the data that already arrived
+    if (m_finalSizeKnown ? finalSize != m_finalSize : finalSize < m_highestRecvOffset)
+    {
+        NS_LOG_WARN("stream " << m_streamId << ": " << frame << " gives the final size "
+                              << finalSize);
+        m_quicl5->SignalAbortConnection(QuicSubheader::TransportErrorCodes_t::FINAL_SIZE_ERROR,
+                                        "Another final size than the one of the stream");
+        return false;
+    }
+    m_finalSizeKnown = true;
+    m_finalSize = finalSize;
+    return true;
 }
 
 uint32_t
@@ -747,7 +772,7 @@ QuicStreamBase::CheckClosed(void)
 }
 
 bool
-QuicStreamBase::Reset(uint16_t errorCode)
+QuicStreamBase::Reset(uint64_t errorCode)
 {
     NS_LOG_FUNCTION(this << errorCode);
     if (IsHandshake() ||
@@ -774,7 +799,7 @@ QuicStreamBase::Reset(uint16_t errorCode)
 }
 
 bool
-QuicStreamBase::StopSending(uint16_t errorCode)
+QuicStreamBase::StopSending(uint64_t errorCode)
 {
     NS_LOG_FUNCTION(this << errorCode);
     if (IsHandshake() ||
