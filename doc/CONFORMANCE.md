@@ -34,20 +34,20 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 7.2 | The client picks a random Destination Connection ID of at least 8 bytes; the server picks its own id | done | | quic-features: connection ids |
 | 7.3 | Authenticating connection ids with transport parameters | partial | F7 | Checked for initial_source and original_destination (the handshake data is not authenticated); no Retry |
 | 7.4 | Transport parameters; remembering them for 0-RTT | done | | quic-wire: RFC 9001 appendix A.2, defaults, invalid values; the client remembers them for 0-RTT |
-| 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | partial | F7 | Limit on the server only; no Retry, no tokens |
+| 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | partial | F7 | Limit on the server, in datagram bytes on both sides; no Retry, no tokens |
 | 8.2 | Path validation | done | | quic: migration cases |
 | 9 | Connection migration | partial | F7, F11 | Client-initiated only; no `preferred_address` |
 | 10.1 | Idle timeout | done | | quic: idle timeout cases |
 | 10.2 | Closing and draining | done | | |
 | 10.3 | Stateless reset | done | | quic: stateless reset |
 | 11 | Error handling | partial | F4 | Malformed frames and unknown types close the connection (quic-frames); the stream-level errors of Section 4.5 are still to do |
-| 12.2 | Coalescing packets | missing | F5 | |
+| 12.2 | Coalescing packets | partial | F7 | Received and sent by the L4 protocol (quic-datagrams); no endpoint sends coalesced packets until the handshake is reworked |
 | 12.3 | Packet numbers: one space per encryption level | divergent | F7 | One counter for all; the header truncates and recovers them as in Appendix A |
 | 12.4 | Frames allowed in each packet type | missing | F3 | STREAM frames travel in Initial and Handshake packets |
 | 13.2 | Generating acknowledgements | done | | quic-features: delayed ACK |
 | 13.4 | ECN | missing | F8 | `ACK_ECN` closes the connection |
-| 14.1 | Initial datagrams of at least 1200 bytes | partial | F5 | By padding inside STREAM, not with PADDING frames; the datagram is longer than 1200 bytes |
-| 14.3 | Path MTU discovery | partial | F5 | msquic-style search; no black-hole detection |
+| 14.1 | Initial datagrams of at least 1200 bytes | done | | quic-features: Initial datagram; PADDING frames, exactly the InitialPacketSize; a server discards smaller ones |
+| 14.3 | Path MTU discovery | partial | | msquic-style search from 1288 bytes in steps of 80; no black-hole detection and no ICMP; the budget follows the connection id length (quic-features: no fragmentation) |
 | 15 | Versions; reserved versions | partial | F9 | Version 2 is only in the header codec |
 | 16 | Variable-length integers | done | | quic-wire: Appendix A.1 |
 | 17.2 | Long header packets | done | | quic-wire: RFC 9001 appendix A.2, A.3 |

@@ -872,15 +872,19 @@ FeatRecordIpSend(const Ipv4Header& h, Ptr<const Packet> p, uint32_t)
 class FeatNoFragmentationTest : public TestCase
 {
   public:
-    FeatNoFragmentationTest()
+    explicit FeatNoFragmentationTest(uint32_t idLength)
         : TestCase("datagrams: data plus the ACK frame never exceed the segment size, so IP never "
-                   "fragments")
+                   "fragments, with connection ids of " +
+                   std::to_string(idLength) + " bytes"),
+          m_idLength(idLength)
     {
     }
 
   private:
     void DoRun() override
     {
+        // a longer connection id leaves less room for the frames of a packet
+        Config::SetDefault("ns3::QuicL4Protocol::ConnectionIdLength", UintegerValue(m_idLength));
         FeatRig r;
         r.serverStreams = 1;
         r.serverBytesPerStream = 3000000;
@@ -892,6 +896,7 @@ class FeatNoFragmentationTest : public TestCase
             "SendOutgoing",
             MakeCallback(&FeatRecordIpSend));
         r.Run();
+        Config::SetDefault("ns3::QuicL4Protocol::ConnectionIdLength", UintegerValue(8));
         NS_TEST_ASSERT_MSG_EQ(r.rx[0][1].bytes, 3000000u, "all bytes delivered");
         uint32_t seg = DynamicCast<QuicSocketBase>(r.accepted[0])->GetSegSize();
         // segment size plus IPv4 (20), UDP (8), the short QUIC header (13) and the AEAD tag (16)
@@ -900,7 +905,11 @@ class FeatNoFragmentationTest : public TestCase
                                     seg + 57,
                                     "largest IP datagram the server handed to the link, segment "
                                         << seg);
+        // and the link carries 1500 bytes at most, whatever the id
+        NS_TEST_ASSERT_MSG_LT_OR_EQ(g_featMaxIpBytes, 1500u, "largest IP datagram");
     }
+
+    uint32_t m_idLength; //!< bytes of the connection ids
 };
 
 class FeatRoundRobinLatencyTest : public TestCase
@@ -949,8 +958,8 @@ class FeatHandshakeWriteTest : public TestCase
 {
   public:
     FeatHandshakeWriteTest()
-        : TestCase(
-              "writes issued right after Connect() are queued and delivered after the handshake")
+        : TestCase("writes issued right after Connect() are queued and delivered after the "
+                   "handshake")
     {
     }
 
@@ -1069,8 +1078,8 @@ class FeatCloseTerminatesTest : public TestCase
 {
   public:
     FeatCloseTerminatesTest()
-        : TestCase(
-              "close: after the server closes, both sides go quiet (no CONNECTION_CLOSE ping-pong)")
+        : TestCase("close: after the server closes, both sides go quiet (no CONNECTION_CLOSE "
+                   "ping-pong)")
     {
     }
 
@@ -1196,15 +1205,16 @@ class FeatSocketBufferWakeupTest : public TestCase
     {
         FeatDefaultsGuard guard;
         guard.Set("ns3::QuicSocketBase", "SocketSndBufSize", 60000);
-        // no window update can come for a 2 MB transfer (it takes 4 MiB delivered): only the full
-        // socket buffer holds the stream back, and the application has already written everything
+        // no window update can come for a 2 MB transfer (it takes 4 MiB delivered): only the
+        // full socket buffer holds the stream back, and the application has already written
+        // everything
         guard.Set("ns3::QuicSocketBase", "MaxStreamData", 16777216);
         guard.Set("ns3::QuicSocketBase", "MaxData", 67108864);
         FeatRig r;
         r.serverCloses = false;
         r.stopAt = Seconds(60);
-        // written all at once after the handshake (before it, writes wait in a queue bounded by the
-        // socket buffer): the stream buffers take everything, the socket buffer only 60 kB
+        // written all at once after the handshake (before it, writes wait in a queue bounded by
+        // the socket buffer): the stream buffers take everything, the socket buffer only 60 kB
         const uint32_t streams = m_streams;
         const uint64_t bytes = m_bytes;
         r.onAccept = [streams, bytes](Ptr<Socket> s) {
@@ -1273,11 +1283,11 @@ class FeatWindowFitsBuffersTest : public TestCase
     uint32_t m_socketBufSize; //!< 0 keeps the default
 };
 
-// A 20 MB bulk transfer over 100 Mbps with light random loss. The window grows past the point where
-// the flushes are limited by scheduling, which makes the sender ask the peer to acknowledge only
-// every 41st packet; the losses then cut the window down. The tolerance has to follow the window
-// down: with a window smaller than the tolerance the peer can only acknowledge on its delayed-ACK
-// timer, which stalls the ACK clock.
+// A 20 MB bulk transfer over 100 Mbps with light random loss. The window grows past the point
+// where the flushes are limited by scheduling, which makes the sender ask the peer to
+// acknowledge only every 41st packet; the losses then cut the window down. The tolerance has to
+// follow the window down: with a window smaller than the tolerance the peer can only
+// acknowledge on its delayed-ACK timer, which stalls the ACK clock.
 class FeatAckToleranceTest : public TestCase
 {
   public:
@@ -1373,8 +1383,9 @@ namespace
 {
 
 /**
- * The type of the first frame of a packet handed to the Tx trace (the payload without the packet
- * header), or -1 when it is not a short-header packet: handshake payloads are not frame sequences.
+ * The type of the first frame of a packet handed to the Tx trace (the payload without the
+ * packet header), or -1 when it is not a short-header packet: handshake payloads are not frame
+ * sequences.
  */
 int
 FeatFirstFrame(Ptr<const Packet> p, const QuicHeader& h)
@@ -1434,8 +1445,8 @@ class FeatRttSampleTest : public TestCase
                               true,
                               "no min_rtt before the first sample");
 
-        // (send times are absolute: an earlier test case may have left the simulation clock past
-        // zero)
+        // (send times are absolute: an earlier test case may have left the simulation clock
+        // past zero)
         Time t0 = Simulator::Now();
         // 50 ms sample without ack delay: srtt = min_rtt = 50 ms
         Simulator::Schedule(MilliSeconds(50), &FeatRttSampleTest::Ack, this, 1, t0, 0);
@@ -1480,8 +1491,8 @@ class FeatRttSampleTest : public TestCase
 };
 
 /**
- * RFC 9002 s6.1.1: a packet is lost once kPacketThreshold (3) packet numbers separate it from an
- * acknowledged one.
+ * RFC 9002 s6.1.1: a packet is lost once kPacketThreshold (3) packet numbers separate it from
+ * an acknowledged one.
  */
 class FeatPacketThresholdTest : public TestCase
 {
@@ -1586,8 +1597,8 @@ class FeatAckDelayExponentTest : public TestCase
 };
 
 /**
- * Server-side recorder shared by the two PTO tests: the first data packet, the first PING that is
- * not a path MTU probe, and the first data packet sent again after a quiet spell.
+ * Server-side recorder shared by the two PTO tests: the first data packet, the first PING that
+ * is not a path MTU probe, and the first data packet sent again after a quiet spell.
  */
 class FeatPtoRecorder
 {
@@ -1627,9 +1638,9 @@ class FeatPtoRecorder
 };
 
 /**
- * RFC 9002 s6.2.2: before any RTT sample the first PTO is smoothed_rtt (kInitialRtt, 333 ms) + 4 *
- * rttvar (2 * kInitialRtt) + max_ack_delay (25 ms), about 1.02 s, measured from the packet that was
- * sent.
+ * RFC 9002 s6.2.2: before any RTT sample the first PTO is smoothed_rtt (kInitialRtt, 333 ms) +
+ * 4 * rttvar (2 * kInitialRtt) + max_ack_delay (25 ms), about 1.02 s, measured from the packet
+ * that was sent.
  */
 class FeatInitialPtoTest : public TestCase
 {
@@ -1655,7 +1666,8 @@ class FeatInitialPtoTest : public TestCase
             FeatRig::SendPattern(s, ServerStreamId(1), 500);
         };
         r.Build();
-        // nothing the client sends after the handshake reaches the server: its ACKs never arrive
+        // nothing the client sends after the handshake reaches the server: its ACKs never
+        // arrive
         Ptr<RateErrorModel> em = CreateObject<RateErrorModel>();
         em->SetAttribute("ErrorRate", DoubleValue(1.0));
         em->SetAttribute("ErrorUnit", StringValue("ERROR_UNIT_PACKET"));
@@ -1677,15 +1689,15 @@ class FeatInitialPtoTest : public TestCase
 };
 
 /**
- * RFC 9002 s6.2.4: a probe timeout with one packet outstanding and nothing new to send repeats the
- * packet and sends a PING as the second probe (an empty packet would not be ack-eliciting).
+ * RFC 9002 s6.2.4: a probe timeout with one packet outstanding and nothing new to send repeats
+ * the packet and sends a PING as the second probe (an empty packet would not be ack-eliciting).
  */
 class FeatPtoPingTest : public TestCase
 {
   public:
     FeatPtoPingTest()
-        : TestCase(
-              "PTO: the second probe is a PING when nothing else is outstanding (RFC 9002 s6.2.4)")
+        : TestCase("PTO: the second probe is a PING when nothing else is outstanding (RFC 9002 "
+                   "s6.2.4)")
     {
     }
 
@@ -1727,8 +1739,8 @@ class FeatPtoPingTest : public TestCase
 };
 
 /**
- * RFC 9000 s17.4: the server reflects the spin value and the client sends the opposite, so the bit
- * flips about once per round trip.
+ * RFC 9000 s17.4: the server reflects the spin value and the client sends the opposite, so the
+ * bit flips about once per round trip.
  */
 class FeatSpinBitTest : public TestCase
 {
@@ -1778,8 +1790,8 @@ class FeatSpinBitTest : public TestCase
 };
 
 /**
- * RFC 9000 s10.1: max_idle_timeout 0 means no limit for that endpoint; the connection then lives as
- * long as the other endpoint's limit allows, and not at all when both are 0.
+ * RFC 9000 s10.1: max_idle_timeout 0 means no limit for that endpoint; the connection then
+ * lives as long as the other endpoint's limit allows, and not at all when both are 0.
  */
 class FeatIdleTimeoutTest : public TestCase
 {
@@ -1935,10 +1947,10 @@ class FeatHandshakeDoneRetransmitTest : public TestCase
 };
 
 /**
- * RFC 9000 s10.2.1: an endpoint that closed the connection answers the packets it still receives
- * with CONNECTION_CLOSE. The first CONNECTION_CLOSE is lost here, and the client sends a packet
- * while the closing period (three PTOs) lasts; without the repeat the peer learns of the close only
- * when its idle timer expires.
+ * RFC 9000 s10.2.1: an endpoint that closed the connection answers the packets it still
+ * receives with CONNECTION_CLOSE. The first CONNECTION_CLOSE is lost here, and the client sends
+ * a packet while the closing period (three PTOs) lasts; without the repeat the peer learns of
+ * the close only when its idle timer expires.
  */
 class FeatClosingRepeatTest : public TestCase
 {
@@ -2014,8 +2026,8 @@ class FeatClosingRepeatTest : public TestCase
 };
 
 /**
- * RFC 9000 s10.1.2: without traffic both idle timers expire and the connection closes; a PING every
- * KeepAliveInterval of silence makes the peer answer, which restarts both timers.
+ * RFC 9000 s10.1.2: without traffic both idle timers expire and the connection closes; a PING
+ * every KeepAliveInterval of silence makes the peer answer, which restarts both timers.
  */
 class FeatKeepAliveTest : public TestCase
 {
@@ -2059,17 +2071,18 @@ class FeatKeepAliveTest : public TestCase
 };
 
 /**
- * RFC 9000 s10.1: a handshake that gets no answer for the idle timeout is abandoned. Close() used
- * to treat the expiry as the application's close and kept retransmitting the Initial: a server that
- * answered after the timeout completed a handshake that then closed at once. The connection now
- * fails when the timer expires, the application is told, and nothing more is sent.
+ * RFC 9000 s10.1: a handshake that gets no answer for the idle timeout is abandoned. Close()
+ * used to treat the expiry as the application's close and kept retransmitting the Initial: a
+ * server that answered after the timeout completed a handshake that then closed at once. The
+ * connection now fails when the timer expires, the application is told, and nothing more is
+ * sent.
  */
 class FeatHandshakeTimeoutTest : public TestCase
 {
   public:
     FeatHandshakeTimeoutTest()
-        : TestCase(
-              "a handshake without an answer fails when the idle timer expires (RFC 9000 s10.1)")
+        : TestCase("a handshake without an answer fails when the idle timer expires (RFC 9000 "
+                   "s10.1)")
     {
     }
 
@@ -2123,8 +2136,8 @@ class FeatHandshakeTimeoutTest : public TestCase
 };
 
 /**
- * Drops the packet at a given arrival index; the index is chosen while the packet is still on the
- * wire, so a test can aim at a packet it saw leave the sender
+ * Drops the packet at a given arrival index; the index is chosen while the packet is still on
+ * the wire, so a test can aim at a packet it saw leave the sender
  */
 class FeatDropNth : public ErrorModel
 {
@@ -2151,9 +2164,9 @@ class FeatDropNth : public ErrorModel
 };
 
 /**
- * RFC 9001 s4.9.2: the Handshake packet that completes the server's handshake is sent again until
- * HANDSHAKE_DONE arrives. A server that is still connecting drops every 1-RTT packet, so a lost
- * Handshake packet used to leave the connection stuck for good.
+ * RFC 9001 s4.9.2: the Handshake packet that completes the server's handshake is sent again
+ * until HANDSHAKE_DONE arrives. A server that is still connecting drops every 1-RTT packet, so
+ * a lost Handshake packet used to leave the connection stuck for good.
  */
 class FeatClientHandshakeLossTest : public TestCase
 {
@@ -2208,10 +2221,10 @@ class FeatClientHandshakeLossTest : public TestCase
 
 /**
  * RFC 9000 s7.4.1 and s4.6: a client that connects again to a server it knows sends 0-RTT data
- * within the limits the server announced the last time. The second connection of this test writes
- * at the instant it connects and has to deliver its data both ways, much sooner than a full
- * handshake would allow; with the first packet lost, the packets that follow must still be 0-RTT
- * packets, because the server only learns of the connection from one of them.
+ * within the limits the server announced the last time. The second connection of this test
+ * writes at the instant it connects and has to deliver its data both ways, much sooner than a
+ * full handshake would allow; with the first packet lost, the packets that follow must still be
+ * 0-RTT packets, because the server only learns of the connection from one of them.
  */
 class FeatZeroRttTest : public TestCase
 {
@@ -2246,8 +2259,8 @@ class FeatZeroRttTest : public TestCase
         m_drop = CreateObject<FeatDropNth>();
         r.dev.Get(0)->SetAttribute("ReceiveErrorModel", PointerValue(m_drop));
         Ptr<Socket> second;
-        // the first connection moves no data and is closed: the client now knows the server and the
-        // server the client
+        // the first connection moves no data and is closed: the client now knows the server and
+        // the server the client
         Simulator::Schedule(Seconds(2), [&r]() { r.clients[0]->Close(); });
         Simulator::Schedule(Seconds(40), [this, &r, &second]() {
             m_second = true;
@@ -2272,8 +2285,8 @@ class FeatZeroRttTest : public TestCase
         NS_TEST_ASSERT_MSG_EQ(m_clientRx, kServerBytes, "the server's data reached the client");
         if (!m_dropFirst)
         {
-            // one way is 20 ms: a full handshake delivers nothing before 60 ms, 0-RTT data arrives
-            // after about 20 ms
+            // one way is 20 ms: a full handshake delivers nothing before 60 ms, 0-RTT data
+            // arrives after about 20 ms
             NS_TEST_ASSERT_MSG_LT((m_firstServerRx - m_start).GetMilliSeconds(),
                                   50,
                                   "the first data reached the server at "
@@ -2316,9 +2329,9 @@ class FeatZeroRttTest : public TestCase
 };
 
 /**
- * Close() on a connection that has nothing to send or to wait for used to do nothing until the idle
- * timeout (30 s) closed the peer: no packet was left to bring the close along. The CONNECTION_CLOSE
- * now goes out at once.
+ * Close() on a connection that has nothing to send or to wait for used to do nothing until the
+ * idle timeout (30 s) closed the peer: no packet was left to bring the close along. The
+ * CONNECTION_CLOSE now goes out at once.
  */
 class FeatIdleCloseTest : public TestCase
 {
@@ -2363,11 +2376,12 @@ class FeatIdleCloseTest : public TestCase
 
 /**
  * BBR on a link without loss. Every ten seconds it goes through ProbeRTT, with a window of four
- * segments, and has to come out of it at the rate it had. It did not: the minimum window was four
- * segments of the size at the start of the connection, fewer bytes than ProbeRTT leaves in flight
- * once the path MTU discovery has grown the segment, so the pipe never looked drained and the
- * connection stayed at four segments for good (about 10 % of the link). Besides, the rate BBR sets
- * was not the rate the socket paced at, so BBR stayed in Drain and never cycled its gains.
+ * segments, and has to come out of it at the rate it had. It did not: the minimum window was
+ * four segments of the size at the start of the connection, fewer bytes than ProbeRTT leaves in
+ * flight once the path MTU discovery has grown the segment, so the pipe never looked drained
+ * and the connection stayed at four segments for good (about 10 % of the link). Besides, the
+ * rate BBR sets was not the rate the socket paced at, so BBR stayed in Drain and never cycled
+ * its gains.
  */
 class FeatBbrProbeRttTest : public TestCase
 {
@@ -2411,8 +2425,8 @@ class FeatBbrProbeRttTest : public TestCase
         r.Run();
         NS_TEST_ASSERT_MSG_EQ(r.rx[0][1].bytes, kTotal, "delivered");
         double dur = r.rx[0][1].last.GetSeconds() - 0.1;
-        // 16 s at the link rate; stuck at four segments after the ProbeRTT at 10 s it took several
-        // minutes
+        // 16 s at the link rate; stuck at four segments after the ProbeRTT at 10 s it took
+        // several minutes
         NS_TEST_ASSERT_MSG_LT(dur, 20.0, "20 MB over 10 Mbps took " << dur << " s");
     }
 
@@ -2421,10 +2435,10 @@ class FeatBbrProbeRttTest : public TestCase
 };
 
 /**
- * RFC 9000 s7.2 and s5.1: the first Initial packet of a client has a random Destination Connection
- * ID of at least 8 bytes and the Source Connection ID the client chose for itself. The server
- * answers to that Source Connection ID with an id of its own, and from then on each side sends to
- * the id the other chose. Run with the shortest and the longest ids.
+ * RFC 9000 s7.2 and s5.1: the first Initial packet of a client has a random Destination
+ * Connection ID of at least 8 bytes and the Source Connection ID the client chose for itself.
+ * The server answers to that Source Connection ID with an id of its own, and from then on each
+ * side sends to the id the other chose. Run with the shortest and the longest ids.
  */
 class FeatConnectionIdsTest : public TestCase
 {
@@ -2527,8 +2541,54 @@ class FeatConnectionIdsTest : public TestCase
 };
 
 /**
- * RFC 9000 s6, RFC 8999 s6: the Version Negotiation packet lists the versions it supports, and a
- * client that proposed an unknown version carries on with one of them.
+ * RFC 9000 Section 14.1: the datagram of the first Initial packet of a client has at least 1200
+ * bytes, and the module makes it as long as the InitialPacketSize attribute says, with PADDING
+ * frames behind the data of the packet.
+ */
+class FeatInitialDatagramTest : public TestCase
+{
+  public:
+    explicit FeatInitialDatagramTest(uint32_t size)
+        : TestCase("datagrams: the Initial datagram of the client has " + std::to_string(size) +
+                   " bytes"),
+          m_size(size)
+    {
+    }
+
+  private:
+    void OnClientPhyTx(Ptr<const Packet> p)
+    {
+        if (m_first == 0)
+        {
+            m_first = p->GetSize() - 2 - 20 - 8; // PPP, IPv4 and UDP
+        }
+    }
+
+    void DoRun() override
+    {
+        Config::SetDefault("ns3::QuicSocketBase::InitialPacketSize", UintegerValue(m_size));
+        FeatRig r;
+        r.serverStreams = 1;
+        r.serverBytesPerStream = 20000;
+        r.serverCloses = false;
+        r.stopAt = Seconds(5);
+        r.Build();
+        r.dev.Get(1)->TraceConnectWithoutContext(
+            "PhyTxEnd",
+            MakeCallback(&FeatInitialDatagramTest::OnClientPhyTx, this));
+        r.Run();
+        Config::SetDefault("ns3::QuicSocketBase::InitialPacketSize", UintegerValue(1200));
+        NS_TEST_ASSERT_MSG_EQ(m_first, m_size, "bytes of the first datagram of the client");
+        NS_TEST_ASSERT_MSG_EQ(r.rx[0][1].bytes, 20000u, "the connection works");
+    }
+
+    uint32_t m_size;     //!< the InitialPacketSize attribute
+    uint32_t m_first{0}; //!< UDP payload of the first datagram of the client
+};
+
+/**
+ * RFC 9000 s6, RFC 8999 s6: the Version Negotiation packet lists the versions it supports, and
+ * a client that proposed an unknown version carries on with one of them.
  */
 class FeatVersionNegotiationTest : public TestCase
 {
@@ -2632,6 +2692,8 @@ class QuicFeaturesTestSuite : public TestSuite
         AddTestCase(new FeatAckRangesWireTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatRfcWireBytesTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatReservedVersionTest, TestCase::Duration::QUICK);
+        AddTestCase(new FeatInitialDatagramTest(1200), TestCase::Duration::QUICK);
+        AddTestCase(new FeatInitialDatagramTest(1350), TestCase::Duration::QUICK);
         AddTestCase(new FeatConnectionIdsTest(8), TestCase::Duration::QUICK);
         AddTestCase(new FeatConnectionIdsTest(20), TestCase::Duration::QUICK);
         AddTestCase(new FeatConnectionIdsTest(1), TestCase::Duration::QUICK);
@@ -2665,7 +2727,8 @@ class QuicFeaturesTestSuite : public TestSuite
                                          0.005),
                     TestCase::Duration::QUICK);
         AddTestCase(new FeatThroughputTest, TestCase::Duration::QUICK);
-        AddTestCase(new FeatNoFragmentationTest, TestCase::Duration::QUICK);
+        AddTestCase(new FeatNoFragmentationTest(8), TestCase::Duration::QUICK);
+        AddTestCase(new FeatNoFragmentationTest(20), TestCase::Duration::QUICK);
         AddTestCase(new FeatRoundRobinLatencyTest(true), TestCase::Duration::QUICK);
         AddTestCase(new FeatRoundRobinLatencyTest(false), TestCase::Duration::QUICK);
         AddTestCase(new FeatHandshakeWriteTest, TestCase::Duration::QUICK);

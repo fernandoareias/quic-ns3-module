@@ -736,6 +736,12 @@ class QuicSocketBase : public QuicSocket
     virtual void BindToNetDevice(Ptr<NetDevice> netdevice);
     virtual void SetSegSize(uint32_t size);
     virtual uint32_t GetSegSize(void) const;
+
+    /**
+     * @return the bytes of frames that fit in a packet: the segment size, less what a destination
+     * connection id longer than 8 bytes adds to the header.
+     */
+    uint32_t GetPacketBudget(void) const;
     virtual int Listen(void);
     virtual int Connect(const Address& address); // Setup endpoint and create the QUIC L5 protocol
     virtual int Close(void);
@@ -1302,6 +1308,7 @@ class QuicSocketBase : public QuicSocket
         0}; //!< Largest segment size allowed on the path (configured segment size)
     uint32_t m_pmtudProbeMtu{0};   //!< IP MTU being probed
     uint32_t m_pmtudProbeCount{0}; //!< Probes sent at this size
+    bool m_padNextPacket{false}; //!< the next packet is expanded to 1200 bytes (path probe)
     uint32_t m_pmtudProbePn{0};    //!< Packet number of the outstanding probe (0 = none)
     bool m_pmtudStarted{false};    //!< Initial MTU already applied
     bool m_pmtudSearchDone{true};  //!< Search finished or not started
@@ -1398,6 +1405,14 @@ class QuicSocketBase : public QuicSocket
      * what the packet number of a new packet is truncated against (RFC 9000, Appendix A.2).
      */
     int64_t LargestAckedPacket(void) const;
+
+    /**
+     * The initial congestion window (RFC 9002, Section 7.2).
+     *
+     * @param datagramData the bytes of data of a datagram.
+     * @return the window in bytes.
+     */
+    static uint32_t InitialWindow(uint32_t datagramData);
 
     /** @return the bytes a short header packet adds to its frames: header and AEAD tag. */
     uint32_t ShortPacketOverhead(void) const;

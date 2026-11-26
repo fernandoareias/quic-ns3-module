@@ -23,6 +23,8 @@
 #include "ns3/socket.h"
 
 #include <map>
+#include <utility>
+#include <vector>
 #include <stdint.h>
 
 namespace ns3
@@ -279,8 +281,13 @@ class QuicL4Protocol : public IpL4Protocol
      * \param socket the QuicSocketBase that would send the packet
      * \param pck a smart pointer to a packet
      * \param outgoing the QuicHeader of the packet
+     * \param minDatagramSize the datagram has at least this many bytes (PADDING frames fill it),
+     * zero for no minimum; the datagram of an Initial packet has at least the initial packet size
      */
-    void SendPacket(Ptr<QuicSocketBase> socket, Ptr<Packet> pkt, const QuicHeader& outgoing) const;
+    void SendPacket(Ptr<QuicSocketBase> socket,
+                    Ptr<Packet> pkt,
+                    const QuicHeader& outgoing,
+                    uint32_t minDatagramSize = 0) const;
 
     /**
      * \brief Remove a socket (and its clones if it is a listener)
@@ -382,13 +389,53 @@ class QuicL4Protocol : public IpL4Protocol
                                const QuicConnectionId& originalDcid);
 
     /**
+     * Send the bytes of a datagram on the UDP socket of a connection.
+     *
+     * @param socket the connection.
+     * @param datagram the bytes.
+     */
+    void SendBytes(Ptr<QuicSocketBase> socket, Ptr<Packet> datagram) const;
+
+    /**
+     * Deliver one packet of a received datagram to its connection, or answer it.
+     *
+     * @param sock the UDP socket the datagram arrived on.
+     * @param from the address it came from.
+     * @param header the header of the packet.
+     * @param packet the frames of the packet followed by its AEAD tag.
+     * @param datagramSize the bytes of the whole datagram.
+     */
+    void ForwardUpPacket(Ptr<Socket> sock,
+                         Address& from,
+                         const QuicHeader& header,
+                         Ptr<Packet> packet,
+                         uint32_t datagramSize);
+
+    /**
      * Build the datagram of a packet: the payload, its AEAD tag and the header.
      *
      * @param head the QUIC header, whose Length field is filled in.
      * @param payload the frames.
+     * @param minDatagramSize the datagram has at least this many bytes, filled with PADDING
+     * frames; zero for no minimum.
      * @return the bytes to send in one UDP datagram.
      */
-    Ptr<Packet> BuildDatagram(const QuicHeader& head, Ptr<Packet> payload) const;
+    Ptr<Packet> BuildDatagram(const QuicHeader& head,
+                              Ptr<Packet> payload,
+                              uint32_t minDatagramSize = 0) const;
+
+    /**
+     * Send several packets in one UDP datagram (RFC 9000, Section 12.2): the long header packets
+     * in the order of their encryption levels and a short header packet last. The datagram is
+     * expanded to the minimum size with PADDING frames in the last packet.
+     *
+     * @param socket the connection.
+     * @param packets the headers and the frames of the packets.
+     * @param minDatagramSize the datagram has at least this many bytes, zero for no minimum.
+     */
+    void SendDatagram(Ptr<QuicSocketBase> socket,
+                      const std::vector<std::pair<QuicHeader, Ptr<Packet>>>& packets,
+                      uint32_t minDatagramSize = 0) const;
 
     /**
      * \\brief Send a packet on a given path, not necessarily the active one (probing)

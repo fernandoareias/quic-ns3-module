@@ -558,257 +558,293 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
     NS_LOG_FUNCTION(this);
 
     Address from;
-    Ptr<Packet> packet;
+    Ptr<Packet> datagram;
 
-    while ((packet = sock->RecvFrom(from)))
+    while ((datagram = sock->RecvFrom(from)))
     {
-        NS_LOG_INFO("Receiving packet on UDP socket");
-        // packet->Print (std::clog);
-        //  NS_LOG_INFO ("");
+        NS_LOG_INFO("Receiving a datagram on a UDP socket");
+        const uint32_t datagramSize = datagram->GetSize();
 
-        QuicHeader header;
-        header.SetShortHeaderConnectionIdLength(m_connectionIdLength);
-        packet->RemoveHeader(header);
-        if (!header.IsValid())
+        // RFC 9000 Section 12.2: a datagram holds one or more packets, each long header packet
+        // with the Length of its own; the last packet runs to the end of the datagram
+        while (datagram->GetSize() > 0)
         {
-            NS_LOG_WARN(this << " dropping a packet with an invalid header");
-            continue;
-        }
-        if (header.HasPacketNumber() && header.IsLong() &&
-            header.GetPayloadSize() != packet->GetSize())
-        {
-            // the Length field does not end where the datagram does: coalesced packets are not
-            // supported yet
-            NS_LOG_WARN(this << " dropping a packet whose Length does not match the datagram");
-            continue;
-        }
-        const uint32_t datagramSize = header.GetSerializedSize() + packet->GetSize();
-
-        const QuicConnectionId connectionId = header.GetDestinationConnectionId();
-
-        Ipv4Address srcIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
-
-        bool isLoopback = IsLocalAddress(srcIp);
-
-        QuicUdpBindingList::iterator it;
-        Ptr<QuicSocketBase> socket;
-        auto issued = m_cidMap.find(connectionId);
-        if (issued != m_cidMap.end())
-        {
-            socket = issued->second;
-        }
-        for (it = m_quicUdpBindingList.begin();
-             socket == nullptr && it != m_quicUdpBindingList.end();
-             ++it)
-        {
-            Ptr<QuicUdpBinding> item = *it;
-            if (item->m_quicSocket->GetConnectionId() == connectionId)
+            QuicHeader header;
+            header.SetShortHeaderConnectionIdLength(m_connectionIdLength);
+            datagram->RemoveHeader(header);
+            if (!header.IsValid())
             {
-                // For loopback, use the receiving UDP socket to disambiguate
-                // between client and server sockets that share the same connection ID.
-                // A binding whose UDP socket is non-null and different from `sock`
-                // means this packet did NOT arrive on that socket's UDP - skip it.
-                if (isLoopback && item->m_budpSocket != nullptr && item->m_budpSocket != sock)
+                NS_LOG_WARN(this << " dropping a packet with an invalid header");
+                break;
+            }
+            Ptr<Packet> packet;
+            if (header.IsLong() && header.HasPacketNumber())
+            {
+                const uint32_t length = header.GetPayloadSize();
+                if (length > datagram->GetSize())
                 {
-                    NS_LOG_LOGIC("Skipping socket (UDP socket mismatch) for loopback packet");
-                    continue;
+                    NS_LOG_WARN(this << " dropping a packet whose Length is beyond the datagram");
+                    break;
                 }
-                // For INITIAL packets on loopback, also skip client sockets
-                if (header.IsInitial() && isLoopback &&
-                    item->m_quicSocket->GetSocketState() == QuicSocketBase::CONNECTING_CLT)
+                std::vector<uint8_t> bytes(length);
+                if (length > 0)
                 {
-                    NS_LOG_LOGIC("Skipping client socket for loopback INITIAL packet");
-                    continue;
+                    datagram->CopyData(bytes.data(), length);
                 }
-                socket = item->m_quicSocket;
+                packet = length > 0 ? Create<Packet>(bytes.data(), length) : Create<Packet>();
+                datagram->RemoveAtStart(length);
+            }
+            else
+            {
+                packet = datagram;
+                datagram = Create<Packet>();
+            }
+            ForwardUpPacket(sock, from, header, packet, datagramSize);
+        }
+    }
+}
+
+void
+QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
+                                Address& from,
+                                const QuicHeader& header,
+                                Ptr<Packet> packet,
+                                uint32_t datagramSize)
+{
+    if (header.IsInitial() && m_isServer && datagramSize < QuicSocketBase::MIN_INITIAL_PACKET_SIZE)
+    {
+        // RFC 9000 Section 14.1: a server discards an Initial packet in a datagram of less than
+        // 1200 bytes
+        NS_LOG_WARN(this << " discarding an Initial packet in a datagram of " << datagramSize
+                         << " bytes");
+        return;
+    }
+
+    const QuicConnectionId connectionId = header.GetDestinationConnectionId();
+
+    Ipv4Address srcIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
+
+    bool isLoopback = IsLocalAddress(srcIp);
+
+    QuicUdpBindingList::iterator it;
+    Ptr<QuicSocketBase> socket;
+    auto issued = m_cidMap.find(connectionId);
+    if (issued != m_cidMap.end())
+    {
+        socket = issued->second;
+    }
+    for (it = m_quicUdpBindingList.begin();
+         socket == nullptr && it != m_quicUdpBindingList.end();
+         ++it)
+    {
+        Ptr<QuicUdpBinding> item = *it;
+        if (item->m_quicSocket->GetConnectionId() == connectionId)
+        {
+            // For loopback, use the receiving UDP socket to disambiguate
+            // between client and server sockets that share the same connection ID.
+            // A binding whose UDP socket is non-null and different from `sock`
+            // means this packet did NOT arrive on that socket's UDP - skip it.
+            if (isLoopback && item->m_budpSocket != nullptr && item->m_budpSocket != sock)
+            {
+                NS_LOG_LOGIC("Skipping socket (UDP socket mismatch) for loopback packet");
+                continue;
+            }
+            // For INITIAL packets on loopback, also skip client sockets
+            if (header.IsInitial() && isLoopback &&
+                item->m_quicSocket->GetSocketState() == QuicSocketBase::CONNECTING_CLT)
+            {
+                NS_LOG_LOGIC("Skipping client socket for loopback INITIAL packet");
+                continue;
+            }
+            socket = item->m_quicSocket;
+            break;
+        }
+    }
+
+    NS_LOG_LOGIC((socket == nullptr));
+
+    if (header.IsInitial() and m_isServer and socket == nullptr)
+    {
+        Ptr<QuicSocketBase> listenerSocket = FindListener(sock);
+        NS_LOG_LOGIC(this << " Cloning listening socket " << listenerSocket);
+        socket = CloneSocket(listenerSocket);
+        SetUpServerConnection(socket, header, connectionId);
+
+        // Store the peer address on the cloned binding for SendTo
+        for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
+        {
+            if ((*bit)->m_quicSocket == socket)
+            {
+                (*bit)->m_peerAddress = from;
+                (*bit)->m_hasPeerAddress = true;
                 break;
             }
         }
 
-        NS_LOG_LOGIC((socket == nullptr));
+        socket->Connect(from);
+        socket->SetupCallback();
 
-        if (header.IsInitial() and m_isServer and socket == nullptr)
+        // Notify the application about the new accepted connection
+        listenerSocket->NotifyNewConnection(socket, from);
+    }
+    else if (header.IsHandshake() and m_isServer and socket != nullptr)
+    {
+        NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Server authenticated Client "
+                     << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
+                     << InetSocketAddress::ConvertFrom(from).GetPort() << "");
+        m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from)
+                                      .GetIpv4()); // add to the list of authenticated sockets
+    }
+    else if (header.IsHandshake() and !m_isServer and socket != nullptr)
+    {
+        NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Client authenticated Server "
+                     << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
+                     << InetSocketAddress::ConvertFrom(from).GetPort() << "");
+        m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from)
+                                      .GetIpv4()); // add to the list of authenticated sockets
+    }
+    else if (header.IsORTT() and m_isServer and socket == nullptr)
+    {
+        auto result = std::find(m_authAddresses.begin(),
+                                m_authAddresses.end(),
+                                InetSocketAddress::ConvertFrom(from).GetIpv4());
+        // check if a 0-RTT is allowed with this endpoint - or if the attribute
+        // m_0RTTHandshakeStart has been forced to be true
+        if (result == m_authAddresses.end() && m_0RTTHandshakeStart)
         {
-            Ptr<QuicSocketBase> listenerSocket = FindListener(sock);
-            NS_LOG_LOGIC(this << " Cloning listening socket " << listenerSocket);
-            socket = CloneSocket(listenerSocket);
-            SetUpServerConnection(socket, header, connectionId);
-
-            // Store the peer address on the cloned binding for SendTo
-            for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
-            {
-                if ((*bit)->m_quicSocket == socket)
-                {
-                    (*bit)->m_peerAddress = from;
-                    (*bit)->m_hasPeerAddress = true;
-                    break;
-                }
-            }
-
-            socket->Connect(from);
-            socket->SetupCallback();
-
-            // Notify the application about the new accepted connection
-            listenerSocket->NotifyNewConnection(socket, from);
+            m_authAddresses.push_back(
+                InetSocketAddress::ConvertFrom(from)
+                    .GetIpv4()); // add to the list of authenticated sockets
         }
-        else if (header.IsHandshake() and m_isServer and socket != nullptr)
+        else if (result == m_authAddresses.end() && !m_0RTTHandshakeStart)
         {
-            NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Server authenticated Client "
-                         << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                         << InetSocketAddress::ConvertFrom(from).GetPort() << "");
-            m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from)
-                                          .GetIpv4()); // add to the list of authenticated sockets
+            NS_LOG_WARN(this << " CONNECTION ABORTED: 0RTT Packet from unauthenticated address "
+                             << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
+                             << InetSocketAddress::ConvertFrom(from).GetPort());
+            return;
         }
-        else if (header.IsHandshake() and !m_isServer and socket != nullptr)
+
+        NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Server authenticated Client "
+                     << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
+                     << InetSocketAddress::ConvertFrom(from).GetPort() << "");
+        Ptr<QuicSocketBase> orttListener = FindListener(sock);
+        NS_LOG_LOGIC(this << " Cloning listening socket " << orttListener);
+        socket = CloneSocket(orttListener);
+        SetUpServerConnection(socket, header, connectionId);
+
+        // Store the peer address on the cloned binding for SendTo
+        for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
         {
-            NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Client authenticated Server "
-                         << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                         << InetSocketAddress::ConvertFrom(from).GetPort() << "");
-            m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from)
-                                          .GetIpv4()); // add to the list of authenticated sockets
-        }
-        else if (header.IsORTT() and m_isServer and socket == nullptr)
-        {
-            auto result = std::find(m_authAddresses.begin(),
-                                    m_authAddresses.end(),
-                                    InetSocketAddress::ConvertFrom(from).GetIpv4());
-            // check if a 0-RTT is allowed with this endpoint - or if the attribute
-            // m_0RTTHandshakeStart has been forced to be true
-            if (result == m_authAddresses.end() && m_0RTTHandshakeStart)
+            if ((*bit)->m_quicSocket == socket)
             {
-                m_authAddresses.push_back(
-                    InetSocketAddress::ConvertFrom(from)
-                        .GetIpv4()); // add to the list of authenticated sockets
-            }
-            else if (result == m_authAddresses.end() && !m_0RTTHandshakeStart)
-            {
-                NS_LOG_WARN(this << " CONNECTION ABORTED: 0RTT Packet from unauthenticated address "
-                                 << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                                 << InetSocketAddress::ConvertFrom(from).GetPort());
-                continue;
-            }
-
-            NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Server authenticated Client "
-                         << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                         << InetSocketAddress::ConvertFrom(from).GetPort() << "");
-            Ptr<QuicSocketBase> orttListener = FindListener(sock);
-            NS_LOG_LOGIC(this << " Cloning listening socket " << orttListener);
-            socket = CloneSocket(orttListener);
-            SetUpServerConnection(socket, header, connectionId);
-
-            // Store the peer address on the cloned binding for SendTo
-            for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
-            {
-                if ((*bit)->m_quicSocket == socket)
-                {
-                    (*bit)->m_peerAddress = from;
-                    (*bit)->m_hasPeerAddress = true;
-                    break;
-                }
-            }
-
-            socket->Connect(from);
-            socket->SetupCallback();
-
-            // A 0-RTT connection is accepted like a 1-RTT one: the application
-            // must learn about the new socket before data is delivered on it
-            orttListener->NotifyNewConnection(socket, from);
-        }
-        else if (header.IsShort() && socket == nullptr)
-        {
-            // msquic QuicBindingReceive: a short header packet without a connection is answered
-            // with a stateless reset by a server; a client checks it against the reset tokens it
-            // knows
-            if (m_isServer)
-            {
-                SendStatelessReset(sock, from, header, packet);
-            }
-            else
-            {
-                ReceiveStatelessReset(packet);
-            }
-            continue;
-        }
-        else if (header.IsShort())
-        {
-            // Auto-authenticate loopback and local addresses for SHORT packets
-            if (IsLocalAddress(srcIp))
-            {
-                auto authResult = std::find(m_authAddresses.begin(), m_authAddresses.end(), srcIp);
-                if (authResult == m_authAddresses.end())
-                {
-                    NS_LOG_LOGIC("Auto-authenticating local address " << srcIp);
-                    m_authAddresses.push_back(srcIp);
-                }
-            }
-
-            auto result = std::find(m_authAddresses.begin(),
-                                    m_authAddresses.end(),
-                                    InetSocketAddress::ConvertFrom(from).GetIpv4());
-
-            if (result == m_authAddresses.end() && socket != nullptr &&
-                (socket->GetSocketState() == QuicSocketBase::OPEN ||
-                 socket->GetSocketState() == QuicSocketBase::CONNECTING_SVR))
-            {
-                // an established connection whose peer moved to another address: the packet carries
-                // one of the connection ids of that connection, and path validation (RFC 9000 s8.2)
-                // decides the rest
-                m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from).GetIpv4());
-            }
-            else if (result == m_authAddresses.end() && m_0RTTHandshakeStart)
-            {
-                m_authAddresses.push_back(
-                    InetSocketAddress::ConvertFrom(from)
-                        .GetIpv4()); // add to the list of authenticated sockets
-            }
-            else if (result == m_authAddresses.end() && !m_0RTTHandshakeStart)
-            {
-                NS_LOG_WARN(
-                    this << " CONNECTION ABORTED: Short Packet from unauthenticated address "
-                         << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                         << InetSocketAddress::ConvertFrom(from).GetPort());
-                continue;
+                (*bit)->m_peerAddress = from;
+                (*bit)->m_hasPeerAddress = true;
+                break;
             }
         }
 
-        // Handle callback for the correct socket
-        if (socket == nullptr)
+        socket->Connect(from);
+        socket->SetupCallback();
+
+        // A 0-RTT connection is accepted like a 1-RTT one: the application
+        // must learn about the new socket before data is delivered on it
+        orttListener->NotifyNewConnection(socket, from);
+    }
+    else if (header.IsShort() && socket == nullptr)
+    {
+        // msquic QuicBindingReceive: a short header packet without a connection is answered
+        // with a stateless reset by a server; a client checks it against the reset tokens it
+        // knows
+        if (m_isServer)
         {
-            NS_LOG_WARN(this << " no matching socket for connection ID " << connectionId
-                             << ", dropping packet");
-            continue;
-        }
-        if (header.IsShort())
-        {
-            // the path of the packet: its remote address and the UDP socket it arrived on
-            if (!socket->OnPacketOnPath(sock,
-                                        from,
-                                        datagramSize,
-                                        header.GetDestinationConnectionId()))
-            {
-                continue;
-            }
-        }
-        if (header.HasAeadTag())
-        {
-            if (packet->GetSize() < QUIC_AEAD_TAG_SIZE)
-            {
-                NS_LOG_WARN(this << " dropping a packet shorter than its AEAD tag");
-                continue;
-            }
-            QuicAeadTrailer tag;
-            packet->RemoveTrailer(tag);
-        }
-        if (!m_socketHandlers[socket].IsNull())
-        {
-            NS_LOG_LOGIC(this << " waking up handler of socket " << socket);
-            m_socketHandlers[socket](packet, header, from);
+            SendStatelessReset(sock, from, header, packet);
         }
         else
         {
-            NS_LOG_WARN(this << " no handler for socket " << socket);
+            ReceiveStatelessReset(packet);
+        }
+        return;
+    }
+    else if (header.IsShort())
+    {
+        // Auto-authenticate loopback and local addresses for SHORT packets
+        if (IsLocalAddress(srcIp))
+        {
+            auto authResult = std::find(m_authAddresses.begin(), m_authAddresses.end(), srcIp);
+            if (authResult == m_authAddresses.end())
+            {
+                NS_LOG_LOGIC("Auto-authenticating local address " << srcIp);
+                m_authAddresses.push_back(srcIp);
+            }
+        }
+
+        auto result = std::find(m_authAddresses.begin(),
+                                m_authAddresses.end(),
+                                InetSocketAddress::ConvertFrom(from).GetIpv4());
+
+        if (result == m_authAddresses.end() && socket != nullptr &&
+            (socket->GetSocketState() == QuicSocketBase::OPEN ||
+             socket->GetSocketState() == QuicSocketBase::CONNECTING_SVR))
+        {
+            // an established connection whose peer moved to another address: the packet carries
+            // one of the connection ids of that connection, and path validation (RFC 9000 s8.2)
+            // decides the rest
+            m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from).GetIpv4());
+        }
+        else if (result == m_authAddresses.end() && m_0RTTHandshakeStart)
+        {
+            m_authAddresses.push_back(
+                InetSocketAddress::ConvertFrom(from)
+                    .GetIpv4()); // add to the list of authenticated sockets
+        }
+        else if (result == m_authAddresses.end() && !m_0RTTHandshakeStart)
+        {
+            NS_LOG_WARN(
+                this << " CONNECTION ABORTED: Short Packet from unauthenticated address "
+                     << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
+                     << InetSocketAddress::ConvertFrom(from).GetPort());
+            return;
         }
     }
+
+    // Handle callback for the correct socket
+    if (socket == nullptr)
+    {
+        NS_LOG_WARN(this << " no matching socket for connection ID " << connectionId
+                         << ", dropping packet");
+        return;
+    }
+    if (header.IsShort())
+    {
+        // the path of the packet: its remote address and the UDP socket it arrived on
+        if (!socket->OnPacketOnPath(sock,
+                                    from,
+                                    datagramSize,
+                                    header.GetDestinationConnectionId()))
+        {
+            return;
+        }
+    }
+    if (header.HasAeadTag())
+    {
+        if (packet->GetSize() < QUIC_AEAD_TAG_SIZE)
+        {
+            NS_LOG_WARN(this << " dropping a packet shorter than its AEAD tag");
+            return;
+        }
+        QuicAeadTrailer tag;
+        packet->RemoveTrailer(tag);
+    }
+    if (!m_socketHandlers[socket].IsNull())
+    {
+        NS_LOG_LOGIC(this << " waking up handler of socket " << socket);
+        m_socketHandlers[socket](packet, header, from);
+    }
+    else
+    {
+        NS_LOG_WARN(this << " no handler for socket " << socket);
+    }
+
 }
 
 namespace
@@ -950,24 +986,39 @@ QuicL4Protocol::GetPath(Ptr<QuicSocketBase> socket, Ptr<Socket>& udp, Address& r
 }
 
 Ptr<Packet>
-QuicL4Protocol::BuildDatagram(const QuicHeader& head, Ptr<Packet> payload) const
+QuicL4Protocol::BuildDatagram(const QuicHeader& head,
+                              Ptr<Packet> payload,
+                              uint32_t minDatagramSize) const
 {
-    Ptr<Packet> datagram = payload->Copy();
-    if (head.HasPacketNumber() && datagram->GetSize() + head.GetPacketNumberLength() < 4)
+    Ptr<Packet> frames = payload->Copy();
+    const uint32_t tag = head.HasAeadTag() ? QUIC_AEAD_TAG_SIZE : 0;
+    if (head.HasPacketNumber() && frames->GetSize() + head.GetPacketNumberLength() < 4)
     {
         // RFC 9001 Section 5.4.2: the packet number and the protected payload, which includes the
         // tag, have to be at least 4 bytes longer than the header protection sample (16 bytes):
         // PADDING fills the packet up to that
-        datagram->AddAtEnd(Create<Packet>(4 - head.GetPacketNumberLength() - datagram->GetSize()));
+        frames->AddAtEnd(Create<Packet>(4 - head.GetPacketNumberLength() - frames->GetSize()));
     }
+
+    QuicHeader header = head;
+    if (minDatagramSize > 0 && head.HasPacketNumber())
+    {
+        // RFC 9000 Section 14.1: the datagram is expanded with PADDING frames, which go before the
+        // tag
+        header.SetPayloadSize(frames->GetSize() + tag);
+        const uint32_t total = header.GetSerializedSize() + frames->GetSize() + tag;
+        if (total < minDatagramSize)
+        {
+            frames->AddAtEnd(Create<Packet>(minDatagramSize - total));
+        }
+    }
+    header.SetPayloadSize(frames->GetSize() + tag);
     if (head.HasAeadTag())
     {
-        datagram->AddTrailer(QuicAeadTrailer());
+        frames->AddTrailer(QuicAeadTrailer());
     }
-    QuicHeader header = head;
-    header.SetPayloadSize(datagram->GetSize());
-    datagram->AddHeader(header);
-    return datagram;
+    frames->AddHeader(header);
+    return frames;
 }
 
 void
@@ -1302,7 +1353,8 @@ QuicL4Protocol::Receive(Ptr<Packet> packet,
 void
 QuicL4Protocol::SendPacket(Ptr<QuicSocketBase> socket,
                            Ptr<Packet> pkt,
-                           const QuicHeader& outgoing) const
+                           const QuicHeader& outgoing,
+                           uint32_t minDatagramSize) const
 {
     NS_LOG_FUNCTION(this << socket);
     NS_LOG_LOGIC(this << " sending seq " << outgoing.GetPacketNumber() << " data size "
@@ -1313,11 +1365,47 @@ QuicL4Protocol::SendPacket(Ptr<QuicSocketBase> socket,
     // Given the presence of multiple subheaders in pkt,
     // we create a new packet, add the new QUIC header and
     // then add pkt as payload
-    Ptr<Packet> packetSent = BuildDatagram(outgoing, pkt);
-    // NS_LOG_INFO ("" );
-    // packetSent->Print (std::clog);
-    // NS_LOG_INFO ("");
+    Ptr<Packet> packetSent =
+        BuildDatagram(outgoing,
+                      pkt,
+                      std::max(minDatagramSize,
+                               outgoing.IsInitial() ? socket->GetInitialPacketSize() : 0));
+    SendBytes(socket, packetSent);
+}
 
+void
+QuicL4Protocol::SendDatagram(
+    Ptr<QuicSocketBase> socket,
+    const std::vector<std::pair<QuicHeader, Ptr<Packet>>>& packets,
+    uint32_t minDatagramSize) const
+{
+    NS_LOG_FUNCTION(this << socket << packets.size());
+    NS_ASSERT_MSG(!packets.empty(), "a datagram has at least one packet");
+
+    // RFC 9000 Section 12.2: the packets go one after the other, a short header packet last; the
+    // last packet is the one that PADDING frames expand, as it has a Length of its own to change
+    Ptr<Packet> datagram;
+    for (size_t k = 0; k < packets.size(); ++k)
+    {
+        const bool last = k + 1 == packets.size();
+        const uint32_t before = datagram ? datagram->GetSize() : 0;
+        const uint32_t pad = last && minDatagramSize > before ? minDatagramSize - before : 0;
+        Ptr<Packet> packet = BuildDatagram(packets[k].first, packets[k].second, pad);
+        if (datagram)
+        {
+            datagram->AddAtEnd(packet);
+        }
+        else
+        {
+            datagram = packet;
+        }
+    }
+    SendBytes(socket, datagram);
+}
+
+void
+QuicL4Protocol::SendBytes(Ptr<QuicSocketBase> socket, Ptr<Packet> datagram) const
+{
     QuicUdpBindingList::const_iterator it;
     for (it = m_quicUdpBindingList.begin(); it != m_quicUdpBindingList.end(); ++it)
     {
@@ -1328,11 +1416,11 @@ QuicL4Protocol::SendPacket(Ptr<QuicSocketBase> socket,
             {
                 // Cloned server socket: use SendTo with explicit peer address
                 // to avoid depending on the shared UDP socket's connected state
-                item->m_budpSocket->SendTo(packetSent, 0, item->m_peerAddress);
+                item->m_budpSocket->SendTo(datagram, 0, item->m_peerAddress);
             }
             else
             {
-                UdpSend(item->m_budpSocket, packetSent, 0);
+                UdpSend(item->m_budpSocket, datagram, 0);
             }
             break;
         }

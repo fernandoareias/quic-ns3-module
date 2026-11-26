@@ -1253,7 +1253,7 @@ QuicSocketBase::SendPendingData(bool withAck)
         // (QuicPathSetAllowance). While a challenge is pending on the path, data leaves the reserve
         // alone: it is what repeats a lost challenge (see SendPathChallenge), and nothing else
         // replenishes the allowance if the peer has nothing to send
-        uint32_t s = GetSegSize();
+        uint32_t s = GetPacketBudget();
         if (!m_paths.empty() && !m_paths.front().validated)
         {
             uint64_t room = m_paths.front().allowance;
@@ -1324,7 +1324,7 @@ QuicSocketBase::SetSegSize(uint32_t size)
     // Update minimum congestion window
     m_tcb->m_kMinimumWindow = 2 * size;
     // RFC 9002 §7.2: initial_cwnd = min(10*max_datagram_size, max(14720, 2*max_datagram_size))
-    uint32_t rfcInitialCwnd = std::min(10 * size, std::max((uint32_t)14720, 2 * size));
+    uint32_t rfcInitialCwnd = InitialWindow(size);
     m_tcb->m_initialCWnd = rfcInitialCwnd;
 }
 
@@ -1681,7 +1681,10 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
             (wire >= m_paths.front().allowance) ? 0 : m_paths.front().allowance - wire;
     }
     m_lastPacketSent = Simulator::Now();
-    m_quicl4->SendPacket(this, p, head);
+    // a probe of a new path is expanded to 1200 bytes (RFC 9000 Section 8.2.1)
+    const uint32_t minDatagram = m_padNextPacket ? MIN_INITIAL_PACKET_SIZE : 0;
+    m_padNextPacket = false;
+    m_quicl4->SendPacket(this, p, head, minDatagram);
     m_txTrace(p, head, this);
     NotifyDataSent(sz);
 
@@ -1902,7 +1905,8 @@ QuicSocketBase::DoRetransmit(std::vector<Ptr<QuicSocketTxItem>> lostPackets, boo
         {
             dataBudget = std::min(dataBudget, win);
         }
-        uint32_t sendSize = std::min(dataBudget + PendingAckFrameSize(m_connected), GetSegSize());
+        uint32_t sendSize =
+            std::min(dataBudget + PendingAckFrameSize(m_connected), GetPacketBudget());
         SequenceNumber32 pn = next;
         if (!first)
         {
@@ -2139,7 +2143,7 @@ QuicSocketBase::ReTxTimeout()
         while (probes > 0 && m_txBuffer->AppSize() > 0)
         {
             SequenceNumber32 next = ++m_tcb->m_nextTxSequence;
-            SendDataPacket(next, GetSegSize(), m_connected);
+            SendDataPacket(next, GetPacketBudget(), m_connected);
             probes--;
         }
         if (probes > 0)
@@ -2159,7 +2163,7 @@ QuicSocketBase::ReTxTimeout()
             // would not have to answer)
             SendControlFrame(QuicSubheader::CreatePing());
             SequenceNumber32 next = ++m_tcb->m_nextTxSequence;
-            SendDataPacket(next, GetSegSize(), m_connected);
+            SendDataPacket(next, GetPacketBudget(), m_connected);
             probes--;
         }
         if (m_tcb->m_rtoCount == 0)
@@ -2638,12 +2642,8 @@ QuicSocketBase::SendInitialHandshake(uint8_t type, const QuicHeader& quicHeader,
         NS_LOG_INFO("Create INITIAL");
         Ptr<Packet> p = Create<Packet>();
         p->AddHeader(OnSendingTransportParameters());
-        // the RFC says that
-        // "Clients MUST ensure that the first Initial packet they
-        // send is sent in a UDP datagram that is at least 1200 octets."
-        Ptr<Packet> payload = Create<Packet>(GetInitialPacketSize() - p->GetSize());
-        p->AddAtEnd(payload);
-
+        // RFC 9000 Section 14.1: a client expands the datagram of an Initial packet to 1200 bytes
+        // or more: the datagram is padded with PADDING frames when it is built (QuicL4Protocol)
         m_quicl5->DispatchSend(p, QuicStream::HANDSHAKE_STREAM_ID);
     }
     else if (type == QuicHeader::RETRY)
@@ -3453,7 +3453,7 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
             m_tcb->m_segmentSize = newSeg;
             m_tcb->m_kMinimumWindow = 2 * newSeg;
             // RFC 9002 s7.2 / msquic: 10 datagrams
-            m_tcb->m_initialCWnd = std::min(10 * newSeg, std::max((uint32_t)14720, 2 * newSeg));
+            m_tcb->m_initialCWnd = InitialWindow(newSeg);
             if (m_tcb->m_cWnd.Get() == oldInitial)
             {
                 m_tcb->m_cWnd = m_tcb->m_initialCWnd;
@@ -3705,18 +3705,9 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
             return;
         }
 
-        if (p->GetSize() < QuicSocketBase::MIN_INITIAL_PACKET_SIZE)
-        {
-            std::stringstream error;
-            error << "Initial Packet smaller than " << QuicSocketBase::MIN_INITIAL_PACKET_SIZE
-                  << " octects";
-            AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
-                            error.str().c_str());
-            return;
-        }
-
-        // RFC 9000 §8: track bytes received for anti-amplification
-        m_bytesReceivedPreValidation += p->GetSize();
+        // RFC 9000 §8: track bytes received for anti-amplification: the whole datagram
+        m_bytesReceivedPreValidation +=
+            quicHeader.GetSerializedSize() + p->GetSize() + QUIC_AEAD_TAG_SIZE;
 
         // The client Initial carries its transport parameters (stream 0)
         m_receivedTransportParameters = false;
@@ -4557,6 +4548,24 @@ QuicSocketBase::FinishStream(uint64_t streamId)
 // ------------------------------------------------------------------------------------------------
 
 uint32_t
+QuicSocketBase::InitialWindow(uint32_t datagramData)
+{
+    // RFC 9002 Section 7.2: 10 datagrams, at least 14720 bytes and at least two datagrams
+    return std::min(10 * datagramData, std::max<uint32_t>(14720, 2 * datagramData));
+}
+
+uint32_t
+QuicSocketBase::GetPacketBudget(void) const
+{
+    // MaxPacketSize and the segment size assume a short header with an 8-byte connection id and a
+    // packet number of 4 bytes, and the tag: a longer id leaves that much less for the frames
+    const uint32_t standard = 1 + 8 + 4 + QUIC_AEAD_TAG_SIZE;
+    const uint32_t actual = ShortPacketOverhead();
+    const uint32_t segment = m_tcb->m_segmentSize;
+    return actual > standard ? segment - std::min(segment, actual - standard) : segment;
+}
+
+uint32_t
 QuicSocketBase::ShortPacketOverhead(void) const
 {
     // first byte, destination connection id, packet number of 4 bytes and AEAD tag
@@ -5059,7 +5068,7 @@ QuicSocketBase::ActivatePath(size_t index)
     uint32_t maxSeg = now.maxSeg ? now.maxSeg : m_pmtudMaxSeg;
     m_tcb->m_segmentSize = seg;
     m_tcb->m_kMinimumWindow = 2 * seg;
-    m_tcb->m_initialCWnd = std::min(10 * seg, std::max((uint32_t)14720, 2 * seg));
+    m_tcb->m_initialCWnd = InitialWindow(seg);
     m_pmtudMaxSeg = maxSeg;
     m_pmtudSearchDone = true; // the search starts when the path is validated
     m_pmtudStarted = true;
@@ -5167,9 +5176,9 @@ QuicSocketBase::Migrate(const Address& newLocal)
     // 1200 bytes: the peer may send only three times what it receives on a path it has not
     // validated, and a bare PING would leave it room for a single PATH_CHALLENGE, so that one lost
     // challenge (or response) could never be repeated
-    Ptr<Packet> probe =
-        Create<Packet>(MIN_INITIAL_PACKET_SIZE - 11); // 11: the PING and the short header
+    Ptr<Packet> probe = Create<Packet>(0);
     probe->AddHeader(QuicSubheader::CreatePing());
+    m_padNextPacket = true;
     AppendingTx(probe);
     return true;
 }

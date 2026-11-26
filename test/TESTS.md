@@ -11,8 +11,8 @@ build/utils/ns3-dev-test-runner-debug --suite=quic-features --verbose   # 57 cas
 Two more suites cover the wire format with the vectors of the RFCs: `quic-wire` (variable-length
 integers, connection ids, packet numbers and the packet headers, with the unprotected packets of
 RFC 9001 Appendix A) `quic-frames` (the bytes of every frame, frames that are not valid, and what a
-receiver does with them in a live connection) and `quic-streams` (final size, copies of data that was
-read, RESET_STREAM after the data).
+receiver does with them in a live connection) `quic-streams` (final size, copies of data that was read, RESET_STREAM
+after the data) and `quic-datagrams` (several packets in one datagram, padding to a minimum size).
 
 Two tools check the module from outside the test runner:
 

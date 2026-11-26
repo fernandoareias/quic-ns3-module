@@ -461,7 +461,7 @@ QuicL5Protocol::SetConnectionId(const QuicConnectionId& connId)
 uint16_t
 QuicL5Protocol::GetMaxPacketSize() const
 {
-    return m_socket->GetSegSize();
+    return m_socket->GetPacketBudget();
 }
 
 bool

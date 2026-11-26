@@ -2424,11 +2424,14 @@ class QuicPathValidationLossTestCase : public TestCase
         Simulator::Schedule(Seconds(0.1), [this, &ifs]() {
             m_client->Connect(InetSocketAddress(ifs.GetAddress(0), 4433));
         });
-        Simulator::Schedule(Seconds(1.0), [this]() {
+        Simulator::Schedule(Seconds(1.0), [this, dev]() {
             Ptr<QuicSocketBase> c = DynamicCast<QuicSocketBase>(m_client);
             c->TraceConnectWithoutContext(
                 "Tx",
                 MakeCallback(&QuicPathValidationLossTestCase::OnClientTx, this));
+            dev.Get(1)->TraceConnectWithoutContext(
+                "PhyTxEnd",
+                MakeCallback(&QuicPathValidationLossTestCase::OnClientPhyTx, this));
             m_moved = c->Migrate(InetSocketAddress(Ipv4Address("10.9.12.77"), 0));
         });
         Simulator::Schedule(Seconds(1.5), [this]() { Write(kSecond); });
@@ -2470,11 +2473,18 @@ class QuicPathValidationLossTestCase : public TestCase
     }
 
     // the first packet the client sends after it moved: the probe of the new path
-    void OnClientTx(Ptr<const Packet> p, const QuicHeader& h, Ptr<const QuicSocketBase>)
+    void OnClientTx(Ptr<const Packet>, const QuicHeader&, Ptr<const QuicSocketBase>)
     {
-        if (m_firstProbe == 0)
+        m_probeSent = true;
+    }
+
+    // the datagram of that packet on the wire: the UDP payload is what the device carries less the
+    // 2 bytes of PPP, the IPv4 header and the UDP header
+    void OnClientPhyTx(Ptr<const Packet> p)
+    {
+        if (m_probeSent && m_firstProbe == 0)
         {
-            m_firstProbe = p->GetSize() + h.GetSerializedSize();
+            m_firstProbe = p->GetSize() - 2 - 20 - 8;
         }
     }
 
@@ -2499,6 +2509,7 @@ class QuicPathValidationLossTestCase : public TestCase
     uint32_t m_drops;
     uint32_t m_rx{0};
     uint32_t m_firstProbe{0};
+    bool m_probeSent{false}; //!< the client sent its first packet after it moved
     bool m_moved{false};
     Ptr<Socket> m_listen;
     Ptr<Socket> m_server;
