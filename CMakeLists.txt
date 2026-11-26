@@ -65,5 +65,6 @@ build_lib(
                       ${libpoint-to-point}
     TEST_SOURCES test/quic-test-suite.cc
                  test/quic-features-test-suite.cc
+                 test/quic-gaps-test-suite.cc
                  ${examples_as_tests_sources}
 )
