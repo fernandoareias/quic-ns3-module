@@ -668,6 +668,26 @@ QuicHeader::IsORTT() const
     return IsLong() && m_type == ZRTT_PROTECTED;
 }
 
+QuicPacketType
+QuicHeader::GetPacketType() const
+{
+    if (IsShort())
+    {
+        return QuicPacketType::ONE_RTT;
+    }
+    switch (m_type)
+    {
+    case INITIAL:
+        return QuicPacketType::INITIAL;
+    case ZRTT_PROTECTED:
+        return QuicPacketType::ZERO_RTT;
+    case HANDSHAKE:
+        return QuicPacketType::HANDSHAKE;
+    default:
+        NS_ABORT_MSG("Version Negotiation and Retry packets carry no frames");
+    }
+}
+
 bool
 QuicHeader::HasPacketNumber() const
 {

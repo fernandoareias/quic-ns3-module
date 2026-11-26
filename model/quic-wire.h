@@ -33,6 +33,15 @@ constexpr uint64_t QUIC_VARINT_MAX = (1ULL << 62) - 1;
  */
 typedef SequenceNumber<uint64_t, 62> QuicPacketNumber;
 
+/** The packet types that decide which frames a packet may carry (RFC 9000, Section 12.4). */
+enum class QuicPacketType : uint8_t
+{
+    INITIAL,   //!< Initial packet
+    ZERO_RTT,  //!< 0-RTT packet
+    HANDSHAKE, //!< Handshake packet
+    ONE_RTT    //!< short header packet
+};
+
 /** QUIC version 2 (RFC 9369, Section 3.1). */
 constexpr uint32_t QUIC_VERSION_2 = 0x6b3343cf;
 

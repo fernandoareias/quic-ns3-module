@@ -389,6 +389,12 @@ class QuicHeader : public Header
     /** @return true for a 0-RTT packet. */
     bool IsORTT() const;
 
+    /**
+     * @return the packet type that decides which frames the packet may carry. Version Negotiation
+     * and Retry packets carry no frames: asking for their type is an error.
+     */
+    QuicPacketType GetPacketType() const;
+
     /** @return true when the packet has a packet number: every packet but Version Negotiation and
      * Retry. */
     bool HasPacketNumber() const;

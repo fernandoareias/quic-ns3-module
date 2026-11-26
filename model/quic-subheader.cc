@@ -1355,6 +1355,29 @@ QuicSubheader::HasLengthField() const
     return m_frameType == CRYPTO || (IsStream() && (m_frameType & 0x02));
 }
 
+bool
+QuicSubheader::IsAllowedIn(QuicPacketType type) const
+{
+    const bool early = type == QuicPacketType::ZERO_RTT || type == QuicPacketType::ONE_RTT;
+    switch (m_frameType)
+    {
+    case PADDING:
+    case PING:
+        return true;
+    case ACK:
+    case ACK_ECN:
+    case CRYPTO:
+    case CONNECTION_CLOSE:
+        return type != QuicPacketType::ZERO_RTT;
+    case NEW_TOKEN:
+    case PATH_RESPONSE:
+    case HANDSHAKE_DONE:
+        return type == QuicPacketType::ONE_RTT;
+    default:
+        return early;
+    }
+}
+
 uint64_t
 QuicSubheader::GetPayloadLength(uint64_t remaining) const
 {

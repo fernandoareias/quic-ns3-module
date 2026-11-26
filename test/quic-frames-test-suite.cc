@@ -424,6 +424,58 @@ class FramesWireTest : public TestCase
 };
 
 /**
+ * The frames each packet type may carry (RFC 9000, Section 12.4, Table 3).
+ */
+class FramesAllowedTest : public TestCase
+{
+  public:
+    FramesAllowedTest()
+        : TestCase("frames: the packet types that may carry each frame (RFC 9000 s12.4)")
+    {
+    }
+
+  private:
+    void Expect(const char* what, const QuicSubheader& frame, const std::string& types)
+    {
+        // I Initial, Z 0-RTT, H Handshake, O 1-RTT
+        const std::pair<char, QuicPacketType> all[] = {{'I', QuicPacketType::INITIAL},
+                                                       {'Z', QuicPacketType::ZERO_RTT},
+                                                       {'H', QuicPacketType::HANDSHAKE},
+                                                       {'O', QuicPacketType::ONE_RTT}};
+        for (const auto& type : all)
+        {
+            NS_TEST_ASSERT_MSG_EQ(frame.IsAllowedIn(type.second),
+                                  types.find(type.first) != std::string::npos,
+                                  what << " in a packet of type " << type.first);
+        }
+    }
+
+    void DoRun() override
+    {
+        std::vector<uint64_t> none;
+        Expect("PADDING", QuicSubheader::CreatePadding(), "IZHO");
+        Expect("PING", QuicSubheader::CreatePing(), "IZHO");
+        Expect("ACK", QuicSubheader::CreateAck(5, 0, 5, none, none), "IHO");
+        Expect("CRYPTO", QuicSubheader::CreateCrypto(0, 10), "IHO");
+        Expect("CONNECTION_CLOSE", QuicSubheader::CreateConnectionClose(0, "x"), "IHO");
+        Expect("CONNECTION_CLOSE (application)",
+               QuicSubheader::CreateApplicationClose(0, "x"),
+               "ZO");
+        Expect("NEW_TOKEN", QuicSubheader::CreateNewToken({1}), "O");
+        Expect("PATH_RESPONSE", QuicSubheader::CreatePathResponse(1), "O");
+        Expect("HANDSHAKE_DONE", QuicSubheader::CreateHandshakeDone(), "O");
+        Expect("STREAM", QuicSubheader::CreateStreamSubHeader(0, 0, 1, false, true, false), "ZO");
+        Expect("RESET_STREAM", QuicSubheader::CreateRstStream(0, 0, 0), "ZO");
+        Expect("MAX_DATA", QuicSubheader::CreateMaxData(1), "ZO");
+        Expect("NEW_CONNECTION_ID",
+               QuicSubheader::CreateNewConnectionId(1, 0, QuicConnectionId::FromUint64(1), 0, 0),
+               "ZO");
+        Expect("PATH_CHALLENGE", QuicSubheader::CreatePathChallenge(1), "ZO");
+        Expect("ACK_FREQUENCY", QuicSubheader::CreateAckFrequency(1, 2, 1000, 1), "ZO");
+    }
+};
+
+/**
  * Frames that are not valid are recognized, whatever bytes they are cut from.
  */
 class FramesInvalidTest : public TestCase
@@ -611,6 +663,7 @@ class QuicFramesTestSuite : public TestSuite
         : TestSuite("quic-frames", Type::UNIT)
     {
         AddTestCase(new FramesWireTest, TestCase::Duration::QUICK);
+        AddTestCase(new FramesAllowedTest, TestCase::Duration::QUICK);
         AddTestCase(new FramesInvalidTest, TestCase::Duration::QUICK);
         // a PING in place of the data: the connection stays open (control of the cases below)
         AddTestCase(new FramesReceivedTest("a PING in a packet changes nothing", {0x01}, true, 0),

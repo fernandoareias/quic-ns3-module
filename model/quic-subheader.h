@@ -13,6 +13,7 @@
 #define QUICSUBHEADER_H
 
 #include "quic-connection-id.h"
+#include "quic-wire.h"
 
 #include "ns3/buffer.h"
 #include "ns3/header.h"
@@ -964,6 +965,17 @@ class QuicSubheader : public Header
     {
         return m_token;
     }
+
+    /**
+     * Whether a packet of a type may carry the frame (RFC 9000, Section 12.4, Table 3): PADDING
+     * and PING anywhere, ACK and CRYPTO not in 0-RTT, a transport CONNECTION_CLOSE in all but
+     * 0-RTT and an application one only in 0-RTT and 1-RTT, NEW_TOKEN, PATH_RESPONSE and
+     * HANDSHAKE_DONE only in 1-RTT, and the other frames in 0-RTT and 1-RTT.
+     *
+     * @param type the packet type.
+     * @return true when the frame is allowed.
+     */
+    bool IsAllowedIn(QuicPacketType type) const;
 
     /** @return true for a CRYPTO frame. */
     bool IsCrypto() const
