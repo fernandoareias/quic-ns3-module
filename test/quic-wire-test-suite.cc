@@ -10,16 +10,20 @@
  * QUIC ns-3 module - wire layer suite ("quic-wire").
  *
  * The building blocks of the wire format with the vectors of the RFCs: variable-length integers
- * (RFC 9000, Section 16 and Appendix A.1) and connection ids (RFC 9000, Section 5.1).
+ * (RFC 9000, Section 16 and Appendix A.1), connection ids (RFC 9000, Section 5.1), packet numbers
+ * (RFC 9000, Appendix A.2 and A.3) and the packet headers (RFC 8999, RFC 9000, Section 17), with
+ * the unprotected packets of RFC 9001 Appendix A and the examples of RFC 9369.
  */
 
 #include "../model/quic-connection-id.h"
+#include "../model/quic-header.h"
 #include "../model/quic-wire.h"
 
 #include "ns3/buffer.h"
 #include "ns3/test.h"
 
 #include <sstream>
+#include <string>
 #include <vector>
 
 using namespace ns3;
@@ -182,6 +186,318 @@ class QuicWireConnectionIdTest : public TestCase
     }
 };
 
+/**
+ * Bytes of a header.
+ *
+ * @param header the header.
+ * @return the bytes it serializes to.
+ */
+std::vector<uint8_t>
+HeaderBytes(const QuicHeader& header)
+{
+    Buffer buffer;
+    buffer.AddAtStart(header.GetSerializedSize());
+    header.Serialize(buffer.Begin());
+    std::vector<uint8_t> bytes(buffer.GetSize());
+    buffer.CopyData(bytes.data(), bytes.size());
+    return bytes;
+}
+
+/**
+ * Read a header from bytes, followed by other bytes.
+ *
+ * @param bytes the header.
+ * @param extra number of bytes that follow the header.
+ * @param header set to the header read.
+ * @param used set to the number of bytes the header used.
+ * @param shortCidLength length of the destination id of a short header.
+ */
+void
+ReadHeader(const std::vector<uint8_t>& bytes,
+           uint32_t extra,
+           QuicHeader& header,
+           uint32_t& used,
+           uint8_t shortCidLength = 8)
+{
+    Buffer buffer;
+    buffer.AddAtStart(bytes.size() + extra);
+    buffer.Begin().Write(bytes.data(), bytes.size());
+    header.SetShortHeaderConnectionIdLength(shortCidLength);
+    used = header.Deserialize(buffer.Begin());
+}
+
+/**
+ * Parse a string of hexadecimal digits.
+ *
+ * @param text the digits.
+ * @return the bytes.
+ */
+std::vector<uint8_t>
+Hex(const std::string& text)
+{
+    std::vector<uint8_t> bytes;
+    for (size_t k = 0; k + 1 < text.size(); k += 2)
+    {
+        bytes.push_back(static_cast<uint8_t>(std::stoi(text.substr(k, 2), nullptr, 16)));
+    }
+    return bytes;
+}
+
+/**
+ * The headers of RFC 9001 Appendix A, as the unprotected packets of the RFC show them, and the
+ * same Retry and Initial headers in version 2 (RFC 9369, Section 3.2).
+ */
+class QuicWireHeaderVectorsTest : public TestCase
+{
+  public:
+    QuicWireHeaderVectorsTest()
+        : TestCase("header: RFC 9001 appendix A.2, A.3 and A.4, and QUIC version 2")
+    {
+    }
+
+  private:
+    void Expect(const char* what, const QuicHeader& header, const std::vector<uint8_t>& want)
+    {
+        std::vector<uint8_t> got = HeaderBytes(header);
+        NS_TEST_ASSERT_MSG_EQ(got.size(), want.size(), what << ": size");
+        for (size_t k = 0; k < std::min(got.size(), want.size()); ++k)
+        {
+            NS_TEST_ASSERT_MSG_EQ((uint32_t)got[k], (uint32_t)want[k], what << ": byte " << k);
+        }
+        // and the bytes read back as the same header
+        QuicHeader back;
+        uint32_t used = 0;
+        ReadHeader(want, header.GetPayloadSize() + (header.HasPacketNumber() ? 0 : 16), back, used);
+        NS_TEST_ASSERT_MSG_EQ(back.IsValid(), true, what << ": the header read is valid");
+        NS_TEST_ASSERT_MSG_EQ(used, want.size(), what << ": bytes used");
+        NS_TEST_ASSERT_MSG_EQ(back == header, true, what << ": read back");
+    }
+
+    void DoRun() override
+    {
+        // A.2: the client Initial. The Length 0x449e = 1182 is the 4 bytes of the packet number,
+        // 1162 bytes of frames and the 16-byte tag.
+        QuicHeader initial =
+            QuicHeader::CreateInitial(QuicConnectionId(Hex("8394c8f03e515708").data(), 8),
+                                      QuicConnectionId(),
+                                      1,
+                                      QuicPacketNumber(2));
+        initial.SetPacketNumberLength(4);
+        initial.SetPayloadSize(1162 + 16);
+        Expect("A.2 client Initial", initial, Hex("c300000001088394c8f03e5157080000449e00000002"));
+
+        // A.3: the server Initial, 2-byte packet number, Length 0x4075 = 117
+        QuicHeader server =
+            QuicHeader::CreateInitial(QuicConnectionId(),
+                                      QuicConnectionId(Hex("f067a5502a4262b5").data(), 8),
+                                      1,
+                                      QuicPacketNumber(1));
+        server.SetPacketNumberLength(2);
+        server.SetPayloadSize(115);
+        Expect("A.3 server Initial", server, Hex("c1000000010008f067a5502a4262b50040750001"));
+
+        // A.4: Retry, token "token". The four low bits of the first byte are unused (the RFC writes
+        // them as 1).
+        QuicHeader retry =
+            QuicHeader::CreateRetry(QuicConnectionId(),
+                                    QuicConnectionId(Hex("f067a5502a4262b5").data(), 8),
+                                    1,
+                                    {'t', 'o', 'k', 'e', 'n'});
+        std::vector<uint8_t> got = HeaderBytes(retry);
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)(got[0] & 0xf0),
+                              0xf0u,
+                              "Retry: long form, fixed bit, type 3");
+        std::vector<uint8_t> want = Hex("ff000000010008f067a5502a4262b5746f6b656e");
+        NS_TEST_ASSERT_MSG_EQ(got.size(), want.size(), "Retry: size");
+        for (size_t k = 1; k < std::min(got.size(), want.size()); ++k)
+        {
+            NS_TEST_ASSERT_MSG_EQ((uint32_t)got[k], (uint32_t)want[k], "Retry: byte " << k);
+        }
+        QuicHeader back;
+        uint32_t used = 0;
+        ReadHeader(want, 16, back, used);
+        NS_TEST_ASSERT_MSG_EQ(back.IsRetry(), true, "Retry: type");
+        NS_TEST_ASSERT_MSG_EQ(back.GetToken().size(), 5u, "Retry: token length");
+        NS_TEST_ASSERT_MSG_EQ(back.GetSourceConnectionId().ToUint64(),
+                              0xf067a5502a4262b5ULL,
+                              "Retry: source id");
+
+        // version 2 (RFC 9369, Section 3.2): Initial 0b01, 0-RTT 0b10, Handshake 0b11, Retry 0b00
+        const QuicConnectionId cid = QuicConnectionId::FromUint64(0x0102030405060708ULL);
+        auto first = [&](const QuicHeader& header) { return HeaderBytes(header)[0] & 0xf0; };
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(
+                QuicHeader::CreateInitial(cid, cid, QUIC_VERSION_2, QuicPacketNumber(1))),
+            0xd0u,
+            "v2 Initial");
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(QuicHeader::Create0RTT(cid, cid, QUIC_VERSION_2, QuicPacketNumber(1))),
+            0xe0u,
+            "v2 0-RTT");
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(
+                QuicHeader::CreateHandshake(cid, cid, QUIC_VERSION_2, QuicPacketNumber(1))),
+            0xf0u,
+            "v2 Handshake");
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(QuicHeader::CreateRetry(cid, cid, QUIC_VERSION_2, {1})),
+            0xc0u,
+            "v2 Retry");
+        // and version 1: Initial 0b00, 0-RTT 0b01, Handshake 0b10, Retry 0b11
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(QuicHeader::CreateInitial(cid, cid, 1, QuicPacketNumber(1))),
+            0xc0u,
+            "v1 Initial");
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(QuicHeader::Create0RTT(cid, cid, 1, QuicPacketNumber(1))),
+            0xd0u,
+            "v1 0-RTT");
+        NS_TEST_ASSERT_MSG_EQ(
+            (uint32_t)first(QuicHeader::CreateHandshake(cid, cid, 1, QuicPacketNumber(1))),
+            0xe0u,
+            "v1 Handshake");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)first(QuicHeader::CreateRetry(cid, cid, 1, {1})),
+                              0xf0u,
+                              "v1 Retry");
+        QuicHeader v2;
+        uint32_t used2 = 0;
+        ReadHeader(Hex("d36b3343cf0801020304050607080000400100"), 8, v2, used2);
+        NS_TEST_ASSERT_MSG_EQ(v2.IsInitial(), true, "0xd3 with version 2 is an Initial");
+    }
+};
+
+/**
+ * Short headers, Version Negotiation, and the headers that are not valid.
+ */
+class QuicWireHeaderFormsTest : public TestCase
+{
+  public:
+    QuicWireHeaderFormsTest()
+        : TestCase("header: short header, Version Negotiation, packet numbers and invalid headers")
+    {
+    }
+
+  private:
+    void Expect(const char* what, const QuicHeader& header, const std::vector<uint8_t>& want)
+    {
+        std::vector<uint8_t> got = HeaderBytes(header);
+        NS_TEST_ASSERT_MSG_EQ(got.size(), want.size(), what << ": size");
+        for (size_t k = 0; k < std::min(got.size(), want.size()); ++k)
+        {
+            NS_TEST_ASSERT_MSG_EQ((uint32_t)got[k], (uint32_t)want[k], what << ": byte " << k);
+        }
+    }
+
+    void DoRun() override
+    {
+        const QuicConnectionId cid = QuicConnectionId::FromUint64(0x0102030405060708ULL);
+
+        // RFC 9000, Section 17.3.1: 0 | fixed bit | spin | 00 | key phase | packet number length
+        Expect("short, spin and key phase, 1-byte number",
+               QuicHeader::CreateShort(cid, QuicPacketNumber(5), true, true),
+               {0x64, 1, 2, 3, 4, 5, 6, 7, 8, 0x05});
+        // the number of bytes follows the packets the peer has not acknowledged
+        Expect("short, 2-byte number",
+               QuicHeader::CreateShort(cid, QuicPacketNumber(300), false, false),
+               {0x41, 1, 2, 3, 4, 5, 6, 7, 8, 0x01, 0x2c});
+        Expect("short, 1-byte number, the peer is up to date",
+               QuicHeader::CreateShort(cid, QuicPacketNumber(300), false, false, 290),
+               {0x40, 1, 2, 3, 4, 5, 6, 7, 8, 0x2c});
+        Expect("short, 3-byte number",
+               QuicHeader::CreateShort(cid, QuicPacketNumber(70000), false, false),
+               {0x42, 1, 2, 3, 4, 5, 6, 7, 8, 0x01, 0x11, 0x70});
+        // an id of another length
+        const uint8_t twenty[20] = {1,  2,  3,  4,  5,  6,  7,  8,  9,  10,
+                                    11, 12, 13, 14, 15, 16, 17, 18, 19, 20};
+        QuicHeader longId =
+            QuicHeader::CreateShort(QuicConnectionId(twenty, 20), QuicPacketNumber(1));
+        QuicHeader back;
+        uint32_t used = 0;
+        ReadHeader(HeaderBytes(longId), 5, back, used, 20);
+        NS_TEST_ASSERT_MSG_EQ(back.GetDestinationConnectionId() == QuicConnectionId(twenty, 20),
+                              true,
+                              "a 20-byte destination id reads back");
+        NS_TEST_ASSERT_MSG_EQ(back.GetPacketNumber().GetValue(), 1u, "packet number");
+        NS_TEST_ASSERT_MSG_EQ(back.GetPayloadSize(), 5u, "a short header packet runs to the end");
+
+        // Version Negotiation (RFC 8999, Section 6): the connection ids of the client, swapped, and
+        // the versions
+        const QuicConnectionId clientDcid = QuicConnectionId::FromUint64(0xaabbccddeeff0011ULL);
+        std::vector<uint32_t> versions = {1, 0x1a2a3a4a};
+        QuicHeader vn = QuicHeader::CreateVersionNegotiation(cid, clientDcid, versions);
+        Expect("Version Negotiation",
+               vn,
+               Hex("c000000000080102030405060708"
+                   "08aabbccddeeff0011"
+                   "00000001"
+                   "1a2a3a4a"));
+        ReadHeader(HeaderBytes(vn), 0, back, used);
+        NS_TEST_ASSERT_MSG_EQ(back.IsVersionNegotiation(),
+                              true,
+                              "version 0 is Version Negotiation");
+        NS_TEST_ASSERT_MSG_EQ(back.GetSupportedVersions().size(), 2u, "versions listed");
+        NS_TEST_ASSERT_MSG_EQ(back.GetSupportedVersions()[1], 0x1a2a3a4aU, "second version");
+        NS_TEST_ASSERT_MSG_EQ(back.GetSourceConnectionId() == clientDcid, true, "source id");
+
+        // packet number length and recovery (RFC 9000, Appendix A.2 and A.3)
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)QuicPacketNumberLength(0, -1), 1u, "first packet");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)QuicPacketNumberLength(255, 250), 1u, "6 in flight");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)QuicPacketNumberLength(300, 100), 2u, "200 in flight");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)QuicPacketNumberLength(0xac5c02, 0xabe8b3),
+                              2u,
+                              "RFC 9000 A.2 example");
+        NS_TEST_ASSERT_MSG_EQ((uint32_t)QuicPacketNumberLength(0xace8fe, 0xabe8b3),
+                              3u,
+                              "RFC 9000 A.2 example, 3 bytes");
+        NS_TEST_ASSERT_MSG_EQ(QuicDecodePacketNumber(0xa82f30ea, 0x9b32, 2),
+                              0xa82f9b32ULL,
+                              "RFC 9000 A.3 example");
+        NS_TEST_ASSERT_MSG_EQ(QuicDecodePacketNumber(-1, 0, 1), 0ULL, "first packet");
+        NS_TEST_ASSERT_MSG_EQ(QuicDecodePacketNumber(255, 0x00, 1), 256ULL, "wraps up");
+        NS_TEST_ASSERT_MSG_EQ(QuicDecodePacketNumber(256, 0xff, 1),
+                              255ULL,
+                              "reordered, wraps down");
+        // a header read gives the truncated number, and the full one once it is recovered
+        QuicHeader truncated;
+        ReadHeader(Hex("419b32"), 0, truncated, used, 0);
+        NS_TEST_ASSERT_MSG_EQ(truncated.GetPacketNumber().GetValue(),
+                              0x9b32ULL,
+                              "truncated number");
+        truncated.ReconstructPacketNumber(0xa82f30ea);
+        NS_TEST_ASSERT_MSG_EQ(truncated.GetPacketNumber().GetValue(),
+                              0xa82f9b32ULL,
+                              "recovered number");
+
+        // invalid headers
+        auto valid = [&](const std::vector<uint8_t>& bytes, uint32_t extra) {
+            QuicHeader h;
+            uint32_t n = 0;
+            ReadHeader(bytes, extra, h, n);
+            return h.IsValid();
+        };
+        std::vector<uint8_t> good = Hex("40010203040506070805");
+        NS_TEST_ASSERT_MSG_EQ(valid(good, 3), true, "a short header");
+        NS_TEST_ASSERT_MSG_EQ(valid({0x00, 1, 2, 3, 4, 5, 6, 7, 8, 5}, 3), false, "Fixed Bit is 0");
+        NS_TEST_ASSERT_MSG_EQ(valid({0x48, 1, 2, 3, 4, 5, 6, 7, 8, 5}, 3),
+                              false,
+                              "reserved bit is 1");
+        NS_TEST_ASSERT_MSG_EQ(valid({0x40, 1, 2, 3}, 0), false, "short header too short");
+        std::vector<uint8_t> initial = Hex("c3000000010801020304050607080000449e00000002");
+        NS_TEST_ASSERT_MSG_EQ(valid(initial, 1178), true, "an Initial whose Length fits");
+        NS_TEST_ASSERT_MSG_EQ(valid(initial, 1000), false, "Length beyond the packet");
+        NS_TEST_ASSERT_MSG_EQ(valid(Hex("c3000000011501"), 100),
+                              false,
+                              "connection id of 21 bytes");
+        NS_TEST_ASSERT_MSG_EQ(valid(Hex("83000000010801020304050607080000449e00000002"), 1178),
+                              false,
+                              "Fixed Bit is 0 in a long header");
+        NS_TEST_ASSERT_MSG_EQ(valid(Hex("c7000000010801020304050607080000449e00000002"), 1178),
+                              false,
+                              "reserved bit set in a long header");
+        NS_TEST_ASSERT_MSG_EQ(valid(Hex("c30000"), 0), false, "long header too short");
+    }
+};
+
 class QuicWireTestSuite : public TestSuite
 {
   public:
@@ -190,6 +506,8 @@ class QuicWireTestSuite : public TestSuite
     {
         AddTestCase(new QuicWireVarIntTest, TestCase::Duration::QUICK);
         AddTestCase(new QuicWireConnectionIdTest, TestCase::Duration::QUICK);
+        AddTestCase(new QuicWireHeaderVectorsTest, TestCase::Duration::QUICK);
+        AddTestCase(new QuicWireHeaderFormsTest, TestCase::Duration::QUICK);
     }
 };
 

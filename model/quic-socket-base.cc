@@ -190,9 +190,9 @@ QuicSocketBase::GetTypeId(void)
                           MakeBooleanChecker())
             .AddAttribute(
                 "MaxPacketSize",
-                "Maximum Packet Size: the frames of a packet, without the QUIC header; "
-                "1459 fills a 1500 byte IP MTU (20 IP + 8 UDP + 13 short header)",
-                UintegerValue(1459),
+                "Maximum Packet Size: the frames of a packet, without the QUIC header and the AEAD "
+                "tag; 1443 fills a 1500 byte IP MTU (20 IP + 8 UDP + 13 short header + 16 tag)",
+                UintegerValue(1443),
                 MakeUintegerAccessor(&QuicSocketBase::GetSegSize, &QuicSocketBase::SetSegSize),
                 MakeUintegerChecker<uint16_t>())
             .AddAttribute("SocketSndBufSize",
@@ -1432,9 +1432,9 @@ QuicSocketBase::SendAck()
 
     head = QuicHeader::CreateShort(GetDestCid(),
                                    packetNumber,
-                                   !m_omit_connection_id,
                                    m_keyPhase,
-                                   m_spinBit);
+                                   m_spinBit,
+                                   LargestAckedPacket());
 
     // if (m_socketState == CONNECTING_SVR)
     //   {
@@ -1595,11 +1595,11 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
     if (m_socketState == CONNECTING_SVR)
     {
         m_connected = true;
-        head = QuicHeader::CreateHandshake(m_connectionId, m_vers, packetNumber);
+        head = QuicHeader::CreateHandshake(m_connectionId, m_connectionId, m_vers, packetNumber);
     }
     else if (m_socketState == CONNECTING_CLT)
     {
-        head = QuicHeader::CreateInitial(m_connectionId, m_vers, packetNumber);
+        head = QuicHeader::CreateInitial(m_connectionId, m_connectionId, m_vers, packetNumber);
     }
     else if (m_socketState == OPEN)
     {
@@ -1611,19 +1611,21 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
             // The server is still waiting for the Handshake packet that completes its handshake:
             // this one repeats it (RFC 9001 s4.9.2)
             m_handshakeResendPending = false;
-            head = QuicHeader::CreateHandshake(m_connectionId, m_vers, packetNumber);
+            head =
+                QuicHeader::CreateHandshake(m_connectionId, m_connectionId, m_vers, packetNumber);
         }
         else if (!m_connected and !m_zeroRttConnect)
         {
             m_connected = true;
-            head = QuicHeader::CreateHandshake(m_connectionId, m_vers, packetNumber);
+            head =
+                QuicHeader::CreateHandshake(m_connectionId, m_connectionId, m_vers, packetNumber);
         }
         else if (m_zeroRttConnect and !m_tcb->m_handshakeConfirmed)
         {
             // The server learns of the connection from a 0-RTT packet, so every packet is one until
             // the first answer arrives: a lost first packet must not leave the server without a
             // connection for the short header ones
-            head = QuicHeader::Create0RTT(m_connectionId, m_vers, packetNumber);
+            head = QuicHeader::Create0RTT(m_connectionId, m_connectionId, m_vers, packetNumber);
             if (!m_connected)
             {
                 m_connected = true;
@@ -1635,9 +1637,9 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
         {
             head = QuicHeader::CreateShort(GetDestCid(),
                                            packetNumber,
-                                           !m_omit_connection_id,
                                            m_keyPhase,
-                                           m_spinBit);
+                                           m_spinBit,
+                                           LargestAckedPacket());
         }
     }
     else if (IsFlushingOnClose())
@@ -1645,9 +1647,9 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
         // Close() was called: keep sending buffered data before the connection is closed
         head = QuicHeader::CreateShort(GetDestCid(),
                                        packetNumber,
-                                       !m_omit_connection_id,
                                        m_keyPhase,
-                                       m_spinBit);
+                                       m_spinBit,
+                                       LargestAckedPacket());
     }
     else
     {
@@ -1659,7 +1661,7 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
     // validated
     if (!m_peerAddressValidated && m_socketState == CONNECTING_SVR)
     {
-        uint64_t pktSize = p->GetSize() + head.GetSerializedSize();
+        uint64_t pktSize = p->GetSize() + head.GetSerializedSize() + QUIC_AEAD_TAG_SIZE;
         if (m_bytesSentPreValidation + pktSize > 3 * m_bytesReceivedPreValidation &&
             m_bytesReceivedPreValidation > 0)
         {
@@ -1675,7 +1677,7 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
     NS_LOG_INFO("SendDataPacket of size " << p->GetSize());
     if (!m_paths.empty() && !m_paths.front().validated)
     {
-        uint64_t wire = p->GetSize() + head.GetSerializedSize();
+        uint64_t wire = p->GetSize() + head.GetSerializedSize() + QUIC_AEAD_TAG_SIZE;
         m_paths.front().allowance =
             (wire >= m_paths.front().allowance) ? 0 : m_paths.front().allowance - wire;
     }
@@ -2382,9 +2384,9 @@ QuicSocketBase::SendConnectionClosePacket(uint16_t errorCode, std::string phrase
 
     head = QuicHeader::CreateShort(GetDestCid(),
                                    packetNumber,
-                                   !m_omit_connection_id,
                                    m_keyPhase,
-                                   m_spinBit);
+                                   m_spinBit,
+                                   LargestAckedPacket());
 
     NS_LOG_DEBUG("Send Connection Close packet with header " << head);
     m_quicl4->SendPacket(this, p, head);
@@ -2610,24 +2612,15 @@ QuicSocketBase::SendInitialHandshake(uint8_t type, const QuicHeader& quicHeader,
         std::vector<uint32_t> supportedVersions;
         supportedVersions.push_back(QUIC_VERSION);
         supportedVersions.push_back(QUIC_VERSION_DRAFT_10);
-        supportedVersions.push_back(QUIC_VERSION_NS3_IMPL);
         supportedVersions.push_back(0x1a2a3a4a); // RFC 9000 §15: reserved version (greasing)
 
-        // the supported versions, four bytes each in network byte order (RFC 9000 s17.2.1)
-        std::vector<uint8_t> buffer(4 * supportedVersions.size());
-        for (size_t i = 0; i < supportedVersions.size(); i++)
-        {
-            buffer[4 * i] = (supportedVersions[i] >> 24);
-            buffer[4 * i + 1] = (supportedVersions[i] >> 16);
-            buffer[4 * i + 2] = (supportedVersions[i] >> 8);
-            buffer[4 * i + 3] = (supportedVersions[i]);
-        }
-        Ptr<Packet> payload = Create<Packet>(buffer.data(), buffer.size());
-
-        Ptr<Packet> p = Create<Packet>(buffer.data(), buffer.size());
-        QuicHeader head = QuicHeader::CreateVersionNegotiation(quicHeader.GetConnectionId(),
-                                                               QUIC_VERSION_NEGOTIATION,
-                                                               supportedVersions);
+        // RFC 9000 s17.2.1: the connection ids are those of the client, swapped; the versions are
+        // part of the header
+        Ptr<Packet> p = Create<Packet>(0);
+        QuicHeader head =
+            QuicHeader::CreateVersionNegotiation(quicHeader.GetSourceConnectionId(),
+                                                 quicHeader.GetDestinationConnectionId(),
+                                                 supportedVersions);
 
         // Set initial congestion window and Ssthresh
         m_tcb->m_cWnd = m_tcb->m_initialCWnd;
@@ -3587,10 +3580,16 @@ QuicSocketBase::DoClose(void)
 }
 
 void
-QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Address& address)
+QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Address& address)
 {
     NS_LOG_FUNCTION(this);
 
+    QuicHeader quicHeader = receivedHeader;
+    if (quicHeader.HasPacketNumber())
+    {
+        quicHeader.ReconstructPacketNumber(
+            m_receivedPacketNumbers.Empty() ? -1 : (int64_t)m_receivedPacketNumbers.Largest());
+    }
     m_rxTrace(p, quicHeader, this);
 
     NS_LOG_INFO("Received packet of size " << p->GetSize());
@@ -3753,17 +3752,8 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Addres
     {
         NS_LOG_INFO("Client receives VERSION_NEGOTIATION");
 
-        std::vector<uint8_t> buffer(p->GetSize());
-        p->CopyData(buffer.data(), buffer.size());
-
-        // RFC 9000 s17.2.1: the supported versions, four bytes each in network byte order
-        std::vector<uint32_t> receivedVersions;
-        for (size_t i = 0; i + 4 <= buffer.size(); i = i + 4)
-        {
-            receivedVersions.push_back(((uint32_t)buffer[i] << 24) |
-                                       ((uint32_t)buffer[i + 1] << 16) |
-                                       ((uint32_t)buffer[i + 2] << 8) | (uint32_t)buffer[i + 3]);
-        }
+        // RFC 8999 s6: the versions the server supports are listed in the header
+        const std::vector<uint32_t>& receivedVersions = quicHeader.GetSupportedVersions();
 
         // RFC 9000 s6.2: a client discards a Version Negotiation packet that lists the version it
         // chose (it would be a forged or looping packet)
@@ -3813,7 +3803,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& quicHeader, Addres
              (m_socketState == OPEN or IsFlushingOnClose()))
     {
         // RFC 9000 §12.3: duplicate packet numbers MUST be discarded
-        SequenceNumber32 pktNum = quicHeader.GetPacketNumber();
+        QuicPacketNumber pktNum = quicHeader.GetPacketNumber();
         bool isDuplicate = m_receivedPacketNumbers.Contains(pktNum.GetValue());
         if (isDuplicate)
         {
@@ -4018,27 +4008,34 @@ QuicSocketBase::AbortConnection(uint16_t transportErrorCode,
     switch (m_socketState)
     {
     case CONNECTING_CLT:
-        quicHeader = QuicHeader::CreateInitial(m_connectionId, m_vers, m_tcb->m_nextTxSequence++);
+        quicHeader = QuicHeader::CreateInitial(m_connectionId,
+                                               m_connectionId,
+                                               m_vers,
+                                               m_tcb->m_nextTxSequence++);
         break;
     case CONNECTING_SVR:
-        quicHeader = QuicHeader::CreateHandshake(m_connectionId, m_vers, m_tcb->m_nextTxSequence++);
+        quicHeader = QuicHeader::CreateHandshake(m_connectionId,
+                                                 m_connectionId,
+                                                 m_vers,
+                                                 m_tcb->m_nextTxSequence++);
         break;
     case OPEN:
-        quicHeader =
-            !m_connected
-                ? QuicHeader::CreateHandshake(m_connectionId, m_vers, m_tcb->m_nextTxSequence++)
-                : QuicHeader::CreateShort(GetDestCid(),
-                                          m_tcb->m_nextTxSequence++,
-                                          !m_omit_connection_id,
-                                          m_keyPhase,
-                                          m_spinBit);
+        quicHeader = !m_connected ? QuicHeader::CreateHandshake(m_connectionId,
+                                                                m_connectionId,
+                                                                m_vers,
+                                                                m_tcb->m_nextTxSequence++)
+                                  : QuicHeader::CreateShort(GetDestCid(),
+                                                            m_tcb->m_nextTxSequence++,
+                                                            m_keyPhase,
+                                                            m_spinBit,
+                                                            LargestAckedPacket());
         break;
     case CLOSING:
         quicHeader = QuicHeader::CreateShort(GetDestCid(),
                                              m_tcb->m_nextTxSequence++,
-                                             !m_omit_connection_id,
                                              m_keyPhase,
-                                             m_spinBit);
+                                             m_spinBit,
+                                             LargestAckedPacket());
         break;
     default:
         NS_ABORT_MSG("AbortConnection in unfeasible Socket State for the request");
@@ -4392,10 +4389,10 @@ QuicSocketBase::SendMtuProbe(void)
     }
     SequenceNumber32 pn = ++m_tcb->m_nextTxSequence;
     QuicHeader head =
-        QuicHeader::CreateShort(GetDestCid(), pn, !m_omit_connection_id, m_keyPhase, m_spinBit);
-    // IP MTU = IP header + UDP header + QUIC header + frames: PING plus PADDING up to the probe
-    // size
-    uint32_t fixed = 28 + head.GetSerializedSize();
+        QuicHeader::CreateShort(GetDestCid(), pn, m_keyPhase, m_spinBit, LargestAckedPacket());
+    // IP MTU = IP header + UDP header + QUIC header + frames + AEAD tag: PING plus PADDING up to
+    // the probe size
+    uint32_t fixed = 28 + head.GetSerializedSize() + QUIC_AEAD_TAG_SIZE;
     QuicSubheader ping = QuicSubheader::CreatePing();
     uint32_t overhead = fixed + ping.GetSerializedSize();
     uint32_t padding = (m_pmtudProbeMtu > overhead) ? m_pmtudProbeMtu - overhead : 0;
@@ -4523,6 +4520,13 @@ QuicSocketBase::FinishStream(uint64_t streamId)
 // ------------------------------------------------------------------------------------------------
 // Connection ids and paths
 // ------------------------------------------------------------------------------------------------
+
+int64_t
+QuicSocketBase::LargestAckedPacket(void) const
+{
+    const uint64_t largest = m_tcb->m_largestAckedPacket.GetValue();
+    return largest == 0 ? -1 : static_cast<int64_t>(largest);
+}
 
 void
 QuicSocketBase::InitPaths(void)
@@ -4823,11 +4827,8 @@ QuicSocketBase::SendPathChallenge(QuicPath& path)
     }
     QuicSubheader frame = QuicSubheader::CreatePathChallenge(path.challenge);
     SequenceNumber32 pn = ++m_tcb->m_nextTxSequence;
-    QuicHeader head = QuicHeader::CreateShort(PathDestCid(path),
-                                              pn,
-                                              !m_omit_connection_id,
-                                              m_keyPhase,
-                                              m_spinBit);
+    QuicHeader head =
+        QuicHeader::CreateShort(PathDestCid(path), pn, m_keyPhase, m_spinBit, LargestAckedPacket());
 
     // The packet is padded to the path MTU to validate it (QuicSendPathChallenges), within what the
     // path allows
@@ -4836,14 +4837,14 @@ QuicSocketBase::SendPathChallenge(QuicPath& path)
                            : (path.segSize ? path.segSize : kPmtudInitialMtu - kPmtudOverhead);
     uint32_t total =
         (uint32_t)std::min<uint64_t>(segment, path.allowance); // the whole packet, headers included
-    uint32_t used = frame.GetSerializedSize() + head.GetSerializedSize();
+    uint32_t used = frame.GetSerializedSize() + head.GetSerializedSize() + QUIC_AEAD_TAG_SIZE;
     Ptr<Packet> p = Create<Packet>(0);
     Ptr<Packet> pad = Create<Packet>(total > used ? total - used : 0);
     p->AddAtEnd(pad);
     p->AddHeader(frame);
     if (!path.validated)
     {
-        uint64_t size = p->GetSize() + head.GetSerializedSize();
+        uint64_t size = p->GetSize() + head.GetSerializedSize() + QUIC_AEAD_TAG_SIZE;
         path.allowance = (size >= path.allowance) ? 0 : path.allowance - size;
     }
     path.lastChallengeSent = Simulator::Now();
@@ -4863,11 +4864,8 @@ QuicSocketBase::SendPathResponse(QuicPath& path, uint64_t data)
     Ptr<Packet> p = Create<Packet>(0);
     p->AddHeader(QuicSubheader::CreatePathResponse(data));
     SequenceNumber32 pn = ++m_tcb->m_nextTxSequence;
-    QuicHeader head = QuicHeader::CreateShort(PathDestCid(path),
-                                              pn,
-                                              !m_omit_connection_id,
-                                              m_keyPhase,
-                                              m_spinBit);
+    QuicHeader head =
+        QuicHeader::CreateShort(PathDestCid(path), pn, m_keyPhase, m_spinBit, LargestAckedPacket());
     NS_LOG_INFO("PATH_RESPONSE on path " << path.id);
     m_quicl4->SendPacketOnPath(p, head, path.udp, path.remote);
     m_txTrace(p, head, this);

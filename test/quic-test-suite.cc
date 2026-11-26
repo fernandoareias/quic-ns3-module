@@ -676,7 +676,6 @@ class QuicSpinBitTestCase : public TestCase
         // Create short header with spin bit = 0
         QuicHeader h0 = QuicHeader::CreateShort(QuicConnectionId::FromUint64(0xDEADBEEF),
                                                 SequenceNumber32(42),
-                                                true,
                                                 QuicHeader::PHASE_ZERO,
                                                 false);
         NS_TEST_ASSERT_MSG_EQ(h0.GetSpinBit(), false, "spin bit 0 set");
@@ -684,7 +683,6 @@ class QuicSpinBitTestCase : public TestCase
         // Create short header with spin bit = 1
         QuicHeader h1 = QuicHeader::CreateShort(QuicConnectionId::FromUint64(0xDEADBEEF),
                                                 SequenceNumber32(43),
-                                                true,
                                                 QuicHeader::PHASE_ZERO,
                                                 true);
         NS_TEST_ASSERT_MSG_EQ(h1.GetSpinBit(), true, "spin bit 1 set");
@@ -1777,8 +1775,8 @@ class QuicMtuDiscoveryTestCase : public TestCase
         });
         Simulator::Stop(Seconds(15));
         Simulator::Run();
-        uint32_t clientMtu = DynamicCast<QuicSocketBase>(m_client)->GetSegSize() + 41;
-        uint32_t serverMtu = DynamicCast<QuicSocketBase>(m_server)->GetSegSize() + 41;
+        uint32_t clientMtu = DynamicCast<QuicSocketBase>(m_client)->GetSegSize() + 57;
+        uint32_t serverMtu = DynamicCast<QuicSocketBase>(m_server)->GetSegSize() + 57;
         Simulator::Destroy();
 
         NS_TEST_ASSERT_MSG_EQ(clientMtu, m_expectedMtu, "client path MTU");
@@ -2258,7 +2256,7 @@ class QuicMigrationTestCase : public TestCase
                                   "a port-only rebind keeps the congestion window");
         }
         NS_TEST_ASSERT_MSG_EQ(validated, true, "the new path was never validated");
-        NS_TEST_ASSERT_MSG_EQ(seg, 1459u, "the new path did not rediscover its MTU");
+        NS_TEST_ASSERT_MSG_EQ(seg, 1443u, "the new path did not rediscover its MTU");
     }
 
     void Accept(Ptr<Socket> s, const Address&)

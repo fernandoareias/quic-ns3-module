@@ -5,8 +5,8 @@
 #   - quic-loss-stress with --digest: a hash of every packet (time and bytes) that left a device;
 #   - erldp-mesh-exp1, erldp-mesh-exp2 and epmd-experimento: the SHA-256 of the CSV files.
 # The digests of a build are compared with the ones recorded from an earlier build, so a change in
-# the packets, in their timing or in their number shows up. The oracle stops being valid when the
-# wire format changes on purpose (from the packet header phase of the RFC alignment on).
+# the packets, in their timing or in their number shows up. The digests are recorded again each time
+# the wire format changes on purpose; a refactor is checked against the digests of the build before it.
 #
 # Usage (the examples must have been built):
 #   contrib/quic/test/oracle.sh record [file]   write the digests of this build

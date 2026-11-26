@@ -357,6 +357,15 @@ class QuicL4Protocol : public IpL4Protocol
     bool GetPath(Ptr<QuicSocketBase> socket, Ptr<Socket>& udp, Address& remote) const;
 
     /**
+     * Build the datagram of a packet: the payload, its AEAD tag and the header.
+     *
+     * @param head the QUIC header, whose Length field is filled in.
+     * @param payload the frames.
+     * @return the bytes to send in one UDP datagram.
+     */
+    Ptr<Packet> BuildDatagram(const QuicHeader& head, Ptr<Packet> payload) const;
+
+    /**
      * \\brief Send a packet on a given path, not necessarily the active one (probing)
      * \\param pkt the payload
      * \\param head the QUIC header

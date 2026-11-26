@@ -1280,7 +1280,7 @@ class QuicSocketBase : public QuicSocket
     static constexpr uint32_t kPmtudInitialMtu =
         1288; //!< QUIC_DPLPMTUD_DEFAULT_MIN_MTU with IPv4 accounting
     static constexpr uint32_t kPmtudOverhead =
-        41; //!< IP MTU minus segment size: IP 20 + UDP 8 + short QUIC header 13
+        57; //!< IP MTU minus segment size: IP 20 + UDP 8 + short QUIC header 13 + AEAD tag 16
     void StartMtuDiscovery(void);
     void SendMtuProbe(void);
     void OnMtuProbeTimeout(void);
@@ -1361,6 +1361,11 @@ class QuicSocketBase : public QuicSocket
 
     Time m_destCidUpdateIdleTimeout{Seconds(20)}; //!< Attribute DestCidUpdateIdleTimeout
     Time m_lastPacketSent{Seconds(0)};            //!< When this endpoint last sent a packet
+    /**
+     * @return the largest packet number the peer acknowledged, or -1 when it acknowledged none:
+     * what the packet number of a new packet is truncated against (RFC 9000, Appendix A.2).
+     */
+    int64_t LargestAckedPacket(void) const;
     void MaybeUpdateDestCid(void);
     void InitPaths(void);
     void IssueSourceCids(void);

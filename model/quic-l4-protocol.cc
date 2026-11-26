@@ -562,38 +562,22 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
 
         QuicHeader header;
         packet->RemoveHeader(header);
-
-        QuicConnectionId connectionId;
-        if (header.HasConnectionId())
+        if (!header.IsValid())
         {
-            connectionId = header.GetConnectionId();
+            NS_LOG_WARN(this << " dropping a packet with an invalid header");
+            continue;
         }
-        /*else if (m_sockets.size () <= 2) // Rivedere
-          {
-            if (m_sockets[0]->GetSocketState () != QuicSocket::LISTENING)
-              {
-                connectionId = m_sockets[0]->GetConnectionId ();
-              }
-            else if (m_sockets.size () == 2 && m_sockets[1]->GetSocketState () !=
-          QuicSocket::LISTENING)
-              {
-                connectionId = m_sockets[1]->GetConnectionId ();
-              }
-            else
-              {
-                NS_FATAL_ERROR ("The Connection ID can only be omitted by means of
-          m_omit_connection_id transport parameter" " if source and destination IP address and port
-          are sufficient to identify a connection");
-              }
-
-          }*/
-        else
+        if (header.HasPacketNumber() && header.IsLong() &&
+            header.GetPayloadSize() != packet->GetSize())
         {
-            NS_FATAL_ERROR("The Connection ID can only be omitted by means of m_omit_connection_id "
-                           "transport parameter"
-                           " if source and destination IP address and port are sufficient to "
-                           "identify a connection");
+            // the Length field does not end where the datagram does: coalesced packets are not
+            // supported yet
+            NS_LOG_WARN(this << " dropping a packet whose Length does not match the datagram");
+            continue;
         }
+        const uint32_t datagramSize = header.GetSerializedSize() + packet->GetSize();
+
+        const QuicConnectionId connectionId = header.GetDestinationConnectionId();
 
         Ipv4Address srcIp = InetSocketAddress::ConvertFrom(from).GetIpv4();
 
@@ -792,11 +776,21 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
             // the path of the packet: its remote address and the UDP socket it arrived on
             if (!socket->OnPacketOnPath(sock,
                                         from,
-                                        header.GetSerializedSize() + packet->GetSize(),
-                                        header.GetConnectionId()))
+                                        datagramSize,
+                                        header.GetDestinationConnectionId()))
             {
                 continue;
             }
+        }
+        if (header.HasAeadTag())
+        {
+            if (packet->GetSize() < QUIC_AEAD_TAG_SIZE)
+            {
+                NS_LOG_WARN(this << " dropping a packet shorter than its AEAD tag");
+                continue;
+            }
+            QuicAeadTrailer tag;
+            packet->RemoveTrailer(tag);
         }
         if (!m_socketHandlers[socket].IsNull())
         {
@@ -912,15 +906,34 @@ QuicL4Protocol::GetPath(Ptr<QuicSocketBase> socket, Ptr<Socket>& udp, Address& r
     return false;
 }
 
+Ptr<Packet>
+QuicL4Protocol::BuildDatagram(const QuicHeader& head, Ptr<Packet> payload) const
+{
+    Ptr<Packet> datagram = payload->Copy();
+    if (head.HasPacketNumber() && datagram->GetSize() + head.GetPacketNumberLength() < 4)
+    {
+        // RFC 9001 Section 5.4.2: the packet number and the protected payload, which includes the
+        // tag, have to be at least 4 bytes longer than the header protection sample (16 bytes):
+        // PADDING fills the packet up to that
+        datagram->AddAtEnd(Create<Packet>(4 - head.GetPacketNumberLength() - datagram->GetSize()));
+    }
+    if (head.HasAeadTag())
+    {
+        datagram->AddTrailer(QuicAeadTrailer());
+    }
+    QuicHeader header = head;
+    header.SetPayloadSize(datagram->GetSize());
+    datagram->AddHeader(header);
+    return datagram;
+}
+
 void
 QuicL4Protocol::SendPacketOnPath(Ptr<Packet> pkt,
                                  const QuicHeader& head,
                                  Ptr<Socket> udp,
                                  const Address& remote) const
 {
-    Ptr<Packet> sent = Create<Packet>();
-    sent->AddHeader(head);
-    sent->AddAtEnd(pkt);
+    Ptr<Packet> sent = BuildDatagram(head, pkt);
     Address connected;
     if (udp->GetPeerName(connected) == 0)
     {
@@ -961,7 +974,6 @@ QuicL4Protocol::SendStatelessReset(Ptr<Socket> sock,
         ((uint64_t)rng->GetInteger(0, 0xffffffffu) << 32) | rng->GetInteger(0, 0xffffffffu));
     QuicHeader head = QuicHeader::CreateShort(cid,
                                               SequenceNumber32(rng->GetInteger(0, 0xffffff)),
-                                              true,
                                               header.GetKeyPhaseBit(),
                                               false);
     if (length < head.GetSerializedSize() + kTokenLen)
@@ -977,7 +989,7 @@ QuicL4Protocol::SendStatelessReset(Ptr<Socket> sock,
         b = (uint8_t)rng->GetInteger(0, 255);
     }
     uint64_t hi, lo;
-    GenerateStatelessResetToken(header.GetConnectionId(), hi, lo);
+    GenerateStatelessResetToken(header.GetDestinationConnectionId(), hi, lo);
     for (uint32_t k = 0; k < 8; ++k)
     {
         bytes[payloadLen - 16 + k] = (uint8_t)(hi >> (56 - 8 * k));
@@ -986,7 +998,7 @@ QuicL4Protocol::SendStatelessReset(Ptr<Socket> sock,
     Ptr<Packet> reset = Create<Packet>(bytes.data(), payloadLen);
     reset->AddHeader(head);
     NS_LOG_INFO("Sending stateless reset of " << reset->GetSize() << " bytes for connection "
-                                              << header.GetConnectionId());
+                                              << header.GetDestinationConnectionId());
     sock->SendTo(reset, 0, from);
 }
 
@@ -1263,9 +1275,7 @@ QuicL4Protocol::SendPacket(Ptr<QuicSocketBase> socket,
     // Given the presence of multiple subheaders in pkt,
     // we create a new packet, add the new QUIC header and
     // then add pkt as payload
-    Ptr<Packet> packetSent = Create<Packet>();
-    packetSent->AddHeader(outgoing);
-    packetSent->AddAtEnd(pkt);
+    Ptr<Packet> packetSent = BuildDatagram(outgoing, pkt);
     // NS_LOG_INFO ("" );
     // packetSent->Print (std::clog);
     // NS_LOG_INFO ("");

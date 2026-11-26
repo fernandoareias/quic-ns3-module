@@ -10,6 +10,8 @@
 #define QUIC_WIRE_H
 
 #include "ns3/buffer.h"
+#include "ns3/sequence-number.h"
+#include "ns3/trailer.h"
 
 #include <cstdint>
 
@@ -24,6 +26,18 @@ namespace ns3
 
 /** Largest value of a variable-length integer (RFC 9000, Section 16). */
 constexpr uint64_t QUIC_VARINT_MAX = (1ULL << 62) - 1;
+
+/**
+ * Packet numbers are numbers of at most 62 bits (RFC 9000, Section 12.3). They compare and count as
+ * SequenceNumber does for TCP, modulo 2^62.
+ */
+typedef SequenceNumber<uint64_t, 62> QuicPacketNumber;
+
+/** QUIC version 2 (RFC 9369, Section 3.1). */
+constexpr uint32_t QUIC_VERSION_2 = 0x6b3343cf;
+
+/** Size of the AEAD tag that every protected packet ends with (RFC 9001, Section 5.2). */
+constexpr uint32_t QUIC_AEAD_TAG_SIZE = 16;
 
 /**
  * Number of bytes of the shortest variable-length integer encoding of a value.
@@ -48,6 +62,44 @@ void QuicWriteVarInt(Buffer::Iterator& i, uint64_t value);
  * @return the value.
  */
 uint64_t QuicReadVarInt(Buffer::Iterator& i);
+
+/**
+ * Number of bytes to encode a packet number so that the receiver can recover it (RFC 9000,
+ * Appendix A.2): enough for twice the range of packets that are not yet acknowledged.
+ *
+ * @param packetNumber the packet number being sent.
+ * @param largestAcked the largest packet number the peer acknowledged, or -1 when there is none.
+ * @return 1, 2, 3 or 4.
+ */
+uint8_t QuicPacketNumberLength(uint64_t packetNumber, int64_t largestAcked);
+
+/**
+ * Recover a full packet number from its truncated form (RFC 9000, Appendix A.3).
+ *
+ * @param largest the largest packet number received so far in the packet number space, or -1 when
+ * there is none.
+ * @param truncated the truncated packet number of the packet.
+ * @param length number of bytes of the truncated packet number, from 1 to 4.
+ * @return the packet number.
+ */
+uint64_t QuicDecodePacketNumber(int64_t largest, uint64_t truncated, uint8_t length);
+
+/**
+ * @ingroup quic
+ * The AEAD tag at the end of a protected packet. The module does not encrypt: the tag stands for
+ * the bytes a real endpoint would add, so that packets have their real size.
+ */
+class QuicAeadTrailer : public Trailer
+{
+  public:
+    /** @return the object TypeId. */
+    static TypeId GetTypeId();
+    TypeId GetInstanceTypeId() const override;
+    void Print(std::ostream& os) const override;
+    uint32_t GetSerializedSize() const override;
+    void Serialize(Buffer::Iterator end) const override;
+    uint32_t Deserialize(Buffer::Iterator end) override;
+};
 
 } // namespace ns3
 

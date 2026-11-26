@@ -305,83 +305,20 @@ class FeatRfcWireBytesTest : public TestCase
 };
 
 /**
- * The first byte of the packet headers as RFC 9000 s17 lays it out: a short header is 0 | Fixed Bit
- * | Spin | 00 | Key Phase | Packet Number Length, a long header 1 | Fixed Bit | Type | 00 | Packet
- * Number Length, and a Version Negotiation packet is the long header whose version is 0.
+ * Reserved versions are the ones of the form 0x?a?a?a?a (RFC 9000 s15). The headers themselves are
+ * checked against the vectors of the RFCs in the "quic-wire" suite.
  */
-class FeatHeaderWireTest : public TestCase
+class FeatReservedVersionTest : public TestCase
 {
   public:
-    FeatHeaderWireTest()
-        : TestCase("wire: packet header first byte, key phase, spin bit and packet number length "
-                   "as in RFC 9000 s17")
+    FeatReservedVersionTest()
+        : TestCase("versions: reserved versions follow the pattern of RFC 9000 s15")
     {
     }
 
   private:
-    void Expect(const char* what, const QuicHeader& h, std::vector<uint8_t> want)
-    {
-        std::vector<uint8_t> got = FeatBytes(h);
-        NS_TEST_ASSERT_MSG_EQ(got.size(), want.size(), what << ": size");
-        for (size_t k = 0; k < std::min(got.size(), want.size()); ++k)
-        {
-            NS_TEST_ASSERT_MSG_EQ((uint32_t)got[k], (uint32_t)want[k], what << ": byte " << k);
-        }
-        NS_TEST_ASSERT_MSG_EQ(RoundTrip(h) == h, true, what << ": round trip");
-    }
-
     void DoRun() override
     {
-        const QuicConnectionId cid = QuicConnectionId::FromUint64(0x0102030405060708ULL);
-        // spin 1, key phase 1, 1-byte packet number
-        Expect("short, spin and key phase",
-               QuicHeader::CreateShort(cid, SequenceNumber32(5), true, true, true),
-               {0x64, 1, 2, 3, 4, 5, 6, 7, 8, 0x05});
-        // 2-byte and 4-byte packet numbers
-        Expect("short, 2-byte number",
-               QuicHeader::CreateShort(cid, SequenceNumber32(300), true, false, false),
-               {0x41, 1, 2, 3, 4, 5, 6, 7, 8, 0x01, 0x2c});
-        Expect("short, 4-byte number",
-               QuicHeader::CreateShort(cid, SequenceNumber32(70000), true, false, false),
-               {0x43, 1, 2, 3, 4, 5, 6, 7, 8, 0x00, 0x01, 0x11, 0x70});
-        // without the connection id (OmitConnectionId): flagged in a reserved bit, no id bytes
-        Expect("short, no connection id",
-               QuicHeader::CreateShort(cid, SequenceNumber32(5), false, false, false),
-               {0x48, 0x05});
-        Expect("Initial",
-               QuicHeader::CreateInitial(cid, QUIC_VERSION, SequenceNumber32(1)),
-               {0xC3, 0, 0, 0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 1});
-        Expect("0-RTT",
-               QuicHeader::Create0RTT(cid, QUIC_VERSION, SequenceNumber32(1)),
-               {0xD3, 0, 0, 0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 1});
-        Expect("Handshake",
-               QuicHeader::CreateHandshake(cid, QUIC_VERSION, SequenceNumber32(1)),
-               {0xE3, 0, 0, 0, 1, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0, 0, 0, 0, 1});
-        std::vector<uint32_t> versions = {QUIC_VERSION};
-        QuicHeader vn =
-            QuicHeader::CreateVersionNegotiation(cid, QUIC_VERSION_NEGOTIATION, versions);
-        Expect("Version Negotiation", vn, {0xC0, 0, 0, 0, 0, 8, 1, 2, 3, 4, 5, 6, 7, 8, 0});
-        NS_TEST_ASSERT_MSG_EQ(RoundTrip(vn).IsVersionNegotiation(),
-                              true,
-                              "version 0 is a Version Negotiation packet");
-        NS_TEST_ASSERT_MSG_EQ(
-            RoundTrip(QuicHeader::CreateInitial(cid, QUIC_VERSION, SequenceNumber32(1)))
-                .IsInitial(),
-            true,
-            "an Initial is not mistaken for one");
-        // a short header keeps its packet number length where the long types live: it must never
-        // read as one of them
-        for (uint32_t pn : {5u, 300u, 70000u})
-        {
-            QuicHeader sh =
-                RoundTrip(QuicHeader::CreateShort(cid, SequenceNumber32(pn), true, false, false));
-            NS_TEST_ASSERT_MSG_EQ(sh.IsShort(), true, "short header, packet number " << pn);
-            NS_TEST_ASSERT_MSG_EQ((sh.IsInitial() || sh.IsRetry() || sh.IsHandshake() ||
-                                   sh.IsORTT() || sh.IsVersionNegotiation()),
-                                  false,
-                                  "a short header is not a long one, packet number " << pn);
-        }
-        // reserved versions: 0x?a?a?a?a only
         Ptr<QuicSocketBase> any = CreateObject<QuicSocketBase>();
         NS_TEST_ASSERT_MSG_EQ(any->CheckVersionNegotiation(0x1a2a3a4a), true, "reserved version");
         NS_TEST_ASSERT_MSG_EQ(any->CheckVersionNegotiation(0xFFFFFFFF),
@@ -957,10 +894,10 @@ class FeatNoFragmentationTest : public TestCase
         r.Run();
         NS_TEST_ASSERT_MSG_EQ(r.rx[0][1].bytes, 3000000u, "all bytes delivered");
         uint32_t seg = DynamicCast<QuicSocketBase>(r.accepted[0])->GetSegSize();
-        // segment size plus IPv4 (20), UDP (8) and the short QUIC header (13)
+        // segment size plus IPv4 (20), UDP (8), the short QUIC header (13) and the AEAD tag (16)
         NS_TEST_ASSERT_MSG_GT(g_featMaxIpBytes, seg, "the server must send (almost) full segments");
         NS_TEST_ASSERT_MSG_LT_OR_EQ(g_featMaxIpBytes,
-                                    seg + 41,
+                                    seg + 57,
                                     "largest IP datagram the server handed to the link, segment "
                                         << seg);
     }
@@ -2484,14 +2421,14 @@ class FeatBbrProbeRttTest : public TestCase
 };
 
 /**
- * RFC 9000 s6, s17.2.1: the Version Negotiation packet lists the versions in network byte order,
- * and a client that proposed an unknown version carries on with one of them.
+ * RFC 9000 s6, RFC 8999 s6: the Version Negotiation packet lists the versions it supports, and a
+ * client that proposed an unknown version carries on with one of them.
  */
 class FeatVersionNegotiationTest : public TestCase
 {
   public:
     FeatVersionNegotiationTest()
-        : TestCase("version negotiation: versions in network byte order, the client retries with a "
+        : TestCase("version negotiation: the server lists its versions, the client retries with a "
                    "supported one (RFC 9000 s6)")
     {
     }
@@ -2524,13 +2461,10 @@ class FeatVersionNegotiationTest : public TestCase
 
     void OnServerTx(Ptr<const Packet> p, const QuicHeader& h, Ptr<const QuicSocketBase>)
     {
-        if (h.IsVersionNegotiation() && !m_vnSeen && p->GetSize() >= 4)
+        if (h.IsVersionNegotiation() && !m_vnSeen && !h.GetSupportedVersions().empty())
         {
             m_vnSeen = true;
-            uint8_t b[4];
-            p->CopyData(b, 4);
-            m_firstVersion =
-                ((uint32_t)b[0] << 24) | ((uint32_t)b[1] << 16) | ((uint32_t)b[2] << 8) | b[3];
+            m_firstVersion = h.GetSupportedVersions().front();
         }
     }
 
@@ -2591,7 +2525,7 @@ class QuicFeaturesTestSuite : public TestSuite
         AddTestCase(new FeatControlFramesWireTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatAckRangesWireTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatRfcWireBytesTest, TestCase::Duration::QUICK);
-        AddTestCase(new FeatHeaderWireTest, TestCase::Duration::QUICK);
+        AddTestCase(new FeatReservedVersionTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatTransportParametersTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatCongestionDefaultsTest, TestCase::Duration::QUICK);
         AddTestCase(new FeatSchedulerConservationTest, TestCase::Duration::QUICK);
