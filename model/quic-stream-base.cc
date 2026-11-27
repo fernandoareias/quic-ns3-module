@@ -409,6 +409,57 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
 
         break;
 
+    case QuicSubheader::RESET_STREAM_AT:
+        if (!(m_streamDirectionType == RECEIVER or m_streamDirectionType == BIDIRECTIONAL))
+        {
+            m_quicl5->SignalAbortConnection(
+                QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                "Received RESET_STREAM_AT in send-only Stream");
+            return -1;
+        }
+        if (!m_quicl5->ResetStreamAtAccepted())
+        {
+            // the frame was not agreed to
+            m_quicl5->SignalAbortConnection(
+                QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                "RESET_STREAM_AT without the parameter");
+            return -1;
+        }
+        if (!CheckFinalSize(sub.GetOffset(), "RESET_STREAM_AT"))
+        {
+            return -1;
+        }
+        if (m_streamStateRecv == DATA_READ or m_streamStateRecv == RESET_READ or
+            m_streamStateRecv == RESET_RECVD)
+        {
+            break;
+        }
+        if (sub.GetOffset() > m_maxAllowedRecvOffset)
+        {
+            m_quicl5->SignalAbortConnection(
+                QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
+                "RESET_STREAM_AT final size above Max Stream Data limit");
+            return -1;
+        }
+        if (sub.GetOffset() > m_highestRecvOffset)
+        {
+            uint64_t delta = sub.GetOffset() - m_highestRecvOffset;
+            m_highestRecvOffset = sub.GetOffset();
+            if (!m_quicl5->OnBytesReceivedAtOffset(delta))
+            {
+                m_quicl5->SignalAbortConnection(
+                    QuicSubheader::TransportErrorCodes_t::FLOW_CONTROL_ERROR,
+                    "Received more data w.r.t. Max Data limit");
+                return -1;
+            }
+        }
+        // a later frame may only lower the reliable size
+        m_reliableSize = std::min(m_reliableSize, sub.GetReliableSize());
+        m_resetAtError = sub.GetErrorCode();
+        m_resetAtPending = true;
+        CheckResetAtDelivered();
+        break;
+
     case QuicSubheader::MAX_STREAM_DATA:
         if (!(m_streamDirectionType == SENDER or m_streamDirectionType == BIDIRECTIONAL))
         {
@@ -588,12 +639,23 @@ QuicStreamBase::Recv(Ptr<Packet> frame, const QuicSubheader& sub, Address& addre
                                      m_finalSizeKnown and m_recvSize == m_finalSize,
                                  DATA_RECVD);
             OnDelivered();
+            if (m_resetAtPending && frame->GetSize() > 0)
+            {
+                // the bytes beyond the reliable size are not delivered
+                const uint64_t end = m_recvSize;
+                const uint64_t beyond = end > m_reliableSize ? end - m_reliableSize : 0;
+                if (beyond > 0)
+                {
+                    frame->RemoveAtEnd(std::min<uint64_t>(beyond, frame->GetSize()));
+                }
+            }
 
             if (frame->GetSize() > 0)
             {
                 frame->AddByteTag(QuicStreamIdTag(m_streamId), 0, frame->GetSize());
                 m_quicl5->Recv(frame, address);
             }
+            CheckResetAtDelivered();
 
             SetStreamStateRecvIf(m_streamStateRecv == DATA_RECVD, DATA_READ);
             CheckClosed();
@@ -745,6 +807,66 @@ QuicStreamBase::Reset(uint64_t errorCode)
     m_quicl5->Send(p);
     SetStreamStateSend(RESET_SENT);
     m_streamResetTrace(m_streamId, errorCode, false);
+    return true;
+}
+
+void
+QuicStreamBase::CheckResetAtDelivered()
+{
+    if (!m_resetAtPending || m_recvSize < m_reliableSize)
+    {
+        return;
+    }
+    m_resetAtPending = false;
+    SetStreamStateRecv(RESET_RECVD);
+    m_rxBuffer = CreateObject<QuicStreamRxBuffer>();
+    m_rxBuffer->SetMaxBufferSize(GetStreamRcvBufSize());
+    m_streamResetTrace(m_streamId, m_resetAtError, true);
+    SetStreamStateRecv(RESET_READ);
+    CheckClosed();
+}
+
+bool
+QuicStreamBase::ResetAt(uint64_t errorCode, uint64_t reliableSize)
+{
+    NS_LOG_FUNCTION(this << errorCode << reliableSize);
+    const bool again = m_streamStateSend == RESET_SENT && m_resetAtSentReliable != UINT64_MAX;
+    if (!(m_streamDirectionType == SENDER || m_streamDirectionType == BIDIRECTIONAL) ||
+        (m_streamStateSend != OPEN && m_streamStateSend != SEND && !again))
+    {
+        return false;
+    }
+    if (again)
+    {
+        // RFC draft: the reliable size can only decrease
+        reliableSize = std::min(reliableSize, m_resetAtSentReliable);
+        if (reliableSize == m_resetAtSentReliable)
+        {
+            return false;
+        }
+    }
+    else
+    {
+        m_txBuffer->DiscardAppData();
+        m_quicl5->NotifyStreamBacklog(m_streamId, false);
+        if (m_streamSendPendingDataEvent.IsPending())
+        {
+            m_streamSendPendingDataEvent.Cancel();
+        }
+    }
+    // what was not handed to the connection is dropped, so the final size is what was sent
+    reliableSize = std::min<uint64_t>(reliableSize, m_sentSize);
+    m_resetAtSentReliable = reliableSize;
+    m_quicl5->SetReliableLimit(m_streamId, reliableSize);
+    Ptr<Packet> p = Create<Packet>(0);
+    p->AddHeader(
+        QuicSubheader::CreateResetStreamAt(m_streamId, errorCode, m_sentSize, reliableSize));
+    m_quicl5->Send(p);
+    if (!again)
+    {
+        SetStreamStateSend(RESET_SENT);
+        m_streamResetTrace(m_streamId, errorCode, false);
+    }
     return true;
 }
 

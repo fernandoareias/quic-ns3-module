@@ -136,6 +136,7 @@ class QuicSubheader : public Header
             0x1d,              //!< Conn Close App   RFC 9000 §19.19 (era APPLICATION_CLOSE=0x03)
         HANDSHAKE_DONE = 0x1e, //!< Handshake Done   RFC 9000 §19.20
         IMMEDIATE_ACK = 0x1f,  //!< Immediate Ack    draft-ietf-quic-ack-frequency (msquic)
+        RESET_STREAM_AT = 0x24, //!< Reset Stream At   draft-ietf-quic-reliable-stream-reset
         DATAGRAM = 0x30,       //!< Datagram, to the end of the packet  RFC 9221
         DATAGRAM_LEN = 0x31,   //!< Datagram with a length              RFC 9221
         ACK_FREQUENCY = 0xaf   //!< Ack Frequency    draft-ietf-quic-ack-frequency (msquic)
@@ -963,6 +964,32 @@ class QuicSubheader : public Header
     static QuicSubheader CreateNewToken(const std::vector<uint8_t>& token);
 
     /**
+     * Create a RESET_STREAM_AT frame (draft-ietf-quic-reliable-stream-reset).
+     *
+     * @param streamId the stream.
+     * @param errorCode the application protocol error code.
+     * @param finalSize the final size of the stream.
+     * @param reliableSize the number of bytes that are delivered before the reset takes effect.
+     * @return the frame.
+     */
+    static QuicSubheader CreateResetStreamAt(uint64_t streamId,
+                                             uint64_t errorCode,
+                                             uint64_t finalSize,
+                                             uint64_t reliableSize);
+
+    /** @return true for a RESET_STREAM_AT frame. */
+    bool IsResetStreamAt() const
+    {
+        return m_frameType == RESET_STREAM_AT;
+    }
+
+    /** @return the reliable size of a RESET_STREAM_AT frame. */
+    uint64_t GetReliableSize() const
+    {
+        return m_reliableSize;
+    }
+
+    /**
      * Create a DATAGRAM frame with a Length field (RFC 9221, Section 4); the data follows it.
      *
      * @param length the number of bytes of data.
@@ -1030,6 +1057,7 @@ class QuicSubheader : public Header
     uint64_t m_frameType; //!< Frame type
     uint64_t m_streamId;  //!< Stream id
     uint64_t m_errorCode; //!< Error code
+    uint64_t m_reliableSize{0}; //!< reliable size of a RESET_STREAM_AT frame
     uint64_t m_triggerFrameType{
         0};            //!< CONNECTION_CLOSE: the frame type that triggered the error (0 = unknown)
     uint64_t m_offset; //!< Offset

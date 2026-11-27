@@ -16,8 +16,11 @@
 #include "../helper/quic-helper.h"
 #include "../model/quic-header.h"
 #include "../model/quic-l4-protocol.h"
+#include "../model/quic-l5-protocol.h"
 #include "../model/quic-socket-base.h"
 #include "../model/quic-socket-factory.h"
+#include "../model/quic-stream-base.h"
+#include "../model/quic-stream-id-tag.h"
 #include "../model/quic-subheader.h"
 #include "../model/quic-transport-parameters.h"
 
@@ -318,6 +321,254 @@ class DatagramTest : public TestCase
     }
 };
 
+/**
+ * RFC 9287: an endpoint that announced grease_quic_bit accepts packets with a Fixed Bit of 0, and,
+ * when the peer announced it too, sends some. A connection where one end did not announce it
+ * never carries one.
+ */
+class GreaseTest : public TestCase
+{
+  public:
+    GreaseTest()
+        : TestCase("grease_quic_bit (RFC 9287)")
+    {
+    }
+
+  private:
+    /**
+     * @param client GreaseQuicBit of the client.
+     * @param server GreaseQuicBit of the server.
+     * @param clientCleared set to the packets the client sent with a Fixed Bit of 0.
+     * @param serverCleared set to the packets the server sent with a Fixed Bit of 0.
+     * @param bytes set to the bytes the server read.
+     */
+    void Run(bool client,
+             bool server,
+             uint32_t& clientCleared,
+             uint32_t& serverCleared,
+             uint64_t& bytes)
+    {
+        struct State
+        {
+            uint32_t* cleared;
+        };
+
+        Config::SetDefault("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue(4));
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper link;
+        link.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+        link.SetChannelAttribute("Delay", StringValue("5ms"));
+        NetDeviceContainer devices = link.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        QuicHelper quic;
+        quic.InstallQuic(nodes);
+        Ipv4AddressHelper address;
+        address.SetBase("10.4.3.0", "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = address.Assign(devices);
+        clientCleared = 0;
+        serverCleared = 0;
+        bytes = 0;
+        auto count = [](uint32_t* counter) {
+            return [counter](Ptr<const Packet> p) {
+                std::vector<uint8_t> raw(p->GetSize());
+                p->CopyData(raw.data(), raw.size());
+                // PPP 2, IPv4 20 and UDP 8 bytes, then the first byte of the QUIC packet; a
+                // long header packet keeps its form bit
+                if (raw.size() > 30 && (raw[30] & 0x40) == 0)
+                {
+                    ++*counter;
+                }
+            };
+        };
+        devices.Get(1)->TraceConnectWithoutContext(
+            "PhyTxEnd",
+            Callback<void, Ptr<const Packet>>(count(&clientCleared)));
+        devices.Get(0)->TraceConnectWithoutContext(
+            "PhyTxEnd",
+            Callback<void, Ptr<const Packet>>(count(&serverCleared)));
+        TypeId factory = QuicSocketFactory::GetTypeId();
+        Ptr<Socket> listener = Socket::CreateSocket(nodes.Get(0), factory);
+        listener->SetAttribute("GreaseQuicBit", BooleanValue(server));
+        listener->Bind(InetSocketAddress(Ipv4Address::GetAny(), 4433));
+        listener->Listen();
+        uint64_t* total = &bytes;
+        listener->SetAcceptCallback(
+            MakeNullCallback<bool, Ptr<Socket>, const Address&>(),
+            Callback<void, Ptr<Socket>, const Address&>([total](Ptr<Socket> s, const Address&) {
+                s->SetRecvCallback(Callback<void, Ptr<Socket>>([total](Ptr<Socket> r) {
+                    Ptr<Packet> p;
+                    while ((p = r->Recv()) && p->GetSize() > 0)
+                    {
+                        *total += p->GetSize();
+                    }
+                }));
+                Simulator::Schedule(Seconds(0.3), [s]() { s->Send(Create<Packet>(100000)); });
+            }));
+        Ptr<Socket> socket = Socket::CreateSocket(nodes.Get(1), factory);
+        socket->SetAttribute("GreaseQuicBit", BooleanValue(client));
+        socket->SetRecvCallback(Callback<void, Ptr<Socket>>([](Ptr<Socket> r) {
+            Ptr<Packet> p;
+            while ((p = r->Recv()) && p->GetSize() > 0)
+            {
+            }
+        }));
+        Simulator::Schedule(Seconds(0.1), [socket, interfaces]() {
+            socket->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
+        });
+        Simulator::Schedule(Seconds(0.3), [socket]() { socket->Send(Create<Packet>(100000)); });
+        Simulator::Stop(Seconds(5));
+        Simulator::Run();
+        Simulator::Destroy();
+    }
+
+    void DoRun() override
+    {
+        uint32_t c;
+        uint32_t s;
+        uint64_t bytes;
+        Run(false, false, c, s, bytes);
+        NS_TEST_EXPECT_MSG_EQ(bytes, 100000, "without it the data arrives");
+        NS_TEST_EXPECT_MSG_EQ(c + s, 0, "and the Fixed Bit is always 1");
+
+        Run(true, false, c, s, bytes);
+        NS_TEST_EXPECT_MSG_EQ(bytes, 100000, "one end only: the data arrives");
+        NS_TEST_EXPECT_MSG_EQ(c + s, 0, "and nothing is greased");
+
+        Run(true, true, c, s, bytes);
+        NS_TEST_EXPECT_MSG_EQ(bytes, 100000, "both ends: the data arrives");
+        NS_TEST_EXPECT_MSG_GT(c, 20, "the client clears the bit in some packets");
+        NS_TEST_EXPECT_MSG_GT(s, 20, "so does the server");
+    }
+};
+
+/**
+ * The RESET_STREAM_AT frame: its bytes, and a stream that is reset after its first bytes were
+ * delivered, even when packets are lost.
+ */
+class ResetStreamAtTest : public TestCase
+{
+  public:
+    ResetStreamAtTest()
+        : TestCase("RESET_STREAM_AT (draft-ietf-quic-reliable-stream-reset)")
+    {
+    }
+
+  private:
+    void OnReset(uint64_t id, uint64_t error, bool byPeer)
+    {
+        if (byPeer)
+        {
+            ++m_resets;
+            m_resetError = error;
+            m_bytesAtReset = m_bytes;
+        }
+    }
+
+    void Accepted(Ptr<Socket> socket, const Address&)
+    {
+        m_server = DynamicCast<QuicSocketBase>(socket);
+        socket->SetRecvCallback(MakeCallback(&ResetStreamAtTest::Read, this));
+    }
+
+    void Read(Ptr<Socket> socket)
+    {
+        Ptr<Packet> packet;
+        while ((packet = socket->Recv()) && packet->GetSize() > 0)
+        {
+            m_bytes += packet->GetSize();
+        }
+        if (!m_hooked && m_server->GetQuicL5()->SearchStream(0) != nullptr)
+        {
+            m_hooked = true;
+            m_server->GetQuicL5()->SearchStream(0)->TraceConnectWithoutContext(
+                "StreamReset",
+                MakeCallback(&ResetStreamAtTest::OnReset, this));
+        }
+    }
+
+    void DoRun() override
+    {
+        // the bytes of the frame: type 0x24, stream, error, final size, reliable size
+        QuicSubheader frame = QuicSubheader::CreateResetStreamAt(4, 7, 1000, 600);
+        Ptr<Packet> p = Create<Packet>();
+        p->AddHeader(frame);
+        std::vector<uint8_t> bytes(p->GetSize());
+        p->CopyData(bytes.data(), bytes.size());
+        const std::vector<uint8_t> expected{0x24, 0x04, 0x07, 0x43, 0xe8, 0x42, 0x58};
+        NS_TEST_EXPECT_MSG_EQ((bytes == expected), true, "the bytes of the frame");
+        QuicSubheader back;
+        p->RemoveHeader(back);
+        NS_TEST_EXPECT_MSG_EQ(back.IsResetStreamAt(), true, "read back");
+        NS_TEST_EXPECT_MSG_EQ(back.GetReliableSize(), 600, "reliable size");
+        // a Reliable Size larger than the Final Size is a FRAME_ENCODING_ERROR
+        const uint8_t wrong[] = {0x24, 0x04, 0x07, 0x42, 0x58, 0x43, 0xe8};
+        Ptr<Packet> bad = Create<Packet>(wrong, sizeof(wrong));
+        QuicSubheader invalid;
+        bad->RemoveHeader(invalid);
+        NS_TEST_EXPECT_MSG_EQ(invalid.IsValid(), false, "reliable size above the final size");
+
+        Config::SetDefault("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue(4));
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper link;
+        link.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+        link.SetChannelAttribute("Delay", StringValue("10ms"));
+        NetDeviceContainer devices = link.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        QuicHelper quic;
+        quic.InstallQuic(nodes);
+        Ipv4AddressHelper address;
+        address.SetBase("10.6.5.0", "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = address.Assign(devices);
+        Ptr<RateErrorModel> em = CreateObject<RateErrorModel>();
+        em->SetUnit(RateErrorModel::ERROR_UNIT_PACKET);
+        em->SetRate(0.2);
+        em->AssignStreams(900);
+        em->Disable();
+        devices.Get(0)->SetAttribute("ReceiveErrorModel", PointerValue(em));
+        TypeId factory = QuicSocketFactory::GetTypeId();
+        Ptr<Socket> listener = Socket::CreateSocket(nodes.Get(0), factory);
+        listener->SetAttribute("ResetStreamAt", BooleanValue(true));
+        listener->Bind(InetSocketAddress(Ipv4Address::GetAny(), 4433));
+        listener->Listen();
+        listener->SetAcceptCallback(MakeNullCallback<bool, Ptr<Socket>, const Address&>(),
+                                    MakeCallback(&ResetStreamAtTest::Accepted, this));
+        Ptr<Socket> socket = Socket::CreateSocket(nodes.Get(1), factory);
+        socket->SetAttribute("ResetStreamAt", BooleanValue(true));
+        Ptr<QuicSocketBase> client = DynamicCast<QuicSocketBase>(socket);
+        Simulator::Schedule(Seconds(0.1), [socket, interfaces]() {
+            socket->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
+        });
+        Simulator::Schedule(Seconds(1), [client, em]() {
+            em->Enable(); // the packets of the client now get lost
+            client->Send(Create<Packet>(10000), 0);
+        });
+        Simulator::Schedule(Seconds(1) + MicroSeconds(100),
+                            [client]() { client->Send(Create<Packet>(10000), 0); });
+        Simulator::Schedule(Seconds(1) + MicroSeconds(200),
+                            [client, this]() { m_accepted = client->ResetStreamAt(0, 77, 10000); });
+        Simulator::Stop(Seconds(10));
+        Simulator::Run();
+        Simulator::Destroy();
+        NS_TEST_ASSERT_MSG_EQ(m_accepted, true, "the frame was sent");
+        NS_TEST_EXPECT_MSG_EQ(m_resets, 1, "the stream was reset once");
+        NS_TEST_EXPECT_MSG_EQ(m_resetError, 77, "with the error code");
+        NS_TEST_EXPECT_MSG_GT(m_bytesAtReset, 9999, "after the reliable bytes were delivered");
+        NS_TEST_EXPECT_MSG_LT(m_bytes, 20001, "and not more than were written");
+    }
+
+    Ptr<QuicSocketBase> m_server; //!< the accepted connection
+    bool m_hooked{false};         //!< the reset trace was connected
+    bool m_accepted{false};       //!< ResetStreamAt () said yes
+    uint32_t m_resets{0};         //!< resets seen by the server
+    uint64_t m_resetError{0};     //!< their error code
+    uint64_t m_bytes{0};          //!< bytes the server application read
+    uint64_t m_bytesAtReset{0};   //!< bytes read when the reset came
+};
+
 class QuicExtensionsTestSuite : public TestSuite
 {
   public:
@@ -326,6 +577,8 @@ class QuicExtensionsTestSuite : public TestSuite
     {
         AddTestCase(new ExtensionWireTest, TestCase::Duration::QUICK);
         AddTestCase(new DatagramTest, TestCase::Duration::QUICK);
+        AddTestCase(new GreaseTest, TestCase::Duration::QUICK);
+        AddTestCase(new ResetStreamAtTest, TestCase::Duration::QUICK);
     }
 };
 

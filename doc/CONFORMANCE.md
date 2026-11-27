@@ -100,14 +100,14 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | Document | Status | Phase |
 |---|---|---|
 | RFC 9221 (DATAGRAM) | done: `MaxDatagramFrameSize` announces it, `SendDatagram ()` queues a datagram that is sent within the congestion window and never again; frames that were not agreed to or are too large close the connection (quic-extensions) | F9 |
-| RFC 9287 GREASE bit | missing | F9 |
+| RFC 9287 GREASE bit | done: `GreaseQuicBit` announces it; with both ends, Handshake and 1-RTT packets get a random Fixed Bit and a stack that did not announce drops them (quic-extensions) | F9 |
 | RFC 9368 compatible version negotiation | missing | F9 |
 | RFC 9369 QUIC version 2 | missing | F9 |
 | RFC 10069 Multipath | missing | F11 |
 | RFC 9438 CUBIC | partial (three divergences) | F8 |
 | RFC 9406 HyStart++ | done (off by default) | |
 | RFC 8899 DPLPMTUD | partial | F5 |
-| draft-ietf-quic-reliable-stream-reset-11 | missing | F9 |
+| draft-ietf-quic-reliable-stream-reset-11 | done: `ResetStreamAt` announces parameter 0x1d, `QuicSocketBase::ResetStreamAt ()` sends frame 0x24 after discarding what was not sent, lost bytes beyond the reliable size are not sent again, the receiver delivers the reliable bytes and then resets (quic-extensions); the reliable size is capped at what was already sent | F9 |
 | draft-ietf-quic-ack-frequency-14 | partial (the frames are done; the threshold is off by one) | F9 |
 | draft-ietf-quic-receive-ts-04 | missing | F10 |
 | draft-ietf-quic-qlog-main-schema-15, quic-events-14 | partial (JSON-SEQ writer, connection, packet, recovery and timer events; no alpn, stream or path events, no drops for packets of unknown connections) | F6 (rest in F7 to F11) |

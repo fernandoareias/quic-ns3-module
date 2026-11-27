@@ -26,6 +26,7 @@
 #include "ns3/node.h"
 #include "ns3/packet.h"
 #include "ns3/ptr.h"
+#include "ns3/random-variable-stream.h"
 #include "ns3/socket.h"
 #include "ns3/timer.h"
 #include "ns3/traced-value.h"
@@ -1052,6 +1053,57 @@ class QuicSocketBase : public QuicSocket
     /** Move datagrams from the queue to the transmit buffer while the congestion window allows. */
     void FlushDatagrams();
 
+    /** @return true when this end announced reset_stream_at. */
+    bool ResetStreamAtAccepted() const
+    {
+        return m_resetStreamAt;
+    }
+
+    /** @return true when the peer announced reset_stream_at. */
+    bool PeerSupportsResetStreamAt() const
+    {
+        return m_peerResetStreamAt;
+    }
+
+    /**
+     * Keep the retransmission of a stream within its reliable size.
+     *
+     * @param streamId the stream.
+     * @param limit the reliable size.
+     */
+    void SetStreamReliableLimit(uint64_t streamId, uint64_t limit)
+    {
+        m_txBuffer->SetReliableLimit(streamId, limit);
+    }
+
+    /**
+     * Reset the sending part of a stream, but only after its first reliableSize bytes were
+     * delivered (draft-ietf-quic-reliable-stream-reset): the bytes of the stream that were not
+     * sent yet are dropped, and the lost ones beyond the reliable size are not sent again. The
+     * peer has to have announced reset_stream_at.
+     *
+     * @param streamId the stream.
+     * @param errorCode the application protocol error code.
+     * @param reliableSize the number of bytes that are delivered reliably, at most the number
+     *        written to the stream so far.
+     * @return true when the frame was sent.
+     */
+    bool ResetStreamAt(uint64_t streamId, uint64_t errorCode, uint64_t reliableSize);
+
+    /** @return true when this end announced grease_quic_bit and accepts a Fixed Bit of 0. */
+    bool GreaseQuicBitAccepted() const
+    {
+        return m_greaseQuicBit;
+    }
+
+    /**
+     * Choose the Fixed Bit of a packet about to be sent. It is 1 unless both ends announced
+     * grease_quic_bit (RFC 9287), and then it is random.
+     *
+     * @param header the header of the packet; Initial, Retry and Version Negotiation keep the bit.
+     */
+    void ChooseFixedBit(QuicHeader& header);
+
     /**
      * Start a key update (RFC 9001, Section 6): the packets that follow carry the other value of
      * the Key Phase bit. It is possible once the handshake is confirmed and a packet sent with the
@@ -1630,6 +1682,11 @@ class QuicSocketBase : public QuicSocket
 
     std::vector<EarlyPacket> m_earlyPackets; //!< kept until the handshake completes
     bool m_replayingEarlyPackets{false};     //!< the packets above are being processed
+    bool m_resetStreamAt{false};             //!< attribute ResetStreamAt
+    bool m_peerResetStreamAt{false};         //!< the peer announced reset_stream_at
+    bool m_greaseQuicBit{false};             //!< attribute GreaseQuicBit
+    bool m_peerGreaseQuicBit{false};         //!< the peer announced grease_quic_bit
+    Ptr<UniformRandomVariable> m_greaseRv;   //!< makes the Fixed Bit of the packets that are sent
     bool m_ecnEnabled{false};           //!< attribute EnableEcn
     EcnState m_ecnState{ECN_OFF};       //!< state of the validation
     uint8_t m_receivedEcn{0};           //!< ECN codepoint of the datagram being processed

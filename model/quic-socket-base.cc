@@ -22,6 +22,7 @@
 #include "quic-l4-protocol.h"
 #include "quic-qlog-writer.h"
 #include "quic-socket-tx-edf-scheduler.h"
+#include "quic-stream-base.h"
 
 #include "ns3/abort.h"
 #include "ns3/double.h"
@@ -135,6 +136,19 @@ QuicSocketBase::GetTypeId(void)
                           StringValue("ecdsa"),
                           MakeStringAccessor(&QuicSocketBase::m_tlsProfileName),
                           MakeStringChecker())
+            .AddAttribute("ResetStreamAt",
+                          "Announce reset_stream_at (draft-ietf-quic-reliable-stream-reset): the "
+                          "RESET_STREAM_AT frame, a reset that waits for the first bytes of the "
+                          "stream to be delivered",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&QuicSocketBase::m_resetStreamAt),
+                          MakeBooleanChecker())
+            .AddAttribute("GreaseQuicBit",
+                          "Announce grease_quic_bit (RFC 9287): accept packets with a Fixed Bit of "
+                          "0 and, when the peer announces it too, send some",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&QuicSocketBase::m_greaseQuicBit),
+                          MakeBooleanChecker())
             .AddAttribute("MaxDatagramFrameSize",
                           "max_datagram_frame_size to announce (RFC 9221): the largest DATAGRAM "
                           "frame this endpoint accepts, 0 to take none",
@@ -801,6 +815,8 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
 
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
+    m_resetStreamAt = sock.m_resetStreamAt;
+    m_greaseQuicBit = sock.m_greaseQuicBit;
     m_maxDatagramFrameSize = sock.m_maxDatagramFrameSize;
     m_datagramQueueLimit = sock.m_datagramQueueLimit;
     m_datagramRxTrace = sock.m_datagramRxTrace;
@@ -3358,6 +3374,8 @@ QuicSocketBase::OnSendingTransportParameters()
     transportParameters.SetMinAckDelay(1000);
     transportParameters.SetActiveConnectionIdLimit(kActiveCidLimit);
     transportParameters.SetMaxDatagramFrameSize(m_maxDatagramFrameSize);
+    transportParameters.SetGreaseQuicBit(m_greaseQuicBit);
+    transportParameters.SetResetStreamAt(m_resetStreamAt);
     transportParameters.SetDisableActiveMigration(m_disableActiveMigration ? 1 : 0);
 
     // RFC 9000 §18.2: server generates a stateless reset token derived from connection ID
@@ -3503,6 +3521,8 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     // sends after the handshake, for a later connection that starts with 0-RTT data
     m_peerParameters = transportParameters;
     m_peerMaxDatagramFrameSize = transportParameters.GetMaxDatagramFrameSize();
+    m_peerGreaseQuicBit = transportParameters.GetGreaseQuicBit();
+    m_peerResetStreamAt = transportParameters.GetResetStreamAt();
 
     // RFC 9000 s10.1: the effective idle timeout is the smaller of the two advertised values, a
     // value of 0 meaning "no limit" for that endpoint (both 0: the timer is off)
@@ -5545,6 +5565,32 @@ QuicSocketBase::OnReceivedDatagram(const QuicSubheader& sub, Ptr<Packet> data)
     {
         m_datagramCallback(this, data);
     }
+}
+
+void
+QuicSocketBase::ChooseFixedBit(QuicHeader& header)
+{
+    if (!m_greaseQuicBit || !m_peerGreaseQuicBit || header.IsInitial() || header.IsRetry() ||
+        header.IsVersionNegotiation())
+    {
+        return;
+    }
+    if (m_greaseRv == nullptr)
+    {
+        m_greaseRv = CreateObject<UniformRandomVariable>();
+    }
+    header.SetFixedBit(m_greaseRv->GetInteger(0, 1) == 1);
+}
+
+bool
+QuicSocketBase::ResetStreamAt(uint64_t streamId, uint64_t errorCode, uint64_t reliableSize)
+{
+    if (!m_peerResetStreamAt || m_quicl5 == nullptr)
+    {
+        return false;
+    }
+    Ptr<QuicStreamBase> stream = m_quicl5->SearchStream(streamId);
+    return stream != nullptr && stream->ResetAt(errorCode, reliableSize);
 }
 
 } // namespace ns3

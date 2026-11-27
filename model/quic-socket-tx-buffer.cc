@@ -296,8 +296,9 @@ QuicSocketTxBuffer::Add(Ptr<Packet> p)
             if (headerSize)
             {
                 isStream = qsb.IsStream();
-                bool carriesStreamId = isStream || qsb.IsRstStream() || qsb.IsStopSending() ||
-                                       qsb.IsMaxStreamData() || qsb.IsStreamBlocked();
+                bool carriesStreamId = isStream || qsb.IsRstStream() || qsb.IsResetStreamAt() ||
+                                       qsb.IsStopSending() || qsb.IsMaxStreamData() ||
+                                       qsb.IsStreamBlocked();
                 priority = !carriesStreamId;
             }
             else
@@ -652,9 +653,19 @@ QuicSocketTxBuffer::Retransmission(SequenceNumber32 packetNumber)
                     pkt->RemoveAtStart(len);
                     // RFC 9000 s13.3: RESET_STREAM and STOP_SENDING are sent again until they are
                     // acknowledged
+                    if (sub.IsStream())
+                    {
+                        auto limit = m_reliableLimits.find(sub.GetStreamId());
+                        if (limit != m_reliableLimits.end() && sub.GetOffset() >= limit->second)
+                        {
+                            // RESET_STREAM_AT: the bytes beyond the reliable size are not sent
+                            // again
+                            continue;
+                        }
+                    }
                     if (!sub.IsStream() && !sub.IsMaxData() && !sub.IsMaxStreamData() &&
-                        !sub.IsRstStream() && !sub.IsStopSending() && !sub.IsBlocked() &&
-                        !sub.IsStreamBlocked() && !sub.IsAckFrequency() &&
+                        !sub.IsRstStream() && !sub.IsResetStreamAt() && !sub.IsStopSending() &&
+                        !sub.IsBlocked() && !sub.IsStreamBlocked() && !sub.IsAckFrequency() &&
                         sub.GetFrameType() != QuicSubheader::MAX_STREAMS_BIDI &&
                         sub.GetFrameType() != QuicSubheader::MAX_STREAMS_UNI &&
                         sub.GetFrameType() != QuicSubheader::STREAMS_BLOCKED_BIDI &&

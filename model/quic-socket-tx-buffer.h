@@ -24,6 +24,8 @@
 #include "ns3/tcp-socket-base.h"
 #include "ns3/traced-value.h"
 
+#include <map>
+
 namespace ns3
 {
 
@@ -278,6 +280,17 @@ class QuicSocketTxBuffer : public Object
     uint32_t GetNumFrameStream0InBuffer(void) const;
 
     /**
+     * Stop sending again the bytes of a stream from an offset on (RESET_STREAM_AT).
+     *
+     * @param streamId the stream.
+     * @param limit the reliable size: the offset from which lost frames are not retransmitted.
+     */
+    void SetReliableLimit(uint64_t streamId, uint64_t limit)
+    {
+        m_reliableLimits[streamId] = limit;
+    }
+
+    /**
      * Return the next frame for stream 0 to be sent
      * and add this packet to the sent list
      *
@@ -427,6 +440,7 @@ class QuicSocketTxBuffer : public Object
     QuicTxPacketList m_sentList;        //!< List of sent packets with additional info
     QuicTxPacketList m_streamZeroList;  //!< List of waiting stream 0 packets with additional info
     uint32_t m_maxBuffer;               //!< Max number of data bytes in buffer (SND.WND)
+    std::map<uint64_t, uint64_t> m_reliableLimits; //!< RESET_STREAM_AT: offset limits by stream
     uint32_t m_streamZeroSize;          //!< Size of all stream 0 data in the application list
     uint32_t m_sentSize;                //!< Size of all data in the sent list
     uint32_t m_numFrameStream0InBuffer; //!< Number of Stream 0 frames buffered

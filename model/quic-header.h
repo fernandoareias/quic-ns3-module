@@ -362,6 +362,24 @@ class QuicHeader : public Header
      */
     bool IsValid() const;
 
+    /** @return the Fixed Bit: 1 except in a packet of an endpoint that negotiated RFC 9287. */
+    bool GetFixedBit() const
+    {
+        return m_fixedBit;
+    }
+
+    /**
+     * Set the Fixed Bit of the packet to send, which an endpoint may clear once the peer has
+     * announced grease_quic_bit (RFC 9287). Initial, Retry and Version Negotiation packets keep
+     * it.
+     *
+     * @param fixedBit the value.
+     */
+    void SetFixedBit(bool fixedBit)
+    {
+        m_fixedBit = fixedBit;
+    }
+
     /** @return the form bit. */
     uint8_t GetFormat() const;
 
@@ -436,6 +454,7 @@ class QuicHeader : public Header
     std::vector<uint32_t> m_versions; //!< Versions of a Version Negotiation packet
     uint8_t m_shortCidLength;         //!< Destination Connection ID length of a short header
     bool m_valid;                     //!< The bytes read form a valid header
+    bool m_fixedBit{true};            //!< the Fixed Bit of the first byte
 };
 
 } // namespace ns3

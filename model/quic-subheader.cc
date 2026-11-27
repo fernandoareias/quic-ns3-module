@@ -395,6 +395,13 @@ QuicSubheader::Encode(Writer& w) const
         w.VarInt(m_offset); // Final Size
         break;
 
+    case RESET_STREAM_AT:
+        w.VarInt(m_streamId);
+        w.VarInt(m_errorCode);
+        w.VarInt(m_offset); // Final Size
+        w.VarInt(m_reliableSize);
+        break;
+
     case STOP_SENDING: // RFC 9000 Section 19.5
         w.VarInt(m_streamId);
         w.VarInt(m_errorCode);
@@ -545,6 +552,7 @@ QuicSubheader::Deserialize(Buffer::Iterator start)
     m_parseError = 0;
     m_offset = 0;
     m_length = 0;
+    m_reliableSize = 0;
     m_token.clear();
     m_reasonPhrase.clear();
 
@@ -580,6 +588,15 @@ QuicSubheader::Deserialize(Buffer::Iterator start)
 
     case RESET_STREAM:
         if (!r.VarInt(m_streamId) || !r.VarInt(m_errorCode) || !r.VarInt(m_offset))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case RESET_STREAM_AT:
+        // a Reliable Size larger than the Final Size is a FRAME_ENCODING_ERROR
+        if (!r.VarInt(m_streamId) || !r.VarInt(m_errorCode) || !r.VarInt(m_offset) ||
+            !r.VarInt(m_reliableSize) || m_reliableSize > m_offset)
         {
             return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
         }
@@ -1173,6 +1190,21 @@ QuicSubheader::CreateAck(uint64_t largestAcknowledged,
     sub.SetGaps(gaps);
     sub.SetAdditionalAckBlocks(additionalAckBlocks);
 
+    return sub;
+}
+
+QuicSubheader
+QuicSubheader::CreateResetStreamAt(uint64_t streamId,
+                                   uint64_t errorCode,
+                                   uint64_t finalSize,
+                                   uint64_t reliableSize)
+{
+    QuicSubheader sub;
+    sub.SetFrameType(RESET_STREAM_AT);
+    sub.m_streamId = streamId;
+    sub.m_errorCode = errorCode;
+    sub.m_offset = finalSize;
+    sub.m_reliableSize = reliableSize;
     return sub;
 }
 

@@ -123,6 +123,15 @@ class QuicStreamBase : public QuicStream
     bool Reset(uint64_t errorCode);
 
     /**
+     * Reset the sending part of the stream after its first bytes (RESET_STREAM_AT).
+     *
+     * @param errorCode the application protocol error code.
+     * @param reliableSize the number of bytes to deliver reliably; at most what was sent.
+     * @return true when the frame was sent.
+     */
+    bool ResetAt(uint64_t errorCode, uint64_t reliableSize);
+
+    /**
      * \\brief Finish the sending side gracefully: the last byte is sent with the FIN bit
      * \\return true if the FIN was queued
      */
@@ -274,6 +283,14 @@ class QuicStreamBase : public QuicStream
     bool m_stopSendingSent{false}; //!< STOP_SENDING already sent on this stream
     uint64_t m_blockedReportedAt{
         UINT64_MAX};                 //!< Stream limit for which STREAM_DATA_BLOCKED was last sent
+    bool m_resetAtPending{false};    //!< a RESET_STREAM_AT waits for the reliable bytes
+    uint64_t m_reliableSize{UINT64_MAX};        //!< receiving: bytes to deliver before the reset
+    uint64_t m_resetAtError{0};                 //!< receiving: error code of the pending reset
+    uint64_t m_resetAtSentReliable{UINT64_MAX}; //!< sending: reliable size of the latest frame
+
+    /** Deliver the reset of a RESET_STREAM_AT once the reliable bytes were. */
+    void CheckResetAtDelivered();
+
     uint64_t m_highestRecvOffset{0}; //!< Highest end offset received (connection-level accounting)
     uint64_t m_finalSize{0};         //!< Final size of the stream, once it is known
     bool m_finalSizeKnown{false};    //!< A FIN or a RESET_STREAM gave the final size

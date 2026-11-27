@@ -150,7 +150,7 @@ QuicHeader::Serialize(Buffer::Iterator start) const
     {
         // RFC 9000 Section 17.3.1: 0 | Fixed Bit | Spin Bit | Reserved (00) | Key Phase | Packet
         // Number Length (2)
-        i.WriteU8(0x40 | (m_spinBit << 5) | (m_k << 2) | (m_pnLength - 1));
+        i.WriteU8((m_fixedBit ? 0x40 : 0) | (m_spinBit << 5) | (m_k << 2) | (m_pnLength - 1));
         m_dcid.Serialize(i);
     }
     else
@@ -169,6 +169,10 @@ QuicHeader::Serialize(Buffer::Iterator start) const
         else
         {
             first = 0xC0 | (LongTypeBits() << 4) | (m_pnLength - 1);
+            if (!m_fixedBit)
+            {
+                first &= ~0x40;
+            }
         }
         i.WriteU8(first);
         i.WriteHtonU32(IsVersionNegotiation() ? 0 : m_version);
@@ -255,7 +259,10 @@ QuicHeader::Deserialize(Buffer::Iterator start)
         m_k = (first & 0x04) != 0;
         m_pnLength = (first & 0x03) + 1;
         m_version = 0;
-        if (!(first & 0x40) || (first & 0x18))
+        // a Fixed Bit of 0 is for the receiver to judge: it is valid when it announced
+        // grease_quic_bit (RFC 9287)
+        m_fixedBit = (first & 0x40) != 0;
+        if (first & 0x18)
         {
             m_valid = false;
         }
@@ -315,14 +322,16 @@ QuicHeader::Deserialize(Buffer::Iterator start)
         return total - left;
     }
 
-    if (!(first & 0x40))
-    {
-        m_valid = false;
-    }
+    m_fixedBit = (first & 0x40) != 0;
     const uint8_t typeBits = (first >> 4) & 0x03;
     static const uint8_t v1[4] = {INITIAL, ZRTT_PROTECTED, HANDSHAKE, RETRY};
     static const uint8_t v2[4] = {RETRY, INITIAL, ZRTT_PROTECTED, HANDSHAKE};
     m_type = (m_version == QUIC_VERSION_2) ? v2[typeBits] : v1[typeBits];
+    if (!m_fixedBit && (m_type == INITIAL || m_type == RETRY))
+    {
+        // no endpoint can have negotiated grease_quic_bit before these
+        m_valid = false;
+    }
 
     if (m_type == RETRY)
     {

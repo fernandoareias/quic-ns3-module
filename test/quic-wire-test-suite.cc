@@ -478,7 +478,15 @@ class QuicWireHeaderFormsTest : public TestCase
         };
         std::vector<uint8_t> good = Hex("40010203040506070805");
         NS_TEST_ASSERT_MSG_EQ(valid(good, 3), true, "a short header");
-        NS_TEST_ASSERT_MSG_EQ(valid({0x00, 1, 2, 3, 4, 5, 6, 7, 8, 5}, 3), false, "Fixed Bit is 0");
+        // a Fixed Bit of 0 is for the endpoint to judge (RFC 9287): it is dropped unless the
+        // endpoint announced grease_quic_bit
+        NS_TEST_ASSERT_MSG_EQ(valid({0x00, 1, 2, 3, 4, 5, 6, 7, 8, 5}, 3), true, "Fixed Bit is 0");
+        {
+            QuicHeader greased;
+            uint32_t n = 0;
+            ReadHeader({0x00, 1, 2, 3, 4, 5, 6, 7, 8, 5}, 3, greased, n);
+            NS_TEST_ASSERT_MSG_EQ(greased.GetFixedBit(), false, "and says so");
+        }
         NS_TEST_ASSERT_MSG_EQ(valid({0x48, 1, 2, 3, 4, 5, 6, 7, 8, 5}, 3),
                               false,
                               "reserved bit is 1");

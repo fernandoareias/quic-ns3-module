@@ -850,6 +850,14 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
                          << ", dropping packet");
         return;
     }
+    if (!header.GetFixedBit() && !socket->GreaseQuicBitAccepted())
+    {
+        // RFC 9000, Section 17.2: a packet with a Fixed Bit of 0 is dropped, unless the endpoint
+        // announced grease_quic_bit (RFC 9287)
+        NS_LOG_WARN(this << " dropping a packet with a Fixed Bit of 0");
+        socket->NotifyPacketDropped(&header, packet->GetSize(), "invalid", "Fixed Bit is 0");
+        return;
+    }
     if (header.IsShort())
     {
         // the path of the packet: its remote address and the UDP socket it arrived on
@@ -1424,11 +1432,12 @@ QuicL4Protocol::SendPacket(Ptr<QuicSocketBase> socket,
     // Given the presence of multiple subheaders in pkt,
     // we create a new packet, add the new QUIC header and
     // then add pkt as payload
-    Ptr<Packet> packetSent =
-        BuildDatagram(outgoing,
-                      pkt,
-                      std::max(minDatagramSize,
-                               outgoing.IsInitial() ? socket->GetInitialPacketSize() : 0));
+    QuicHeader outgoingHeader = outgoing;
+    socket->ChooseFixedBit(outgoingHeader);
+    Ptr<Packet> packetSent = BuildDatagram(
+        outgoingHeader,
+        pkt,
+        std::max(minDatagramSize, outgoing.IsInitial() ? socket->GetInitialPacketSize() : 0));
     SendBytes(socket, packetSent);
 }
 
@@ -1449,7 +1458,9 @@ QuicL4Protocol::SendDatagram(
         const bool last = k + 1 == packets.size();
         const uint32_t before = datagram ? datagram->GetSize() : 0;
         const uint32_t pad = last && minDatagramSize > before ? minDatagramSize - before : 0;
-        Ptr<Packet> packet = BuildDatagram(packets[k].first, packets[k].second, pad);
+        QuicHeader packetHeader = packets[k].first;
+        socket->ChooseFixedBit(packetHeader);
+        Ptr<Packet> packet = BuildDatagram(packetHeader, packets[k].second, pad);
         if (datagram)
         {
             datagram->AddAtEnd(packet);

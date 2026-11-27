@@ -253,8 +253,8 @@ QuicL5Protocol::DispatchRecv(Ptr<Packet> data, Address& address)
     {
         QuicSubheader sub = (*it).second;
 
-        if (sub.IsRstStream() or sub.IsMaxStreamData() or sub.IsStreamBlocked() or
-            sub.IsStopSending() or sub.IsStream())
+        if (sub.IsRstStream() or sub.IsResetStreamAt() or sub.IsMaxStreamData() or
+            sub.IsStreamBlocked() or sub.IsStopSending() or sub.IsStream())
         {
             Ptr<QuicStreamBase> stream;
             bool fatal = false;
@@ -557,6 +557,24 @@ QuicL5Protocol::OnBytesReceivedAtOffset(uint64_t bytes)
 {
     m_connRecvTotal += bytes;
     return m_connRecvTotal <= GetMaxData();
+}
+
+bool
+QuicL5Protocol::ResetStreamAtAccepted() const
+{
+    return m_socket->ResetStreamAtAccepted();
+}
+
+bool
+QuicL5Protocol::PeerSupportsResetStreamAt() const
+{
+    return m_socket->PeerSupportsResetStreamAt();
+}
+
+void
+QuicL5Protocol::SetReliableLimit(uint64_t streamId, uint64_t limit)
+{
+    m_socket->SetStreamReliableLimit(streamId, limit);
 }
 
 bool

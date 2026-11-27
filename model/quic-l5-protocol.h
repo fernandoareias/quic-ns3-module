@@ -182,6 +182,19 @@ class QuicL5Protocol : public Object
      *
      * @param type the packet type.
      */
+    bool ResetStreamAtAccepted() const;
+
+    /** @return true when the peer announced reset_stream_at. */
+    bool PeerSupportsResetStreamAt() const;
+
+    /**
+     * Keep the retransmission of a stream within its reliable size.
+     *
+     * @param streamId the stream.
+     * @param limit the reliable size.
+     */
+    void SetReliableLimit(uint64_t streamId, uint64_t limit);
+
     void SetReceivedPacketType(QuicPacketType type)
     {
         m_recvPacketType = type;
