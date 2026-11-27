@@ -721,6 +721,11 @@ QuicQlogWriter::FramesToJson(Ptr<const Packet> payload, uint8_t ackDelayExponent
         {
             f << "{\"frame_type\":\"handshake_done\"";
         }
+        else if (sub.IsDatagram())
+        {
+            f << "{\"frame_type\":\"datagram\"";
+            raw(headerBytes + dataLen, dataLen);
+        }
         else
         {
             f << "{\"frame_type\":\"unknown\",\"frame_type_bytes\":" << type;

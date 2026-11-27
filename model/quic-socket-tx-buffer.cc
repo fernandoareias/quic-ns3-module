@@ -306,6 +306,8 @@ QuicSocketTxBuffer::Add(Ptr<Packet> p)
             }
             item->m_isStream = isStream;
             item->m_isStream0 = priority;
+            // RFC 9221, Section 5.2: a lost DATAGRAM frame is not sent again
+            item->m_noRetransmit = qsb.IsDatagram();
             m_numFrameStream0InBuffer += priority;
             if (priority)
             {
@@ -346,6 +348,7 @@ QuicSocketTxBuffer::NextStream0Sequence(const SequenceNumber32 seq)
         outItem->m_lastSent = Now();
         outItem->m_packet = currentPacket;
         outItem->m_isStream0 = (*it)->m_isStream0;
+        outItem->m_noRetransmit = (*it)->m_noRetransmit;
         m_streamZeroList.erase(it);
         m_streamZeroSize -= currentPacket->GetSize();
         m_sentList.insert(m_sentList.end(), outItem);
@@ -624,6 +627,11 @@ QuicSocketTxBuffer::Retransmission(SequenceNumber32 packetNumber)
         Ptr<QuicSocketTxItem> item = *sent_it;
         if (item->m_lost)
         {
+            if (item->m_noRetransmit)
+            {
+                m_sentSize -= item->m_packet->GetSize();
+                continue;
+            }
             if (!item->m_isStream0)
             {
                 // A sent packet may carry several frames (e.g. from different streams, plus

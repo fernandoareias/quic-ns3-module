@@ -99,7 +99,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 
 | Document | Status | Phase |
 |---|---|---|
-| RFC 9221 DATAGRAM | missing | F9 |
+| RFC 9221 (DATAGRAM) | done: `MaxDatagramFrameSize` announces it, `SendDatagram ()` queues a datagram that is sent within the congestion window and never again; frames that were not agreed to or are too large close the connection (quic-extensions) | F9 |
 | RFC 9287 GREASE bit | missing | F9 |
 | RFC 9368 compatible version negotiation | missing | F9 |
 | RFC 9369 QUIC version 2 | missing | F9 |

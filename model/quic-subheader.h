@@ -136,6 +136,8 @@ class QuicSubheader : public Header
             0x1d,              //!< Conn Close App   RFC 9000 §19.19 (era APPLICATION_CLOSE=0x03)
         HANDSHAKE_DONE = 0x1e, //!< Handshake Done   RFC 9000 §19.20
         IMMEDIATE_ACK = 0x1f,  //!< Immediate Ack    draft-ietf-quic-ack-frequency (msquic)
+        DATAGRAM = 0x30,       //!< Datagram, to the end of the packet  RFC 9221
+        DATAGRAM_LEN = 0x31,   //!< Datagram with a length              RFC 9221
         ACK_FREQUENCY = 0xaf   //!< Ack Frequency    draft-ietf-quic-ack-frequency (msquic)
     } TypeFrame_t;
 
@@ -959,6 +961,20 @@ class QuicSubheader : public Header
      * @return the frame.
      */
     static QuicSubheader CreateNewToken(const std::vector<uint8_t>& token);
+
+    /**
+     * Create a DATAGRAM frame with a Length field (RFC 9221, Section 4); the data follows it.
+     *
+     * @param length the number of bytes of data.
+     * @return the frame.
+     */
+    static QuicSubheader CreateDatagram(uint64_t length);
+
+    /** @return true for a DATAGRAM frame, with or without a Length field. */
+    bool IsDatagram() const
+    {
+        return m_frameType == DATAGRAM || m_frameType == DATAGRAM_LEN;
+    }
 
     /** @return the type of the frame that triggered a CONNECTION_CLOSE frame. */
     uint64_t GetTriggerFrameType() const

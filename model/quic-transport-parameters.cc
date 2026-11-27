@@ -157,6 +157,9 @@ QuicTransportParameters::ResetToDefaults()
     m_initial_max_stream_data_bidi_remote = 0;
     m_initial_max_stream_data_uni = 0;
     m_min_ack_delay = 0;
+    m_max_datagram_frame_size = 0;
+    m_grease_quic_bit = false;
+    m_reset_stream_at = false;
     m_max_ack_delay = 25;
     m_active_connection_id_limit = 2;
     m_disable_active_migration = 0;
@@ -253,6 +256,18 @@ QuicTransportParameters::EncodeEntries() const
     if (m_min_ack_delay != 0)
     {
         AppendVarIntEntry(out, MIN_ACK_DELAY, m_min_ack_delay);
+    }
+    if (m_max_datagram_frame_size != 0)
+    {
+        AppendVarIntEntry(out, MAX_DATAGRAM_FRAME_SIZE, m_max_datagram_frame_size);
+    }
+    if (m_grease_quic_bit)
+    {
+        AppendBytesEntry(out, GREASE_QUIC_BIT, {});
+    }
+    if (m_reset_stream_at)
+    {
+        AppendBytesEntry(out, RESET_STREAM_AT, {});
     }
     for (const auto& raw : m_raw)
     {
@@ -423,6 +438,19 @@ QuicTransportParameters::Deserialize(Buffer::Iterator start)
             ok = isNumber;
             m_min_ack_delay = number;
             break;
+        case MAX_DATAGRAM_FRAME_SIZE:
+            ok = isNumber;
+            m_max_datagram_frame_size = number;
+            break;
+        case GREASE_QUIC_BIT:
+            // RFC 9287, Section 3: the parameter has no value
+            ok = value.empty();
+            m_grease_quic_bit = true;
+            break;
+        case RESET_STREAM_AT:
+            ok = value.empty();
+            m_reset_stream_at = true;
+            break;
         default:
             // RFC 9000 Section 7.4.2: a parameter that is not known is ignored
             m_raw[id] = value;
@@ -506,7 +534,11 @@ operator==(const QuicTransportParameters& lhs, const QuicTransportParameters& rh
            lhs.m_initial_max_stream_id_uni == rhs.m_initial_max_stream_id_uni &&
            lhs.m_initial_max_stream_data_bidi_remote == rhs.m_initial_max_stream_data_bidi_remote &&
            lhs.m_initial_max_stream_data_uni == rhs.m_initial_max_stream_data_uni &&
-           lhs.m_min_ack_delay == rhs.m_min_ack_delay && lhs.m_max_ack_delay == rhs.m_max_ack_delay &&
+           lhs.m_min_ack_delay == rhs.m_min_ack_delay &&
+           lhs.m_max_ack_delay == rhs.m_max_ack_delay &&
+           lhs.m_max_datagram_frame_size == rhs.m_max_datagram_frame_size &&
+           lhs.m_grease_quic_bit == rhs.m_grease_quic_bit &&
+           lhs.m_reset_stream_at == rhs.m_reset_stream_at &&
            lhs.m_active_connection_id_limit == rhs.m_active_connection_id_limit &&
            lhs.m_disable_active_migration == rhs.m_disable_active_migration &&
            lhs.m_initial_source_connection_id == rhs.m_initial_source_connection_id &&

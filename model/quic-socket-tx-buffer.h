@@ -101,6 +101,7 @@ class QuicSocketTxItem : public Object
     uint8_t m_lossTrigger{LOSS_NONE}; //!< why the packet was declared lost
     uint32_t m_overhead{0};           //!< bytes of the QUIC header and the AEAD tag of the packet
     bool m_ecnMarked{false};          //!< the packet was sent with ECT(0)
+    bool m_noRetransmit{false};       //!< the packet is a DATAGRAM frame: never sent again
     bool m_lossReported{false};       //!< true once the loss was published on the trace sources
     bool m_retrans;                  //!< true if it is a retx
     bool m_sacked;                   //!< true if already acknowledged

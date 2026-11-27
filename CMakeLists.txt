@@ -84,5 +84,6 @@ build_lib(
                  test/quic-qlog-test-suite.cc
                  test/quic-handshake-test-suite.cc
                  test/quic-ecn-test-suite.cc
+                 test/quic-extensions-test-suite.cc
                  ${examples_as_tests_sources}
 )

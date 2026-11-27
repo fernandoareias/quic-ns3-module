@@ -663,7 +663,7 @@ class QuicWireTransportParametersTest : public TestCase
         ReadParameters(List("c0000000"), unknown);
         NS_TEST_ASSERT_MSG_EQ(unknown.IsValid(), false, "an identifier cut short is not valid");
         ReadParameters(List("1b03010203"
-                            "6ab200"),
+                            "6ab300"),
                        unknown);
         NS_TEST_ASSERT_MSG_EQ(unknown.IsValid(),
                               true,

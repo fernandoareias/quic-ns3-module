@@ -405,6 +405,13 @@ QuicSubheader::Encode(Writer& w) const
         w.VarInt(m_length);
         break;
 
+    case DATAGRAM: // RFC 9221 Section 4: the data runs to the end of the packet
+        break;
+
+    case DATAGRAM_LEN:
+        w.VarInt(m_length);
+        break;
+
     case NEW_TOKEN: // RFC 9000 Section 19.7
         w.VarInt(m_token.size());
         w.Bytes(m_token.data(), m_token.size());
@@ -587,6 +594,16 @@ QuicSubheader::Deserialize(Buffer::Iterator start)
 
     case CRYPTO:
         if (!r.VarInt(m_offset) || !r.VarInt(m_length))
+        {
+            return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        break;
+
+    case DATAGRAM:
+        break;
+
+    case DATAGRAM_LEN:
+        if (!r.VarInt(m_length))
         {
             return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
         }
@@ -1160,6 +1177,15 @@ QuicSubheader::CreateAck(uint64_t largestAcknowledged,
 }
 
 QuicSubheader
+QuicSubheader::CreateDatagram(uint64_t length)
+{
+    QuicSubheader sub;
+    sub.SetFrameType(DATAGRAM_LEN);
+    sub.m_length = length;
+    return sub;
+}
+
+QuicSubheader
 QuicSubheader::CreatePathChallenge(uint64_t data)
 {
     NS_LOG_INFO("Created PathChallenge Header");
@@ -1388,7 +1414,11 @@ QuicSubheader::GetPayloadLength(uint64_t remaining) const
     {
         return (m_frameType & 0x02) ? m_length : remaining;
     }
-    return m_frameType == CRYPTO ? m_length : 0;
+    if (m_frameType == DATAGRAM)
+    {
+        return remaining;
+    }
+    return (m_frameType == CRYPTO || m_frameType == DATAGRAM_LEN) ? m_length : 0;
 }
 
 QuicSubheader

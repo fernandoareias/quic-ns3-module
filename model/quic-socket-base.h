@@ -38,6 +38,7 @@
 #include "ns3/tcp-congestion-ops.h"
 #include "ns3/tcp-socket-base.h"
 
+#include <deque>
 #include <map>
 
 namespace ns3
@@ -1014,6 +1015,44 @@ class QuicSocketBase : public QuicSocket
     void ProcessEcn(const QuicSubheader& sub, const std::vector<Ptr<QuicSocketTxItem>>& acked);
 
     /**
+     * Write an unreliable datagram (RFC 9221): it is sent in one DATAGRAM frame, within the
+     * congestion window, and never sent again when its packet is lost. It is dropped, and counted
+     * by the DatagramDropped trace, when the queue is full or it cannot fit in a packet.
+     *
+     * @param p the datagram.
+     * @return the number of bytes accepted, or -1 when the peer takes no datagrams (it did not
+     *         send max_datagram_frame_size), the datagram is too large or the queue is full.
+     */
+    int SendDatagram(Ptr<Packet> p);
+
+    /**
+     * Say what to do with the datagrams that arrive.
+     *
+     * @param callback called with this socket and the datagram.
+     */
+    void SetDatagramCallback(Callback<void, Ptr<QuicSocketBase>, Ptr<Packet>> callback)
+    {
+        m_datagramCallback = callback;
+    }
+
+    /**
+     * @return the largest datagram that can be written now: what the peer accepts and a packet
+     *         holds, 0 when the peer takes none.
+     */
+    uint32_t GetMaxDatagramSize() const;
+
+    /**
+     * Take a DATAGRAM frame.
+     *
+     * @param sub the frame.
+     * @param data the bytes of the datagram.
+     */
+    void OnReceivedDatagram(const QuicSubheader& sub, Ptr<Packet> data);
+
+    /** Move datagrams from the queue to the transmit buffer while the congestion window allows. */
+    void FlushDatagrams();
+
+    /**
      * Start a key update (RFC 9001, Section 6): the packets that follow carry the other value of
      * the Key Phase bit. It is possible once the handshake is confirmed and a packet sent with the
      * current keys was acknowledged.
@@ -1572,6 +1611,25 @@ class QuicSocketBase : public QuicSocket
         ECN_FAILED   //!< the path or the peer does not support it: packets are not marked
     };
 
+    uint32_t m_maxDatagramFrameSize{0};      //!< attribute MaxDatagramFrameSize
+    uint32_t m_datagramQueueLimit{65536};    //!< attribute DatagramQueueSize
+    uint64_t m_peerMaxDatagramFrameSize{0};  //!< max_datagram_frame_size of the peer
+    std::deque<Ptr<Packet>> m_datagramQueue; //!< datagrams written and not sent yet
+    uint32_t m_datagramQueueBytes{0};        //!< bytes in m_datagramQueue
+    Callback<void, Ptr<QuicSocketBase>, Ptr<Packet>> m_datagramCallback; //!< delivery of datagrams
+    TracedCallback<Ptr<const Packet>> m_datagramRxTrace;      //!< trace of datagrams received
+    TracedCallback<Ptr<const Packet>> m_datagramDroppedTrace; //!< trace of datagrams dropped
+
+    /** A 1-RTT packet that arrived before the server finished its handshake. */
+    struct EarlyPacket
+    {
+        Ptr<Packet> packet; //!< the frames
+        QuicHeader header;  //!< the header
+        Address from;       //!< the address it came from
+    };
+
+    std::vector<EarlyPacket> m_earlyPackets; //!< kept until the handshake completes
+    bool m_replayingEarlyPackets{false};     //!< the packets above are being processed
     bool m_ecnEnabled{false};           //!< attribute EnableEcn
     EcnState m_ecnState{ECN_OFF};       //!< state of the validation
     uint8_t m_receivedEcn{0};           //!< ECN codepoint of the datagram being processed

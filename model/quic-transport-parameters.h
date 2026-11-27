@@ -80,6 +80,12 @@ class QuicTransportParameters : public Header
     static constexpr uint64_t RETRY_SOURCE_CONNECTION_ID = 0x10;
     /** Identifier of min_ack_delay (draft-ietf-quic-ack-frequency). */
     static constexpr uint64_t MIN_ACK_DELAY = 0xff04de1b;
+    /** Identifier of max_datagram_frame_size (RFC 9221). */
+    static constexpr uint64_t MAX_DATAGRAM_FRAME_SIZE = 0x20;
+    /** Identifier of grease_quic_bit (RFC 9287). */
+    static constexpr uint64_t GREASE_QUIC_BIT = 0x2ab2;
+    /** Identifier of reset_stream_at (draft-ietf-quic-reliable-stream-reset). */
+    static constexpr uint64_t RESET_STREAM_AT = 0x1d;
 
     QuicTransportParameters();
     ~QuicTransportParameters() override;
@@ -183,6 +189,42 @@ class QuicTransportParameters : public Header
     void SetMaxAckDelay(uint64_t val);
 
     /** @return min_ack_delay in microseconds, 0 when the endpoint does not support ACK_FREQUENCY. */
+    /** @return max_datagram_frame_size (RFC 9221), 0 when the endpoint does not take datagrams. */
+    uint64_t GetMaxDatagramFrameSize() const
+    {
+        return m_max_datagram_frame_size;
+    }
+
+    /** @param size max_datagram_frame_size, 0 to leave it out. */
+    void SetMaxDatagramFrameSize(uint64_t size)
+    {
+        m_max_datagram_frame_size = size;
+    }
+
+    /** @return true when the endpoint sends the grease_quic_bit parameter (RFC 9287). */
+    bool GetGreaseQuicBit() const
+    {
+        return m_grease_quic_bit;
+    }
+
+    /** @param value true to send grease_quic_bit. */
+    void SetGreaseQuicBit(bool value)
+    {
+        m_grease_quic_bit = value;
+    }
+
+    /** @return true when the endpoint sends the reset_stream_at parameter. */
+    bool GetResetStreamAt() const
+    {
+        return m_reset_stream_at;
+    }
+
+    /** @param value true to send reset_stream_at. */
+    void SetResetStreamAt(bool value)
+    {
+        m_reset_stream_at = value;
+    }
+
     uint64_t GetMinAckDelay() const;
     /** @param val min_ack_delay in microseconds. */
     void SetMinAckDelay(uint64_t val);
@@ -269,6 +311,9 @@ class QuicTransportParameters : public Header
     uint64_t m_initial_max_stream_id_uni{0};  //!< initial_max_streams_uni
     uint64_t m_initial_max_stream_data_bidi_remote{0}; //!< initial_max_stream_data_bidi_remote
     uint64_t m_initial_max_stream_data_uni{0};         //!< initial_max_stream_data_uni
+    uint64_t m_max_datagram_frame_size{0};             //!< max_datagram_frame_size
+    bool m_grease_quic_bit{false};                     //!< grease_quic_bit is present
+    bool m_reset_stream_at{false};                     //!< reset_stream_at is present
     uint64_t m_min_ack_delay{0};                       //!< min_ack_delay in microseconds
     uint64_t m_max_ack_delay{25};                      //!< max_ack_delay in milliseconds
     uint64_t m_active_connection_id_limit{2};          //!< active_connection_id_limit

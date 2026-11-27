@@ -740,6 +740,15 @@ QuicSocketBase::CompleteServerHandshake()
     m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
     // RFC 9000, Section 19.20: the server confirms the handshake
     SendControlFrame(QuicSubheader::CreateHandshakeDone());
+    // the 1-RTT packets that came before the end of the handshake are processed now
+    m_replayingEarlyPackets = true;
+    std::vector<EarlyPacket> early;
+    early.swap(m_earlyPackets);
+    for (auto& e : early)
+    {
+        ReceivedData(e.packet, e.header, e.from);
+    }
+    m_replayingEarlyPackets = false;
     // RFC 8446, Section 4.6.1: and a session ticket that lets it send 0-RTT data next time
     SendApplicationCrypto(QuicTlsEmulator::NewSessionTicket(m_tlsProfile, m_quicl4->IssueTicket()));
     // RFC 9000, Section 8.1.3: and gives the client a token for its next connection

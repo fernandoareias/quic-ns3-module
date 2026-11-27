@@ -135,6 +135,18 @@ QuicSocketBase::GetTypeId(void)
                           StringValue("ecdsa"),
                           MakeStringAccessor(&QuicSocketBase::m_tlsProfileName),
                           MakeStringChecker())
+            .AddAttribute("MaxDatagramFrameSize",
+                          "max_datagram_frame_size to announce (RFC 9221): the largest DATAGRAM "
+                          "frame this endpoint accepts, 0 to take none",
+                          UintegerValue(0),
+                          MakeUintegerAccessor(&QuicSocketBase::m_maxDatagramFrameSize),
+                          MakeUintegerChecker<uint32_t>(0, 65535))
+            .AddAttribute("DatagramQueueSize",
+                          "Bytes of datagrams that wait for the congestion window; more are "
+                          "dropped",
+                          UintegerValue(65536),
+                          MakeUintegerAccessor(&QuicSocketBase::m_datagramQueueLimit),
+                          MakeUintegerChecker<uint32_t>())
             .AddAttribute("EnableEcn",
                           "Mark the packets with ECT(0) and respond to the ECN-CE counts of the "
                           "peer, after the validation of RFC 9000, Section 13.4.2 (off in "
@@ -429,6 +441,14 @@ QuicSocketBase::GetTypeId(void)
                             "Receive QUIC packet from UDP protocol",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_rxTrace),
                             "ns3::QuicSocketBase::QuicTxRxTracedCallback")
+            .AddTraceSource("DatagramRx",
+                            "A datagram arrived",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_datagramRxTrace),
+                            "ns3::Packet::TracedCallback")
+            .AddTraceSource("DatagramDropped",
+                            "A datagram was dropped before it was sent",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_datagramDroppedTrace),
+                            "ns3::Packet::TracedCallback")
             .AddTraceSource("EcnCounts",
                             "The ECN counts of the peer changed (ECT(0) plus CE, CE)",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_ecnTrace),
@@ -781,6 +801,10 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
 
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
+    m_maxDatagramFrameSize = sock.m_maxDatagramFrameSize;
+    m_datagramQueueLimit = sock.m_datagramQueueLimit;
+    m_datagramRxTrace = sock.m_datagramRxTrace;
+    m_datagramDroppedTrace = sock.m_datagramDroppedTrace;
     m_ecnEnabled = sock.m_ecnEnabled;
     m_ecnState = m_ecnEnabled ? ECN_TESTING : ECN_OFF;
     m_ecnTrace = sock.m_ecnTrace;
@@ -1228,6 +1252,7 @@ QuicSocketBase::AppendingTx(Ptr<Packet> frame)
 uint32_t
 QuicSocketBase::SendPendingData(bool withAck)
 {
+    FlushDatagrams();
     NS_LOG_FUNCTION(this << withAck);
 
     // the window may have shrunk since the tolerance was raised: the peer must keep acknowledging
@@ -3332,6 +3357,7 @@ QuicSocketBase::OnSendingTransportParameters()
     // msquic always advertises min_ack_delay (its timer resolution, 1 ms) and accepts ACK_FREQUENCY
     transportParameters.SetMinAckDelay(1000);
     transportParameters.SetActiveConnectionIdLimit(kActiveCidLimit);
+    transportParameters.SetMaxDatagramFrameSize(m_maxDatagramFrameSize);
     transportParameters.SetDisableActiveMigration(m_disableActiveMigration ? 1 : 0);
 
     // RFC 9000 §18.2: server generates a stateless reset token derived from connection ID
@@ -3476,6 +3502,7 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     // a client keeps what the server announced; it goes with the session ticket that the server
     // sends after the handshake, for a later connection that starts with 0-RTT data
     m_peerParameters = transportParameters;
+    m_peerMaxDatagramFrameSize = transportParameters.GetMaxDatagramFrameSize();
 
     // RFC 9000 s10.1: the effective idle timeout is the smaller of the two advertised values, a
     // value of 0 meaning "no limit" for that endpoint (both 0: the timer is off)
@@ -3692,7 +3719,22 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         // RFC 9000 Section 7.2: the client sends to the id the server chose from now on
         m_peerCid = quicHeader.GetSourceConnectionId();
     }
-    NotifyPacketReceived(p, quicHeader);
+    if (!m_replayingEarlyPackets)
+    {
+        NotifyPacketReceived(p, quicHeader);
+    }
+
+    // RFC 9001, Section 5.7: a server may keep the 1-RTT packets that arrive before it has
+    // finished the handshake, as they are likely to be of the client that has finished it
+    if (!m_replayingEarlyPackets && m_isServerSide && m_socketState == CONNECTING_SVR &&
+        quicHeader.IsShort())
+    {
+        if (m_earlyPackets.size() < 64)
+        {
+            m_earlyPackets.push_back({p, quicHeader, address});
+        }
+        return;
+    }
 
     NS_LOG_INFO("Received packet of size " << p->GetSize());
 
@@ -5427,6 +5469,81 @@ QuicSocketBase::ProcessEcn(const QuicSubheader& sub,
         // RFC 9002, Section 7.1: an increase of the CE count is a congestion event, handled like
         // a loss but without retransmission
         DynamicCast<QuicCongestionOps>(m_congestionControl)->OnEcnCongestionEvent(m_tcb);
+    }
+}
+
+uint32_t
+QuicSocketBase::GetMaxDatagramSize() const
+{
+    if (m_peerMaxDatagramFrameSize == 0)
+    {
+        return 0;
+    }
+    // the frame is a type byte, a length of up to two bytes and the data
+    const uint32_t frameOverhead = 1 + 2;
+    const uint32_t budget = GetPacketBudget();
+    const uint64_t room = std::min<uint64_t>(m_peerMaxDatagramFrameSize, budget);
+    return room > frameOverhead ? static_cast<uint32_t>(room - frameOverhead) : 0;
+}
+
+int
+QuicSocketBase::SendDatagram(Ptr<Packet> p)
+{
+    NS_LOG_FUNCTION(this << p->GetSize());
+    if (m_peerMaxDatagramFrameSize == 0 || p->GetSize() == 0 ||
+        p->GetSize() > GetMaxDatagramSize() ||
+        m_datagramQueueBytes + p->GetSize() > m_datagramQueueLimit)
+    {
+        m_datagramDroppedTrace(p);
+        return -1;
+    }
+    m_datagramQueue.push_back(p->Copy());
+    m_datagramQueueBytes += p->GetSize();
+    FlushDatagrams();
+    if (!m_datagramQueue.empty() && m_socketState == OPEN)
+    {
+        SendPendingData(m_connected);
+    }
+    return p->GetSize();
+}
+
+void
+QuicSocketBase::FlushDatagrams()
+{
+    while (!m_datagramQueue.empty() && (m_socketState == OPEN))
+    {
+        Ptr<Packet> data = m_datagramQueue.front();
+        const uint32_t need = data->GetSize() + 3 + 29;
+        if (AvailableWindow() < need || m_txBuffer->Available() < data->GetSize() + 3)
+        {
+            return;
+        }
+        m_datagramQueue.pop_front();
+        m_datagramQueueBytes -= data->GetSize();
+        Ptr<Packet> frame = data->Copy();
+        frame->AddHeader(QuicSubheader::CreateDatagram(data->GetSize()));
+        AppendingTx(frame);
+    }
+}
+
+void
+QuicSocketBase::OnReceivedDatagram(const QuicSubheader& sub, Ptr<Packet> data)
+{
+    // RFC 9221, Section 3: a frame the endpoint did not agree to, or one larger than it said it
+    // takes, is a PROTOCOL_VIOLATION
+    const uint32_t frameSize =
+        data->GetSize() + 1 +
+        (sub.GetFrameType() == QuicSubheader::DATAGRAM_LEN ? QuicVarIntLength(data->GetSize()) : 0);
+    if (m_maxDatagramFrameSize == 0 || frameSize > m_maxDatagramFrameSize)
+    {
+        AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                        "DATAGRAM frame that was not allowed");
+        return;
+    }
+    m_datagramRxTrace(data);
+    if (!m_datagramCallback.IsNull())
+    {
+        m_datagramCallback(this, data);
     }
 }
 
