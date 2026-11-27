@@ -1,22 +1,28 @@
 # Test evidence map
 
-Two suites, 103 test cases, all passing:
+Eleven suites, 169 test cases, all passing:
 
 ```
 ./ns3 build
-build/utils/ns3-dev-test-runner-debug --suite=quic          --verbose   # 46 cases, quic-test-suite.cc
-build/utils/ns3-dev-test-runner-debug --suite=quic-features --verbose   # 57 cases, quic-features-test-suite.cc
+build/utils/ns3-dev-test-runner-default --suite=<name> --verbose
 ```
 
-Two more suites cover the wire format with the vectors of the RFCs: `quic-wire` (variable-length
-integers, connection ids, packet numbers and the packet headers, with the unprotected packets of
-RFC 9001 Appendix A) `quic-frames` (the bytes of every frame, frames that are not valid, and what a
-receiver does with them in a live connection) `quic-streams` (final size, copies of data that was read, RESET_STREAM
-after the data), `quic-datagrams` (several packets in one datagram, padding to a minimum size) and
-`quic-ecn` (ECT(0) marking, the counts, CoDel marking instead of dropping and the validation of a path that clears the marks), `quic-handshake` (the TLS messages and the CRYPTO stream, the flights of a handshake with the coalescing and the packet number spaces, the profiles, the limit of three times, the loss of a flight and ALPN) and
-`quic-qlog` (the qlog writer, the new trace sources, the traces on accepted connections, and that
-logging does not change the simulation). `test/tools/validate_qlog.py` checks .sqlog files from
-outside, with its own tests in `test_validate_qlog.py`.
+| Suite | Cases | What it covers |
+|---|---|---|
+| `quic` | 46 | The original unit tests: frame wire values, the congestion controllers, the transmit and receive buffers, the schedulers |
+| `quic-features` | 63 | Connections under loss, flow control, migration, path MTU, idle timeout, connection ids, the loss recovery of the application space, the first PTO |
+| `quic-wire` | 5 | Variable-length integers, connection ids, packet numbers, the packet headers (with the unprotected packets of RFC 9001 Appendix A) and the transport parameters |
+| `quic-frames` | 9 | The bytes of every frame, frames that are not valid, the frame table of RFC 9000 Section 12.4 and what a receiver does with them in a live connection |
+| `quic-streams` | 13 | Final size, copies of data that was read, RESET_STREAM after the data, the stream states |
+| `quic-datagrams` | 2 | Several packets in one datagram, padding to a minimum size |
+| `quic-handshake` | 12 | The TLS messages and the CRYPTO stream, the flights of a handshake with coalescing and one packet number space per level, the TLS profiles, the limit of three times, the loss of a flight, ALPN, Retry and NEW_TOKEN, key update, session tickets and 0-RTT |
+| `quic-qlog` | 7 | The qlog writer, the new trace sources, the traces on accepted connections, and that logging does not change the simulation |
+| `quic-ecn` | 2 | ECT(0) marking, the counts, CoDel marking instead of dropping, and the validation of a path that clears the marks |
+| `quic-extensions` | 7 | DATAGRAM, the GREASE bit, RESET_STREAM_AT, versions 1 and 2 with compatible negotiation, receive timestamps and a fuzz test of every parser |
+| `quic-bbr3` | 3 | BBR version 3: its states on a clean link, random loss with a shallow buffer against CUBIC and BBR version 1, loss above the threshold |
+
+`test/tools/validate_qlog.py` checks .sqlog files from outside the test runner, with its own tests in
+`test_validate_qlog.py`.
 
 Two tools check the module from outside the test runner:
 
