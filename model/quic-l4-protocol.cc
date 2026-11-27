@@ -39,6 +39,7 @@
 #include "ns3/random-variable-stream.h"
 #include "ns3/rtt-estimator.h"
 #include "ns3/simulator.h"
+#include "ns3/socket.h"
 #include "ns3/string.h"
 #include "ns3/tcp-congestion-ops.h"
 
@@ -616,6 +617,9 @@ QuicL4Protocol::ForwardUp(Ptr<Socket> sock)
         NS_LOG_INFO("Receiving a datagram on a UDP socket");
         const uint32_t datagramSize = datagram->GetSize();
         bool firstPacket = true;
+        // the ECN codepoint of the IP header of the datagram
+        SocketIpTosTag tosTag;
+        m_receivedEcn = datagram->RemovePacketTag(tosTag) ? (tosTag.GetTos() & 0x03) : 0;
 
         // RFC 9000 Section 12.2: a datagram holds one or more packets, each long header packet
         // with the Length of its own; the last packet runs to the end of the datagram
@@ -876,6 +880,7 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
     {
         socket->NotifyUdpDatagram(false, datagramSize);
     }
+    socket->SetReceivedEcn(m_receivedEcn);
     if (!m_socketHandlers[socket].IsNull())
     {
         NS_LOG_LOGIC(this << " waking up handler of socket " << socket);
@@ -1337,6 +1342,8 @@ QuicL4Protocol::CreateUdpSocket()
 
     TypeId tid = TypeId::LookupByName("ns3::UdpSocketFactory");
     Ptr<Socket> udpSocket = Socket::CreateSocket(m_node, tid);
+    // the ECN bits of the received packets (RFC 9000, Section 13.4)
+    udpSocket->SetIpRecvTos(true);
 
     return udpSocket;
 }
@@ -1534,6 +1541,12 @@ void
 QuicL4Protocol::SendBytes(Ptr<QuicSocketBase> socket, Ptr<Packet> datagram) const
 {
     socket->NotifyUdpDatagram(true, datagram->GetSize());
+    if (const uint8_t tos = socket->GetEcnMarkForSending())
+    {
+        SocketIpTosTag tag;
+        tag.SetTos(tos);
+        datagram->AddPacketTag(tag);
+    }
     QuicUdpBindingList::const_iterator it;
     for (it = m_quicUdpBindingList.begin(); it != m_quicUdpBindingList.end(); ++it)
     {

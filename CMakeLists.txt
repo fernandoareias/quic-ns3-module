@@ -73,6 +73,7 @@ build_lib(
     LIBRARIES_TO_LINK ${libcore}
                       ${libnetwork}
                       ${libinternet}
+                      ${libtraffic-control}
                       ${libpoint-to-point}
     TEST_SOURCES test/quic-test-suite.cc
                  test/quic-features-test-suite.cc
@@ -82,5 +83,6 @@ build_lib(
                  test/quic-wire-test-suite.cc
                  test/quic-qlog-test-suite.cc
                  test/quic-handshake-test-suite.cc
+                 test/quic-ecn-test-suite.cc
                  ${examples_as_tests_sources}
 )

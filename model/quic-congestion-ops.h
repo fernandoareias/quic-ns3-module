@@ -162,6 +162,16 @@ class QuicCongestionOps : public TcpNewReno
      */
     virtual void OnCongestionEvent(Ptr<QuicSocketState> tcbd);
 
+  public:
+    /**
+     * The ECN-CE count of the peer went up: a congestion event, once per recovery epoch (RFC 9002,
+     * Section 7.1).
+     *
+     * @param tcbd the socket state.
+     */
+    void OnEcnCongestionEvent(Ptr<QuicSocketState> tcbd);
+
+  protected:
     /**
      * \brief Collapse the window on persistent congestion (RFC 9002 s7.6)
      * \param tcbd the socket state

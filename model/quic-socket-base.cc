@@ -135,6 +135,13 @@ QuicSocketBase::GetTypeId(void)
                           StringValue("ecdsa"),
                           MakeStringAccessor(&QuicSocketBase::m_tlsProfileName),
                           MakeStringChecker())
+            .AddAttribute("EnableEcn",
+                          "Mark the packets with ECT(0) and respond to the ECN-CE counts of the "
+                          "peer, after the validation of RFC 9000, Section 13.4.2 (off in "
+                          "msquic)",
+                          BooleanValue(false),
+                          MakeBooleanAccessor(&QuicSocketBase::m_ecnEnabled),
+                          MakeBooleanChecker())
             .AddAttribute("KeyUpdatePackets",
                           "Start a key update after this many 1-RTT packets with the same keys "
                           "(RFC 9001, Section 6); 0 never starts one",
@@ -422,6 +429,10 @@ QuicSocketBase::GetTypeId(void)
                             "Receive QUIC packet from UDP protocol",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_rxTrace),
                             "ns3::QuicSocketBase::QuicTxRxTracedCallback")
+            .AddTraceSource("EcnCounts",
+                            "The ECN counts of the peer changed (ECT(0) plus CE, CE)",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_ecnTrace),
+                            "ns3::TracedCallback::Uint64Uint64Callback")
             .AddTraceSource("KeyUpdate",
                             "The keys of the 1-RTT packets were updated (updates so far, true when "
                             "this end started it)",
@@ -520,13 +531,14 @@ QuicSocketState::GetTypeId(void)
                           UintegerValue(3),
                           MakeUintegerAccessor(&QuicSocketState::m_kPersistentCongestionThreshold),
                           MakeUintegerChecker<uint32_t>(1, UINT32_MAX))
-            .AddAttribute("PersistentCongestionByPto",
-                          "msquic style: persistent congestion is declared when a loss is detected "
-                          "after more than 2 "
-                          "consecutive PTOs; false selects the RFC 9002 s7.6.3 duration test",
-                          BooleanValue(true),
-                          MakeBooleanAccessor(&QuicSocketState::m_kPersistentCongestionByPto),
-                          MakeBooleanChecker());
+            .AddAttribute(
+                "PersistentCongestionByPto",
+                "true selects msquic's rule: persistent congestion is declared when a loss "
+                "is detected after more than 2 consecutive PTOs; false, the default, "
+                "the RFC 9002 s7.6.3 duration test",
+                BooleanValue(false),
+                MakeBooleanAccessor(&QuicSocketState::m_kPersistentCongestionByPto),
+                MakeBooleanChecker());
     return tid;
 }
 
@@ -769,6 +781,9 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
 
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
+    m_ecnEnabled = sock.m_ecnEnabled;
+    m_ecnState = m_ecnEnabled ? ECN_TESTING : ECN_OFF;
+    m_ecnTrace = sock.m_ecnTrace;
     m_keyUpdatePackets = sock.m_keyUpdatePackets;
     m_earlyDataAccepted = false;
     m_keyUpdateTrace = sock.m_keyUpdateTrace;
@@ -1760,7 +1775,15 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
     NotifyPacketSent(p, head);
     NotifyDataSent(sz);
 
-    m_txBuffer->UpdatePacketSent(packetNumber, sz);
+    const bool ecnMarked = m_ecnState == ECN_TESTING || m_ecnState == ECN_CAPABLE;
+    m_txBuffer->UpdatePacketSent(packetNumber,
+                                 sz,
+                                 head.GetSerializedSize() + QUIC_AEAD_TAG_SIZE,
+                                 ecnMarked);
+    if (ecnMarked)
+    {
+        ++m_ecnMarkedSent;
+    }
 
     if (!m_quicCongestionControlLegacy)
     {
@@ -3044,6 +3067,11 @@ QuicSocketBase::OnSendingAckFrame()
                                                  ackFloor,
                                                  gaps,
                                                  additionalAckBlocks);
+    if (m_ecnReceived[0] + m_ecnReceived[1] + m_ecnReceived[2] > 0)
+    {
+        // RFC 9000, Section 13.4.1: an endpoint that has seen ECN codepoints reports the counts
+        sub.SetEcnCounts(m_ecnReceived[0], m_ecnReceived[1], m_ecnReceived[2]);
+    }
 
     Ptr<Packet> ackFrame = Create<Packet>();
     ackFrame->AddHeader(sub);
@@ -3259,25 +3287,9 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
         NS_LOG_INFO("Received an ACK to ack an ACK");
     }
 
-    // RFC 9002 §9.2: React to ECN-CE count increase in ACK_ECN frames.
-    // In the simulator ECN marking is not produced by the IP layer, so this path
-    // will not fire in normal simulations.  The logic is present for conformance.
-    if (sub.GetFrameType() == QuicSubheader::ACK_ECN)
+    if (m_ecnState == ECN_TESTING || m_ecnState == ECN_CAPABLE)
     {
-        uint64_t newCeCount = sub.GetEcnCeCount();
-        if (newCeCount > m_tcb->m_peerEcnCeCount)
-        {
-            m_tcb->m_peerEcnCeCount = newCeCount;
-            NS_LOG_INFO("ECN-CE increment detected — entering congestion recovery (RFC 9002 §9.2)");
-            Ptr<QuicCongestionOps> cc = DynamicCast<QuicCongestionOps>(m_congestionControl);
-            if (!cc->InRecovery(m_tcb, m_tcb->m_largestAckedPacket))
-            {
-                m_tcb->m_endOfRecovery = m_tcb->m_highTxMark;
-                m_tcb->m_cWnd = std::max((uint32_t)(m_tcb->m_cWnd * m_tcb->m_kLossReductionFactor),
-                                         m_tcb->m_kMinimumWindow);
-                m_tcb->m_ssThresh = m_tcb->m_cWnd;
-            }
-        }
+        ProcessEcn(sub, ackedPackets);
     }
 
     // notify the application that more data can be sent
@@ -3803,6 +3815,11 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         bool newLargest = m_receivedPacketNumbers.Empty() ||
                           pktNum.GetValue() > m_receivedPacketNumbers.Largest();
         NotePacketReceived(pktNum.GetValue());
+        // RFC 9000, Section 13.4.1: the packets are counted by their ECN codepoint
+        if (m_receivedEcn == 2 || m_receivedEcn == 1 || m_receivedEcn == 3)
+        {
+            ++m_ecnReceived[m_receivedEcn == 2 ? 0 : (m_receivedEcn == 1 ? 1 : 2)];
+        }
         if (quicHeader.IsShort() && newLargest &&
             quicHeader.GetKeyPhaseBit() != (m_rxKeyPhase == QuicHeader::PHASE_ONE))
         {
@@ -5354,6 +5371,63 @@ QuicSocketBase::InitiateKeyUpdate()
     m_packetsInPhase = 0;
     m_keyUpdateTrace(++m_keyUpdates, true);
     return true;
+}
+
+uint8_t
+QuicSocketBase::GetEcnMarkForSending()
+{
+    return (m_ecnState == ECN_TESTING || m_ecnState == ECN_CAPABLE) ? 0x02 : 0;
+}
+
+void
+QuicSocketBase::ProcessEcn(const QuicSubheader& sub,
+                           const std::vector<Ptr<QuicSocketTxItem>>& acked)
+{
+    uint32_t newlyMarked = 0;
+    for (const auto& item : acked)
+    {
+        newlyMarked += item->m_ecnMarked ? 1 : 0;
+    }
+    auto fail = [this](const char* why) {
+        NS_LOG_INFO("ECN validation failed: " << why);
+        m_ecnState = ECN_FAILED;
+    };
+    if (sub.GetFrameType() != QuicSubheader::ACK_ECN)
+    {
+        if (newlyMarked > 0)
+        {
+            // RFC 9000, Section 13.4.2.1: marked packets were acknowledged and nothing was counted
+            fail("an ACK without counts acknowledges marked packets");
+        }
+        return;
+    }
+    const uint64_t ect0 = sub.GetEct0Count();
+    const uint64_t ce = sub.GetEcnCeCount();
+    if (ect0 < m_peerEct0 || ce < m_peerCe)
+    {
+        fail("the counts went down");
+        return;
+    }
+    const uint64_t increase = (ect0 - m_peerEct0) + (ce - m_peerCe);
+    if (increase < newlyMarked)
+    {
+        fail("fewer marks counted than packets acknowledged");
+        return;
+    }
+    const bool congestion = ce > m_peerCe;
+    m_peerEct0 = ect0;
+    m_peerCe = ce;
+    if (newlyMarked > 0)
+    {
+        m_ecnState = ECN_CAPABLE;
+    }
+    m_ecnTrace(ect0 + ce, ce);
+    if (congestion)
+    {
+        // RFC 9002, Section 7.1: an increase of the CE count is a congestion event, handled like
+        // a loss but without retransmission
+        DynamicCast<QuicCongestionOps>(m_congestionControl)->OnEcnCongestionEvent(m_tcb);
+    }
 }
 
 } // namespace ns3

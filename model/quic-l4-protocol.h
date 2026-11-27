@@ -737,6 +737,7 @@ class QuicL4Protocol : public IpL4Protocol
     std::map<QuicConnectionId, Ptr<QuicSocketBase>>
         m_cidMap;            //!< Connection id -> connection (every id issued to a peer)
     bool m_retryEnabled{false}; //!< Attribute RetryEnabled
+    uint8_t m_receivedEcn{0};   //!< ECN codepoint of the datagram being processed
 
     /** What a server knows of a token it issued. */
     struct IssuedToken

@@ -99,6 +99,8 @@ class QuicSocketTxItem : public Object
     SequenceNumber32 m_packetNumber; //!< sequence number
     bool m_lost;                     //!< true if the packet is lost
     uint8_t m_lossTrigger{LOSS_NONE}; //!< why the packet was declared lost
+    uint32_t m_overhead{0};           //!< bytes of the QUIC header and the AEAD tag of the packet
+    bool m_ecnMarked{false};          //!< the packet was sent with ECT(0)
     bool m_lossReported{false};       //!< true once the loss was published on the trace sources
     bool m_retrans;                  //!< true if it is a retx
     bool m_sacked;                   //!< true if already acknowledged
@@ -351,7 +353,10 @@ class QuicSocketTxBuffer : public Object
      * \param The sequence number of the sent packet
      * \param The size of the sent packet
      */
-    void UpdatePacketSent(SequenceNumber32 seq, uint32_t sz);
+    void UpdatePacketSent(SequenceNumber32 seq,
+                          uint32_t sz,
+                          uint32_t overhead = 0,
+                          bool ecnMarked = false);
 
     /**
      * Updates ACK related variables required by RateSample to discount the delivery rate.

@@ -111,6 +111,7 @@ QuicSocketBase::StartClientHandshake()
     m_tcb->m_cWnd = m_tcb->m_initialCWnd;
     m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
     m_hs[0].keys = true;
+    m_ecnState = m_ecnEnabled ? ECN_TESTING : ECN_OFF;
     if (!m_retryReceived && InetSocketAddress::IsMatchingType(m_connectAddress))
     {
         // a token of an earlier connection (NEW_TOKEN) lets the server skip its Retry

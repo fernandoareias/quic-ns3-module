@@ -338,6 +338,16 @@ QuicCongestionOps::OnCongestionEvent(Ptr<QuicSocketState> tcbd)
 }
 
 void
+QuicCongestionOps::OnEcnCongestionEvent(Ptr<QuicSocketState> tcbd)
+{
+    if (!InRecovery(tcbd, tcbd->m_largestAckedPacket))
+    {
+        tcbd->m_endOfRecovery = tcbd->m_highTxMark;
+        OnCongestionEvent(tcbd);
+    }
+}
+
+void
 QuicCongestionOps::OnPersistentCongestion(Ptr<QuicSocketState> tcbd)
 {
     // RFC 9002 s7.6.2: only the window collapses; ssthresh keeps the value the congestion event

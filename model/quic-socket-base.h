@@ -125,7 +125,7 @@ class QuicSocketState : public TcpSocketState
                                    //!< detected.
     uint32_t m_kPersistentCongestionThreshold; /**< RFC 9002 §7.6.3: multiplier for persistent
                                                 * congestion duration. RECOMMENDED = 3. */
-    bool m_kPersistentCongestionByPto{true};   //!< msquic: persistent congestion when more than 2
+    bool m_kPersistentCongestionByPto{false};  //!< msquic: persistent congestion when more than 2
                                                //!< consecutive PTOs preceded the loss
     uint32_t m_ptoCountForLoss{
         0}; //!< Consecutive PTOs before the ACK/timer being processed (msquic ProbeCount)
@@ -989,6 +989,31 @@ class QuicSocketBase : public QuicSocket
     void SendApplicationCrypto(const std::vector<uint8_t>& data);
 
     /**
+     * Note the ECN codepoint of the datagram that carried the packets that are processed next.
+     *
+     * @param ecn 0 not ECN-capable, 1 ECT(1), 2 ECT(0), 3 CE.
+     */
+    void SetReceivedEcn(uint8_t ecn)
+    {
+        m_receivedEcn = ecn;
+    }
+
+    /**
+     * @return the value of the type of service byte for the datagram that goes out now: ECT(0)
+     *         while ECN is in use on the path, 0 otherwise.
+     */
+    uint8_t GetEcnMarkForSending();
+
+    /**
+     * Take an ACK frame into account for the ECN validation and its congestion response (RFC 9000,
+     * Section 13.4.2 and RFC 9002, Section 7.1).
+     *
+     * @param sub the frame.
+     * @param acked the packets it newly acknowledged.
+     */
+    void ProcessEcn(const QuicSubheader& sub, const std::vector<Ptr<QuicSocketTxItem>>& acked);
+
+    /**
      * Start a key update (RFC 9001, Section 6): the packets that follow carry the other value of
      * the Key Phase bit. It is possible once the handshake is confirmed and a packet sent with the
      * current keys was acknowledged.
@@ -1537,6 +1562,24 @@ class QuicSocketBase : public QuicSocket
     uint64_t m_appCryptoOffset{0};     //!< offset of the next byte sent in CRYPTO frames of 1-RTT
     QuicCryptoStream m_appCryptoRx;    //!< CRYPTO data received in 1-RTT packets
     QuicTlsParser m_appParser;         //!< handshake messages read from it
+
+    /** The state of the ECN validation of a path (RFC 9000, Section 13.4.2). */
+    enum EcnState : uint8_t
+    {
+        ECN_OFF,     //!< not used
+        ECN_TESTING, //!< packets are marked, no verdict yet
+        ECN_CAPABLE, //!< the path keeps the marks and the peer counts them
+        ECN_FAILED   //!< the path or the peer does not support it: packets are not marked
+    };
+
+    bool m_ecnEnabled{false};           //!< attribute EnableEcn
+    EcnState m_ecnState{ECN_OFF};       //!< state of the validation
+    uint8_t m_receivedEcn{0};           //!< ECN codepoint of the datagram being processed
+    uint64_t m_ecnReceived[3]{0, 0, 0}; //!< packets received with ECT(0), ECT(1) and CE
+    uint64_t m_peerEct0{0};             //!< ECT(0) count in the latest ACK_ECN of the peer
+    uint64_t m_peerCe{0};               //!< CE count in the latest ACK_ECN of the peer
+    uint32_t m_ecnMarkedSent{0};        //!< packets sent with ECT(0)
+    TracedCallback<uint64_t, uint64_t> m_ecnTrace; //!< trace of the ECN counts of the peer
     bool m_keyUpdateAllowed{false};    //!< a packet of the current send phase was acknowledged
     uint64_t m_firstPnCurrentPhase{0}; //!< first packet number sent with the current keys
     QuicHeader::KeyPhase_t m_rxKeyPhase{QuicHeader::PHASE_ZERO}; //!< phase of the receive keys

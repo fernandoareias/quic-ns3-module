@@ -45,7 +45,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 12.3 | Packet numbers: one space per encryption level | divergent | F7 | One counter for all; the header truncates and recovers them as in Appendix A |
 | 12.4 | Frames allowed in each packet type | partial | F7 | Initial and Handshake packets carry only ACK, CRYPTO, PING, PADDING and CONNECTION_CLOSE, and the receiver closes the connection otherwise; 0-RTT and 1-RTT packets are not checked yet |
 | 13.2 | Generating acknowledgements | done | | quic-features: delayed ACK |
-| 13.4 | ECN | missing | F8 | `ACK_ECN` closes the connection |
+| 13.4 | ECN | done | | `EnableEcn` marks packets with ECT(0), counts the codepoints received, validates the path (an ACK without counts, counts that go down or too few counts fail it) and stops marking on failure (quic-ecn); ECT(1) is counted but not sent |
 | 14.1 | Initial datagrams of at least 1200 bytes | done | | quic-features: Initial datagram; PADDING frames, exactly the InitialPacketSize; a server discards smaller ones |
 | 14.3 | Path MTU discovery | partial | | msquic-style search from 1288 bytes in steps of 80; no black-hole detection and no ICMP; the budget follows the connection id length (quic-features: no fragmentation) |
 | 15 | Versions; reserved versions | partial | F9 | Version 2 is only in the header codec |
@@ -57,7 +57,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 18.2 | Transport parameters | partial | F9, F11 | All but preferred_address (F11) and the extension parameters (F9); carried in the quic_transport_parameters extension of the ClientHello and EncryptedExtensions |
 | 19.1 to 19.2 | PADDING, PING | done | | quic-frames |
 | 19.3 | ACK | done | | quic-frames: bytes, invalid ranges |
-| 19.3.2 | ACK with ECN counts | partial | F8 | Codec done and accepted on receipt (quic-frames); nothing sends or counts ECN yet |
+| 19.3.2 | ACK with ECN counts | done | | Sent when an endpoint has seen ECN codepoints and handled on receipt (quic-ecn, quic-frames) |
 | 19.4, 19.5 | RESET_STREAM, STOP_SENDING | done | | quic-frames: 62-bit error codes |
 | 19.6, 19.7 | CRYPTO, NEW_TOKEN | partial | F7 | CRYPTO is sent and received, with retransmission (quic-handshake); NEW_TOKEN is not sent |
 | 19.8 | STREAM | done | | quic-frames: LEN, OFF and FIN bits; a length of zero is zero; the sender always writes LEN |
@@ -93,7 +93,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 7.7 | Pacing | partial | | msquic scheme |
 | 7.8 | Application-limited sender | divergent | | msquic rule in CUBIC |
 | 2 | bytes_in_flight counts every packet in flight | divergent | F8 | Only the payload of STREAM frames |
-| B.7 | ECN-CE as a congestion signal | missing | F8 | |
+| B.7 | ECN-CE as a congestion signal | done | | An increase of the CE count is one congestion event per recovery epoch, through the controller, without retransmission (quic-ecn) |
 
 ## Extensions and drafts
 

@@ -853,9 +853,11 @@ QuicSocketTxBuffer::BytesInFlight() const
             continue;
         }
         unacked = true;
-        if (!item->m_isStream0 && item->m_isStream)
+        // RFC 9002, Section 2: the size of a packet in flight is that of the packet, with its
+        // header and AEAD tag; a packet declared lost is no longer in flight (Section 6.1.2)
+        if (!item->m_lost && item->m_ackEliciting)
         {
-            inFlight += item->m_packet->GetSize();
+            inFlight += item->m_packet->GetSize() + item->m_overhead;
         }
     }
     m_inFlightCache = inFlight;
@@ -886,7 +888,10 @@ QuicSocketTxBuffer::SetScheduler(Ptr<QuicSocketTxScheduler> sched)
 }
 
 void
-QuicSocketTxBuffer::UpdatePacketSent(SequenceNumber32 seq, uint32_t sz)
+QuicSocketTxBuffer::UpdatePacketSent(SequenceNumber32 seq,
+                                     uint32_t sz,
+                                     uint32_t overhead,
+                                     bool ecnMarked)
 {
     NS_LOG_FUNCTION(this << seq << sz);
 
@@ -911,6 +916,8 @@ QuicSocketTxBuffer::UpdatePacketSent(SequenceNumber32 seq, uint32_t sz)
         }
     }
     NS_ASSERT_MSG(item != nullptr, "not found seq " << seq);
+    item->m_overhead = overhead;
+    item->m_ecnMarked = ecnMarked;
     item->m_firstSentTime = m_tcb->m_firstSentTime;
     item->m_deliveredTime = m_tcb->m_deliveredTime;
     item->m_isAppLimited = (m_tcb->m_appLimitedUntil > m_tcb->m_delivered);

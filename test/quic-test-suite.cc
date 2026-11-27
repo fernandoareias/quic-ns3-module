@@ -1574,6 +1574,7 @@ class QuicCubicEventsTestCase : public TestCase
         tcb->m_cWnd = 100000;
         tcb->m_ssThresh = 100000;
         tcb->m_highTxMark = SequenceNumber32(50);
+        tcb->m_kPersistentCongestionByPto = true; // the rule of msquic, which this test is about
         return tcb;
     }
 
