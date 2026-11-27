@@ -13,6 +13,7 @@ build_lib(
     LIBNAME quic
     SOURCE_FILES model/quic-bbr.cc
                  model/quic-connection-id.cc
+                 model/quic-crypto-stream.cc
                  model/quic-cubic.cc
                  model/quic-congestion-ops.cc
                  model/quic-header.cc
@@ -35,11 +36,13 @@ build_lib(
                  model/quic-stream-rx-buffer.cc
                  model/quic-stream-tx-buffer.cc
                  model/quic-subheader.cc
+                 model/quic-tls-emulator.cc
                  model/quic-transport-parameters.cc
                  model/quic-wire.cc
                  helper/quic-helper.cc
     HEADER_FILES model/quic-stream-id-tag.h
                  model/quic-connection-id.h
+                 model/quic-crypto-stream.h
                  model/quic-cubic.h
                  model/quic-bbr.h
                  model/quic-congestion-ops.h
@@ -62,6 +65,7 @@ build_lib(
                  model/quic-stream-rx-buffer.h
                  model/quic-stream-tx-buffer.h
                  model/quic-subheader.h
+                 model/quic-tls-emulator.h
                  model/quic-transport-parameters.h
                  model/quic-wire.h
                  helper/quic-helper.h
@@ -76,5 +80,6 @@ build_lib(
                  test/quic-datagrams-test-suite.cc
                  test/quic-wire-test-suite.cc
                  test/quic-qlog-test-suite.cc
+                 test/quic-handshake-test-suite.cc
                  ${examples_as_tests_sources}
 )
