@@ -988,6 +988,21 @@ class QuicSocketBase : public QuicSocket
     }
 
     /**
+     * Take a CRYPTO frame of a 1-RTT packet: the NewSessionTicket messages of the server.
+     *
+     * @param sub the frame.
+     * @param data the bytes that follow it.
+     */
+    void OnReceivedApplicationCrypto(const QuicSubheader& sub, Ptr<Packet> data);
+
+    /**
+     * Send handshake message bytes in a CRYPTO frame of the 1-RTT level.
+     *
+     * @param data the bytes.
+     */
+    void SendApplicationCrypto(const std::vector<uint8_t>& data);
+
+    /**
      * Start a key update (RFC 9001, Section 6): the packets that follow carry the other value of
      * the Key Phase bit. It is possible once the handshake is confirmed and a packet sent with the
      * current keys was acknowledged.
@@ -1530,6 +1545,12 @@ class QuicSocketBase : public QuicSocket
     std::vector<uint8_t> m_initialToken;   //!< token of the Initial packets of a client
     bool m_retryReceived{false};           //!< client: a Retry packet was accepted
     QuicConnectionId m_retrySourceCid; //!< id the Retry packet gave, or the server's id after one
+    QuicTransportParameters m_peerParameters; //!< client: what the server announced
+    uint64_t m_resumptionTicket{0};           //!< client: ticket the ClientHello offers
+    bool m_earlyDataAccepted{false};          //!< server: the ClientHello had a valid ticket
+    uint64_t m_appCryptoOffset{0};     //!< offset of the next byte sent in CRYPTO frames of 1-RTT
+    QuicCryptoStream m_appCryptoRx;    //!< CRYPTO data received in 1-RTT packets
+    QuicTlsParser m_appParser;         //!< handshake messages read from it
     bool m_keyUpdateAllowed{false};    //!< a packet of the current send phase was acknowledged
     uint64_t m_firstPnCurrentPhase{0}; //!< first packet number sent with the current keys
     QuicHeader::KeyPhase_t m_rxKeyPhase{QuicHeader::PHASE_ZERO}; //!< phase of the receive keys

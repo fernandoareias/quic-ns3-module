@@ -772,6 +772,7 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
     m_keyUpdatePackets = sock.m_keyUpdatePackets;
+    m_earlyDataAccepted = false;
     m_keyUpdateTrace = sock.m_keyUpdateTrace;
     m_tlsProfileName = sock.m_tlsProfileName;
     m_tlsChainLength = sock.m_tlsChainLength;
@@ -1093,7 +1094,9 @@ QuicSocketBase::Connect(const Address& address)
     // resumption here, and a server only accepts a first flight without an Initial when 0-RTT is
     // allowed
     (void)result;
-    if (m_quicl4->Is0RTTHandshakeAllowed() && !m_isServerSide)
+    if (m_quicl4->Is0RTTHandshakeAllowed() && !m_isServerSide &&
+        InetSocketAddress::IsMatchingType(address) &&
+        m_quicl4->GetRememberedTicket(InetSocketAddress::ConvertFrom(address).GetIpv4()) != 0)
     {
         NS_LOG_INFO("CONNECTION AUTHENTICATED Client found the Server "
                     << InetSocketAddress::ConvertFrom(address).GetIpv4() << " port "
@@ -3463,13 +3466,9 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
         FlushPendingWrites();
     }
 
-    // a client keeps what the server announced for a later connection that starts with 0-RTT data
-    if (!m_isServerSide && !m_connectAddress.IsInvalid())
-    {
-        m_quicl4->RememberServerParameters(
-            InetSocketAddress::ConvertFrom(m_connectAddress).GetIpv4(),
-            transportParameters);
-    }
+    // a client keeps what the server announced; it goes with the session ticket that the server
+    // sends after the handshake, for a later connection that starts with 0-RTT data
+    m_peerParameters = transportParameters;
 
     // RFC 9000 s10.1: the effective idle timeout is the smaller of the two advertised values, a
     // value of 0 meaning "no limit" for that endpoint (both 0: the timer is off)
@@ -3793,8 +3792,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
     }
     else if ((quicHeader.IsShort() or (m_isServerSide and quicHeader.IsORTT())) and
              (m_socketState == OPEN or IsFlushingOnClose() or
-              (m_socketState == CONNECTING_SVR and quicHeader.IsORTT() and
-               m_quicl4->Is0RTTHandshakeAllowed())))
+              (m_socketState == CONNECTING_SVR and quicHeader.IsORTT() and m_earlyDataAccepted)))
     {
         // RFC 9000 §12.3: duplicate packet numbers MUST be discarded
         QuicPacketNumber pktNum = quicHeader.GetPacketNumber();

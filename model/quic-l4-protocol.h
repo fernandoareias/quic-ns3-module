@@ -23,6 +23,7 @@
 #include "ns3/socket.h"
 
 #include <map>
+#include <set>
 #include <stdint.h>
 #include <string>
 #include <utility>
@@ -250,6 +251,34 @@ class QuicL4Protocol : public IpL4Protocol
      * \param parameters the parameters the server announced
      */
     void RememberServerParameters(Ipv4Address server, const QuicTransportParameters& parameters);
+
+    /**
+     * Make the identity of a session ticket for a client that completed a handshake with this
+     * server (RFC 8446, Section 4.6.1). A ClientHello that carries it may send 0-RTT data.
+     *
+     * @return the identity, never 0.
+     */
+    uint64_t IssueTicket();
+
+    /**
+     * @param ticket an identity.
+     * @return true when this server issued the ticket.
+     */
+    bool IsTicketValid(uint64_t ticket) const;
+
+    /**
+     * Keep the session ticket of a server for the next connection to it.
+     *
+     * @param server the address of the server.
+     * @param ticket the identity of the ticket.
+     */
+    void RememberTicket(Ipv4Address server, uint64_t ticket);
+
+    /**
+     * @param server the address of a server.
+     * @return the identity of the ticket kept for it, 0 when there is none.
+     */
+    uint64_t GetRememberedTicket(Ipv4Address server) const;
 
     /**
      * \brief The transport parameters remembered for a server
@@ -721,6 +750,8 @@ class QuicL4Protocol : public IpL4Protocol
 
     std::map<std::vector<uint8_t>, IssuedToken> m_issuedTokens; //!< tokens this server issued
     std::map<uint32_t, std::vector<uint8_t>> m_serverTokens;    //!< NEW_TOKEN tokens by server
+    std::set<uint64_t> m_issuedTickets;                         //!< session tickets of this server
+    std::map<uint32_t, uint64_t> m_serverTickets;               //!< session ticket by server
     uint8_t m_connectionIdLength{8}; //!< Attribute ConnectionIdLength
     std::string m_qlogDirectory;     //!< Attribute QlogDirectory
     uint64_t m_resetKeyA{0};         //!< Secret of the stateless reset token function

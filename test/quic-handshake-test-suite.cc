@@ -412,6 +412,8 @@ class HsRig
     std::vector<std::pair<Time, uint32_t>> clientWire; //!< UDP payloads the client sent
     std::vector<std::pair<Time, uint32_t>> serverWire; //!< UDP payloads the server sent
     bool retry{false};                //!< the server answers the first Initial with a Retry
+    bool zeroRtt{false};              //!< 0RTT-Handshake on both stacks
+    uint64_t secondSends{0};          //!< bytes the second client writes as it connects
     uint32_t keyUpdatePackets{0};     //!< KeyUpdatePackets of both ends
     uint64_t clientSends{0};          //!< bytes the client writes once connected
     Time secondConnectAt{Seconds(0)}; //!< when a second client connects, none when zero
@@ -440,6 +442,11 @@ class HsRig
         quic.InstallQuic(nodes);
         nodes.Get(0)->GetObject<QuicL4Protocol>()->SetAttribute("RetryEnabled",
                                                                 BooleanValue(retry));
+        for (uint32_t k = 0; k < 2; ++k)
+        {
+            nodes.Get(k)->GetObject<QuicL4Protocol>()->SetAttribute("0RTT-Handshake",
+                                                                    BooleanValue(zeroRtt));
+        }
         Ipv4AddressHelper address;
         address.SetBase("10.5.4.0", "255.255.255.0");
         Ipv4InterfaceContainer interfaces = address.Assign(devices);
@@ -494,6 +501,10 @@ class HsRig
                                            MakeNullCallback<void, Ptr<Socket>>());
                 m_second = second;
                 second->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
+                if (secondSends > 0)
+                {
+                    second->Send(Create<Packet>(secondSends));
+                }
             });
         }
         Simulator::Stop(stopAt);
@@ -932,6 +943,58 @@ class HandshakeKeyUpdateTest : public TestCase
 };
 
 /**
+ * RFC 9001, Section 4.6: the server gives the client a session ticket in a NewSessionTicket
+ * message after the handshake, and a client that has one sends 0-RTT data behind its Initial
+ * packet. Without a ticket the client waits for the handshake, even where 0-RTT is allowed.
+ */
+class HandshakeTicketTest : public TestCase
+{
+  public:
+    HandshakeTicketTest()
+        : TestCase("session tickets and 0-RTT")
+    {
+    }
+
+  private:
+    void DoRun() override
+    {
+        HsRig rig;
+        rig.zeroRtt = true;
+        rig.secondConnectAt = Seconds(2);
+        rig.secondSends = 3000;
+        rig.stopAt = Seconds(6);
+        rig.Run();
+        NS_TEST_ASSERT_MSG_EQ(rig.connected, true, "the first connection");
+        NS_TEST_EXPECT_MSG_EQ(HsRig::CountOf(rig.clientTx, "0rtt"), 0, "no ticket, no 0-RTT data");
+        bool ticket = false;
+        for (const auto& p : rig.clientRx)
+        {
+            ticket = ticket || (p.type == "1rtt" && p.hasCrypto);
+        }
+        NS_TEST_EXPECT_MSG_EQ(ticket, true, "the server sent a NewSessionTicket in a 1-RTT packet");
+        NS_TEST_ASSERT_MSG_EQ(rig.secondConnected, true, "the second connection");
+        NS_TEST_ASSERT_MSG_GT(HsRig::CountOf(rig.secondTx, "0rtt"),
+                              0,
+                              "0-RTT packets with the ticket");
+        NS_TEST_EXPECT_MSG_EQ(rig.secondTx[0].type, "initial", "behind the Initial packet");
+        NS_TEST_EXPECT_MSG_EQ(rig.serverRxBytes, 3000, "the 0-RTT data arrived");
+        // the data is read before the handshake could have finished: a round trip is 20 ms
+        Time first0Rtt;
+        for (const auto& p : rig.serverRx)
+        {
+            if (p.type == "0rtt" && p.time > Seconds(2))
+            {
+                first0Rtt = p.time;
+                break;
+            }
+        }
+        NS_TEST_EXPECT_MSG_LT(first0Rtt,
+                              Seconds(2) + MilliSeconds(15),
+                              "one way after the first flight");
+    }
+};
+
+/**
  * Endpoints that share no application protocol fail with the TLS alert no_application_protocol
  * (RFC 9001, Section 8.1).
  */
@@ -988,6 +1051,7 @@ class QuicHandshakeTestSuite : public TestSuite
         AddTestCase(new HandshakeAlpnTest, TestCase::Duration::QUICK);
         AddTestCase(new HandshakeRetryTest, TestCase::Duration::QUICK);
         AddTestCase(new HandshakeKeyUpdateTest, TestCase::Duration::QUICK);
+        AddTestCase(new HandshakeTicketTest, TestCase::Duration::QUICK);
     }
 };
 

@@ -73,7 +73,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 |---|---|---|---|---|
 | 4 | CRYPTO frames carry the TLS handshake | done | | ClientHello, ServerHello, EncryptedExtensions, Certificate, CertificateVerify and Finished, with the sizes of a real handshake (profiles ecdsa, rsa, pq-hybrid, mtls) and ALPN |
 | 4.1.2 | The handshake is confirmed by HANDSHAKE_DONE | done | | The server confirms when it has the client's Finished, the client on HANDSHAKE_DONE |
-| 4.6 | 0-RTT with session tickets | divergent | F7 | The client's cache of the server's transport parameters stands for the ticket; no NewSessionTicket |
+| 4.6 | 0-RTT with session tickets | done | | The server sends a NewSessionTicket in a CRYPTO frame of a 1-RTT packet, the client keeps it with the server's transport parameters and sends 0-RTT data behind its Initial when it has one; the server accepts early data only for a ticket it issued and when its stack allows 0-RTT (quic-handshake) |
 | 4.9 | Discarding Initial and Handshake keys | done | | The client drops the Initial level when it sends its first Handshake packet, the server when it reads one; both drop the Handshake level when the handshake is confirmed |
 | 5 | Packet protection (size: 16-byte tag) | partial | F5 | The tag is there (zeros) and counted in the path MTU; the cryptography stays emulated |
 | 5.8 | Retry integrity tag | divergent | | 16 bytes that are not computed |

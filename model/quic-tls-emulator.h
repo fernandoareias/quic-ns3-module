@@ -78,6 +78,7 @@ enum QuicTlsMessageType : uint8_t
 /** The extension numbers the emulator reads. */
 constexpr uint16_t QUIC_TLS_EXT_ALPN = 16;
 constexpr uint16_t QUIC_TLS_EXT_TRANSPORT_PARAMETERS = 0x39;
+constexpr uint16_t QUIC_TLS_EXT_PRE_SHARED_KEY = 41;
 
 /**
  * @ingroup quic
@@ -92,13 +93,14 @@ class QuicTlsEmulator
      * @param profile the sizes.
      * @param tp the transport parameters of the client.
      * @param alpn the application protocols the client offers.
-     * @param resumption true to offer a session ticket (adds the pre_shared_key extension).
+     * @param ticket the identity of a session ticket to resume with, 0 for none (the
+     *        pre_shared_key extension carries it).
      * @return a ClientHello message.
      */
     static std::vector<uint8_t> ClientHello(const QuicTlsProfile& profile,
                                             const QuicTransportParameters& tp,
                                             const std::vector<std::string>& alpn,
-                                            bool resumption);
+                                            uint64_t ticket);
 
     /**
      * @param profile the sizes.
@@ -131,9 +133,10 @@ class QuicTlsEmulator
 
     /**
      * @param profile the sizes.
-     * @return a NewSessionTicket message.
+     * @param ticket the identity of the ticket, which the ticket itself starts with.
+     * @return a NewSessionTicket message that allows early data.
      */
-    static std::vector<uint8_t> NewSessionTicket(const QuicTlsProfile& profile);
+    static std::vector<uint8_t> NewSessionTicket(const QuicTlsProfile& profile, uint64_t ticket);
 };
 
 /**
@@ -192,6 +195,19 @@ class QuicTlsParser
      */
     static bool ParseTransportParameters(const std::vector<uint8_t>& data,
                                          QuicTransportParameters& tp);
+
+    /**
+     * @param body the body of a NewSessionTicket message.
+     * @param ticket the identity of the ticket, set when the message is well formed.
+     * @return true when the body is a well formed ticket.
+     */
+    static bool ParseTicket(const std::vector<uint8_t>& body, uint64_t& ticket);
+
+    /**
+     * @param data the content of the pre_shared_key extension of a ClientHello.
+     * @return the identity of the ticket, 0 when there is none.
+     */
+    static uint64_t ParseTicketIdentity(const std::vector<uint8_t>& data);
 
   private:
     std::vector<uint8_t> m_buffer; //!< bytes that do not make a message yet

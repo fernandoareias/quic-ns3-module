@@ -309,6 +309,10 @@ QuicL5Protocol::DispatchRecv(Ptr<Packet> data, Address& address)
                 stream->Recv((*it).first, sub, address);
             }
         }
+        else if (sub.IsCrypto())
+        {
+            m_socket->OnReceivedApplicationCrypto(sub, (*it).first);
+        }
         else
         {
             NS_LOG_INFO("Receiving frame on stream " << sub.GetStreamId() << " trigger socket");

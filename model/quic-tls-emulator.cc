@@ -157,7 +157,7 @@ std::vector<uint8_t>
 QuicTlsEmulator::ClientHello(const QuicTlsProfile& profile,
                              const QuicTransportParameters& tp,
                              const std::vector<std::string>& alpn,
-                             bool resumption)
+                             uint64_t ticket)
 {
     // the extensions: supported_versions, key_share, ALPN, the transport parameters and a padding
     // extension that brings the rest of the message to the size that was measured
@@ -170,9 +170,16 @@ QuicTlsEmulator::ClientHello(const QuicTlsProfile& profile,
     Put(keyShare, keyBytes, 2);
     PutZeros(keyShare, keyBytes);
     PutExtension(exts, 51, keyShare);
-    if (resumption)
+    if (ticket != 0)
     {
-        PutExtension(exts, 41, std::vector<uint8_t>(80, 0));
+        // an identity of 8 bytes followed by the obfuscated age and the binder
+        std::vector<uint8_t> psk;
+        Put(psk, 2 + 8 + 4, 2);
+        Put(psk, 8, 2);
+        Put(psk, ticket, 8);
+        Put(psk, 0, 4);
+        PutZeros(psk, 2 + 1 + 48);
+        PutExtension(exts, QUIC_TLS_EXT_PRE_SHARED_KEY, psk);
     }
     PutExtension(exts, QUIC_TLS_EXT_ALPN, AlpnData(alpn));
     PutExtension(exts, QUIC_TLS_EXT_TRANSPORT_PARAMETERS, TransportParameterList(tp));
@@ -310,11 +317,71 @@ QuicTlsEmulator::ClientFlight(const QuicTlsProfile& profile)
 }
 
 std::vector<uint8_t>
-QuicTlsEmulator::NewSessionTicket(const QuicTlsProfile& profile)
+QuicTlsEmulator::NewSessionTicket(const QuicTlsProfile& profile, uint64_t ticket)
 {
+    std::vector<uint8_t> body;
+    Put(body, 7 * 24 * 3600, 4); // ticket_lifetime
+    Put(body, 0, 4);             // ticket_age_add
+    body.push_back(8);           // ticket_nonce
+    PutZeros(body, 8);
+    const uint32_t extensions = 2 + 4 + 4; // early_data with max_early_data_size
+    const uint32_t fixed = body.size() + 2 + 2 + extensions;
+    const uint32_t ticketBytes = profile.ticketBody > fixed + 8 ? profile.ticketBody - fixed : 8;
+    Put(body, ticketBytes, 2);
+    Put(body, ticket, 8);
+    PutZeros(body, ticketBytes - 8);
+    Put(body, 8, 2);
+    Put(body, 42, 2); // early_data
+    Put(body, 4, 2);
+    Put(body, 0xffffffffu, 4);
     std::vector<uint8_t> out;
-    PutMessage(out, TLS_NEW_SESSION_TICKET, std::vector<uint8_t>(profile.ticketBody, 0));
+    PutMessage(out, TLS_NEW_SESSION_TICKET, body);
     return out;
+}
+
+bool
+QuicTlsParser::ParseTicket(const std::vector<uint8_t>& body, uint64_t& ticket)
+{
+    // lifetime, age_add, nonce length and nonce, ticket length
+    if (body.size() < 4 + 4 + 1)
+    {
+        return false;
+    }
+    size_t at = 8;
+    const size_t nonce = body[at++];
+    if (body.size() < at + nonce + 2)
+    {
+        return false;
+    }
+    at += nonce;
+    const size_t length = (body[at] << 8) | body[at + 1];
+    at += 2;
+    if (length < 8 || body.size() < at + length)
+    {
+        return false;
+    }
+    ticket = 0;
+    for (int k = 0; k < 8; ++k)
+    {
+        ticket = (ticket << 8) | body[at + k];
+    }
+    return true;
+}
+
+uint64_t
+QuicTlsParser::ParseTicketIdentity(const std::vector<uint8_t>& data)
+{
+    // the length of the identities, the length of the identity and the identity
+    if (data.size() < 2 + 2 + 8)
+    {
+        return 0;
+    }
+    uint64_t ticket = 0;
+    for (int k = 0; k < 8; ++k)
+    {
+        ticket = (ticket << 8) | data[4 + k];
+    }
+    return ticket;
 }
 
 void

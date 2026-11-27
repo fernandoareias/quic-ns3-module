@@ -524,6 +524,39 @@ QuicL4Protocol::GetAuthAddresses() const
     return m_authAddresses;
 }
 
+uint64_t
+QuicL4Protocol::IssueTicket()
+{
+    Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
+    uint64_t ticket;
+    do
+    {
+        ticket = (static_cast<uint64_t>(rng->GetInteger(0, 0xffffffffu)) << 32) |
+                 rng->GetInteger(0, 0xffffffffu);
+    } while (ticket == 0 || m_issuedTickets.count(ticket) != 0);
+    m_issuedTickets.insert(ticket);
+    return ticket;
+}
+
+bool
+QuicL4Protocol::IsTicketValid(uint64_t ticket) const
+{
+    return m_issuedTickets.count(ticket) != 0;
+}
+
+void
+QuicL4Protocol::RememberTicket(Ipv4Address server, uint64_t ticket)
+{
+    m_serverTickets[server.Get()] = ticket;
+}
+
+uint64_t
+QuicL4Protocol::GetRememberedTicket(Ipv4Address server) const
+{
+    auto it = m_serverTickets.find(server.Get());
+    return it == m_serverTickets.end() ? 0 : it->second;
+}
+
 void
 QuicL4Protocol::RememberServerParameters(Ipv4Address server,
                                          const QuicTransportParameters& parameters)

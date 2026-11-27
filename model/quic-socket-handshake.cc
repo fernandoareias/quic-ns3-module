@@ -117,9 +117,15 @@ QuicSocketBase::StartClientHandshake()
         m_initialToken =
             m_quicl4->GetRememberedToken(InetSocketAddress::ConvertFrom(m_connectAddress).GetIpv4());
     }
+    m_resumptionTicket = 0;
+    if (InetSocketAddress::IsMatchingType(m_connectAddress))
+    {
+        m_resumptionTicket = m_quicl4->GetRememberedTicket(
+            InetSocketAddress::ConvertFrom(m_connectAddress).GetIpv4());
+    }
     const QuicTransportParameters tp = OnSendingTransportParameters();
     m_hs[0].crypto.Queue(
-        QuicTlsEmulator::ClientHello(m_tlsProfile, tp, SplitNames(m_alpn), m_zeroRttConnect));
+        QuicTlsEmulator::ClientHello(m_tlsProfile, tp, SplitNames(m_alpn), m_resumptionTicket));
     FlushHandshake();
 }
 
@@ -605,6 +611,13 @@ QuicSocketBase::HandleTlsMessage(int level, uint8_t type, const std::vector<uint
             {
                 return false;
             }
+            // RFC 8446, Section 4.2.11: a ClientHello with a ticket this server issued may carry
+            // early data, which a server whose stack allows 0-RTT accepts
+            std::vector<uint8_t> psk;
+            m_earlyDataAccepted =
+                m_quicl4->Is0RTTHandshakeAllowed() &&
+                QuicTlsParser::FindExtension(type, body, QUIC_TLS_EXT_PRE_SHARED_KEY, psk) &&
+                m_quicl4->IsTicketValid(QuicTlsParser::ParseTicketIdentity(psk));
             if (!QuicTlsProfile::FromName(m_tlsProfileName, m_tlsProfile))
             {
                 NS_FATAL_ERROR("Unknown TLS profile " << m_tlsProfileName);
@@ -726,6 +739,8 @@ QuicSocketBase::CompleteServerHandshake()
     m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
     // RFC 9000, Section 19.20: the server confirms the handshake
     SendControlFrame(QuicSubheader::CreateHandshakeDone());
+    // RFC 8446, Section 4.6.1: and a session ticket that lets it send 0-RTT data next time
+    SendApplicationCrypto(QuicTlsEmulator::NewSessionTicket(m_tlsProfile, m_quicl4->IssueTicket()));
     // RFC 9000, Section 8.1.3: and gives the client a token for its next connection
     if (InetSocketAddress::IsMatchingType(GetActiveRemote()))
     {
@@ -856,6 +871,53 @@ QuicSocketBase::OnHandshakeTimeout()
         }
     }
     FlushHandshake();
+}
+
+void
+QuicSocketBase::SendApplicationCrypto(const std::vector<uint8_t>& data)
+{
+    Ptr<Packet> p = Create<Packet>(data.data(), data.size());
+    p->AddHeader(QuicSubheader::CreateCrypto(m_appCryptoOffset, data.size()));
+    m_appCryptoOffset += data.size();
+    AppendingTx(p);
+}
+
+void
+QuicSocketBase::OnReceivedApplicationCrypto(const QuicSubheader& sub, Ptr<Packet> data)
+{
+    if (m_isServerSide)
+    {
+        // RFC 9001, Section 4.6: only a server sends NewSessionTicket
+        AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                        "CRYPTO data received by a server in a 1-RTT packet");
+        return;
+    }
+    std::vector<uint8_t> bytes(data->GetSize());
+    if (!bytes.empty())
+    {
+        data->CopyData(bytes.data(), bytes.size());
+    }
+    if (!m_appCryptoRx.OnFrame(sub.GetOffset(), bytes, CRYPTO_BUFFER_LIMIT))
+    {
+        AbortConnection(QuicSubheader::TransportErrorCodes_t::CRYPTO_BUFFER_EXCEEDED,
+                        "CRYPTO data beyond the limit");
+        return;
+    }
+    m_appParser.Append(m_appCryptoRx.Read());
+    uint8_t type;
+    std::vector<uint8_t> body;
+    while (m_appParser.Next(type, body))
+    {
+        uint64_t ticket;
+        if (type == TLS_NEW_SESSION_TICKET && QuicTlsParser::ParseTicket(body, ticket) &&
+            InetSocketAddress::IsMatchingType(m_connectAddress))
+        {
+            // the ticket and the parameters of the server serve a later connection
+            const Ipv4Address server = InetSocketAddress::ConvertFrom(m_connectAddress).GetIpv4();
+            m_quicl4->RememberTicket(server, ticket);
+            m_quicl4->RememberServerParameters(server, m_peerParameters);
+        }
+    }
 }
 
 } // namespace ns3
