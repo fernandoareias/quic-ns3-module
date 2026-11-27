@@ -23,6 +23,7 @@ build_lib(
                  model/quic-socket.cc
                  model/quic-stream-id-tag.cc
                  model/quic-socket-base.cc
+                 model/quic-socket-handshake.cc
                  model/quic-socket-factory.cc
                  model/quic-socket-rx-buffer.cc
                  model/quic-socket-tx-buffer.cc

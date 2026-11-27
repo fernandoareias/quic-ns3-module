@@ -339,6 +339,30 @@ class QuicL4Protocol : public IpL4Protocol
     }
 
     /**
+     * Make a token for a client that has completed a handshake with this server, to be sent in a
+     * NEW_TOKEN frame (RFC 9000, Section 8.1.3). A later Initial packet that carries it needs no
+     * Retry.
+     *
+     * @param client the address of the client.
+     * @return the token.
+     */
+    std::vector<uint8_t> IssueNewToken(Ipv4Address client);
+
+    /**
+     * Keep a token that a server sent in a NEW_TOKEN frame, for the next connection to it.
+     *
+     * @param server the address of the server.
+     * @param token the token.
+     */
+    void RememberToken(Ipv4Address server, const std::vector<uint8_t>& token);
+
+    /**
+     * @param server the address of a server.
+     * @return the token to put in the first Initial packet to it, empty when there is none.
+     */
+    std::vector<uint8_t> GetRememberedToken(Ipv4Address server) const;
+
+    /**
      * Log the connections of this stack in qlog format, one file per connection. It applies to the
      * connections created after the call. The same is done by setting the QlogDirectory attribute.
      *
@@ -401,7 +425,9 @@ class QuicL4Protocol : public IpL4Protocol
      */
     void SetUpServerConnection(Ptr<QuicSocketBase> socket,
                                const QuicHeader& header,
-                               const QuicConnectionId& originalDcid);
+                               const QuicConnectionId& originalDcid,
+                               bool validated = false,
+                               const QuicConnectionId& retrySourceCid = QuicConnectionId());
 
     /**
      * Send the bytes of a datagram on the UDP socket of a connection.
@@ -435,6 +461,22 @@ class QuicL4Protocol : public IpL4Protocol
      * @param vantage "client" or "server".
      */
     void AttachQlog(Ptr<QuicSocketBase> socket, const std::string& vantage);
+
+    /**
+     * Answer an Initial packet with a Retry packet (RFC 9000, Section 17.2.5), without keeping a
+     * connection.
+     *
+     * @param sock the UDP socket the packet arrived on.
+     * @param from the address of the client.
+     * @param header the header of the Initial packet.
+     */
+    void SendRetry(Ptr<Socket> sock, const Address& from, const QuicHeader& header);
+
+    /**
+     * @param bytes how many.
+     * @return random token bytes.
+     */
+    std::vector<uint8_t> RandomToken(uint32_t bytes);
 
     /**
      * Build the datagram of a packet: the payload, its AEAD tag and the header.
@@ -665,6 +707,20 @@ class QuicL4Protocol : public IpL4Protocol
         m_rememberedParameters; //!< Parameters announced by servers this stack connected to
     std::map<QuicConnectionId, Ptr<QuicSocketBase>>
         m_cidMap;            //!< Connection id -> connection (every id issued to a peer)
+    bool m_retryEnabled{false}; //!< Attribute RetryEnabled
+
+    /** What a server knows of a token it issued. */
+    struct IssuedToken
+    {
+        Ipv4Address address;        //!< the client the token was given to
+        QuicConnectionId odcid;     //!< Retry: the Destination Connection ID of the first Initial
+        QuicConnectionId retryScid; //!< Retry: the Source Connection ID of the Retry packet
+        bool retry{false};          //!< true for a Retry token, false for a NEW_TOKEN one
+        Time expiry;                //!< until when it is valid
+    };
+
+    std::map<std::vector<uint8_t>, IssuedToken> m_issuedTokens; //!< tokens this server issued
+    std::map<uint32_t, std::vector<uint8_t>> m_serverTokens;    //!< NEW_TOKEN tokens by server
     uint8_t m_connectionIdLength{8}; //!< Attribute ConnectionIdLength
     std::string m_qlogDirectory;     //!< Attribute QlogDirectory
     uint64_t m_resetKeyA{0};         //!< Secret of the stateless reset token function

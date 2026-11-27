@@ -138,6 +138,15 @@ QuicL4Protocol::GetTypeId(void)
                           StringValue(""),
                           MakeStringAccessor(&QuicL4Protocol::m_qlogDirectory),
                           MakeStringChecker())
+            .AddAttribute(
+                "RetryEnabled",
+                "Answer the first Initial packet of every connection with a Retry packet, "
+                "so that the address of the client is validated before any state is "
+                "kept (RFC 9000, Section 8.1.2); an Initial packet with a token that "
+                "this server issued is accepted",
+                BooleanValue(false),
+                MakeBooleanAccessor(&QuicL4Protocol::m_retryEnabled),
+                MakeBooleanChecker())
             .AddAttribute("SocketList",
                           "The list of UDP and QUIC sockets associated to this protocol.",
                           ObjectVectorValue(),
@@ -677,10 +686,35 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
 
     if (header.IsInitial() and m_isServer and socket == nullptr)
     {
+        // RFC 9000, Section 8.1: a token that this server issued validates the address of the
+        // client; a Retry token also says which id the first packet had
+        bool validated = false;
+        QuicConnectionId originalDcid = connectionId;
+        QuicConnectionId retryScid;
+        if (!header.GetToken().empty())
+        {
+            auto issued = m_issuedTokens.find(header.GetToken());
+            if (issued != m_issuedTokens.end() && issued->second.address == srcIp &&
+                issued->second.expiry > Simulator::Now() &&
+                (!issued->second.retry || issued->second.retryScid == connectionId))
+            {
+                validated = true;
+                if (issued->second.retry)
+                {
+                    originalDcid = issued->second.odcid;
+                    retryScid = connectionId;
+                }
+            }
+        }
+        if (!validated && m_retryEnabled)
+        {
+            SendRetry(sock, from, header);
+            return;
+        }
         Ptr<QuicSocketBase> listenerSocket = FindListener(sock);
         NS_LOG_LOGIC(this << " Cloning listening socket " << listenerSocket);
         socket = CloneSocket(listenerSocket);
-        SetUpServerConnection(socket, header, connectionId);
+        SetUpServerConnection(socket, header, originalDcid, validated, retryScid);
 
         // Store the peer address on the cloned binding for SendTo
         for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
@@ -714,53 +748,6 @@ QuicL4Protocol::ForwardUpPacket(Ptr<Socket> sock,
                      << InetSocketAddress::ConvertFrom(from).GetPort() << "");
         m_authAddresses.push_back(InetSocketAddress::ConvertFrom(from)
                                       .GetIpv4()); // add to the list of authenticated sockets
-    }
-    else if (header.IsORTT() and m_isServer and socket == nullptr)
-    {
-        auto result = std::find(m_authAddresses.begin(),
-                                m_authAddresses.end(),
-                                InetSocketAddress::ConvertFrom(from).GetIpv4());
-        // check if a 0-RTT is allowed with this endpoint - or if the attribute
-        // m_0RTTHandshakeStart has been forced to be true
-        if (result == m_authAddresses.end() && m_0RTTHandshakeStart)
-        {
-            m_authAddresses.push_back(
-                InetSocketAddress::ConvertFrom(from)
-                    .GetIpv4()); // add to the list of authenticated sockets
-        }
-        else if (result == m_authAddresses.end() && !m_0RTTHandshakeStart)
-        {
-            NS_LOG_WARN(this << " CONNECTION ABORTED: 0RTT Packet from unauthenticated address "
-                             << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                             << InetSocketAddress::ConvertFrom(from).GetPort());
-            return;
-        }
-
-        NS_LOG_LOGIC("CONNECTION AUTHENTICATED - Server authenticated Client "
-                     << InetSocketAddress::ConvertFrom(from).GetIpv4() << " port "
-                     << InetSocketAddress::ConvertFrom(from).GetPort() << "");
-        Ptr<QuicSocketBase> orttListener = FindListener(sock);
-        NS_LOG_LOGIC(this << " Cloning listening socket " << orttListener);
-        socket = CloneSocket(orttListener);
-        SetUpServerConnection(socket, header, connectionId);
-
-        // Store the peer address on the cloned binding for SendTo
-        for (auto bit = m_quicUdpBindingList.begin(); bit != m_quicUdpBindingList.end(); ++bit)
-        {
-            if ((*bit)->m_quicSocket == socket)
-            {
-                (*bit)->m_peerAddress = from;
-                (*bit)->m_hasPeerAddress = true;
-                break;
-            }
-        }
-
-        socket->Connect(from);
-        socket->SetupCallback();
-
-        // A 0-RTT connection is accepted like a 1-RTT one: the application
-        // must learn about the new socket before data is delivered on it
-        orttListener->NotifyNewConnection(socket, from);
     }
     else if (header.IsShort() && socket == nullptr)
     {
@@ -1217,14 +1204,23 @@ QuicL4Protocol::DoDispose(void)
 void
 QuicL4Protocol::SetUpServerConnection(Ptr<QuicSocketBase> socket,
                                       const QuicHeader& header,
-                                      const QuicConnectionId& originalDcid)
+                                      const QuicConnectionId& originalDcid,
+                                      bool validated,
+                                      const QuicConnectionId& retrySourceCid)
 {
     // RFC 9000 Section 7.2: the server picks its own connection id, answers to the one the client
     // gave as Source Connection ID and keeps accepting the Destination Connection ID of the first
     // Initial packet until the client switches to the id of the server
-    socket->SetConnectionId(AllocateConnectionId());
+    // after a Retry the client already addresses the id that the Retry packet gave (RFC 9000,
+    // Section 7.2): it is the id of the connection
+    socket->SetConnectionId(retrySourceCid.IsEmpty() ? AllocateConnectionId() : retrySourceCid);
     socket->SetPeerConnectionId(header.GetSourceConnectionId());
     socket->SetOriginalDestinationConnectionId(originalDcid);
+    if (!retrySourceCid.IsEmpty())
+    {
+        socket->SetRetrySourceConnectionId(retrySourceCid);
+    }
+    socket->SetAddressValidated(validated);
     RegisterConnectionId(originalDcid, socket);
 }
 
@@ -1424,6 +1420,63 @@ QuicL4Protocol::SendDatagram(
         }
     }
     SendBytes(socket, datagram);
+}
+
+std::vector<uint8_t>
+QuicL4Protocol::RandomToken(uint32_t bytes)
+{
+    Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
+    std::vector<uint8_t> token(bytes);
+    for (auto& b : token)
+    {
+        b = static_cast<uint8_t>(rng->GetInteger(0, 255));
+    }
+    return token;
+}
+
+std::vector<uint8_t>
+QuicL4Protocol::IssueNewToken(Ipv4Address client)
+{
+    std::vector<uint8_t> token = RandomToken(32);
+    IssuedToken info;
+    info.address = client;
+    info.retry = false;
+    info.expiry = Simulator::Now() + Hours(24);
+    m_issuedTokens[token] = info;
+    return token;
+}
+
+void
+QuicL4Protocol::RememberToken(Ipv4Address server, const std::vector<uint8_t>& token)
+{
+    m_serverTokens[server.Get()] = token;
+}
+
+std::vector<uint8_t>
+QuicL4Protocol::GetRememberedToken(Ipv4Address server) const
+{
+    auto it = m_serverTokens.find(server.Get());
+    return it == m_serverTokens.end() ? std::vector<uint8_t>() : it->second;
+}
+
+void
+QuicL4Protocol::SendRetry(Ptr<Socket> sock, const Address& from, const QuicHeader& header)
+{
+    const QuicConnectionId retryCid = AllocateConnectionId();
+    IssuedToken info;
+    info.address = InetSocketAddress::ConvertFrom(from).GetIpv4();
+    info.odcid = header.GetDestinationConnectionId();
+    info.retryScid = retryCid;
+    info.retry = true;
+    info.expiry = Simulator::Now() + Seconds(30);
+    std::vector<uint8_t> token = RandomToken(24);
+    m_issuedTokens[token] = info;
+    QuicHeader retry = QuicHeader::CreateRetry(header.GetSourceConnectionId(),
+                                               retryCid,
+                                               header.GetVersion(),
+                                               token);
+    NS_LOG_INFO(this << " sending a Retry packet to " << info.address);
+    sock->SendTo(BuildDatagram(retry, Create<Packet>()), 0, from);
 }
 
 void

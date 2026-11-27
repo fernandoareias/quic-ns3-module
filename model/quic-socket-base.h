@@ -13,11 +13,13 @@
 #ifndef QUICSOCKETBASE_H
 #define QUICSOCKETBASE_H
 
+#include "quic-crypto-stream.h"
 #include "quic-header.h"
 #include "quic-socket-rx-buffer.h"
 #include "quic-socket-tx-buffer.h"
 #include "quic-socket.h"
 #include "quic-subheader.h"
+#include "quic-tls-emulator.h"
 #include "quic-transport-parameters.h"
 
 #include "ns3/event-id.h"
@@ -964,10 +966,35 @@ class QuicSocketBase : public QuicSocket
      *
      * @param cid the id.
      */
+    void SetRetrySourceConnectionId(const QuicConnectionId& cid)
+    {
+        m_retrySourceCid = cid;
+    }
+
+    /**
+     * Say that the address of the peer is validated, as a token of the server says (RFC 9000,
+     * Section 8.1).
+     *
+     * @param validated true when it is.
+     */
+    void SetAddressValidated(bool validated)
+    {
+        m_peerAddressValidated = validated;
+    }
+
     void SetOriginalDestinationConnectionId(const QuicConnectionId& cid)
     {
         m_originalDcid = cid;
     }
+
+    /**
+     * Start a key update (RFC 9001, Section 6): the packets that follow carry the other value of
+     * the Key Phase bit. It is possible once the handshake is confirmed and a packet sent with the
+     * current keys was acknowledged.
+     *
+     * @return true when the update started.
+     */
+    bool InitiateKeyUpdate();
 
     /**
      * Attach the writer that logs the events of this connection in qlog format. The socket does
@@ -1313,16 +1340,6 @@ class QuicSocketBase : public QuicSocket
     void ArmIdleTimer();
 
     /**
-     * Client: arm the timer that repeats the Handshake packet until HANDSHAKE_DONE arrives (RFC
-     * 9001 s4.9.2: a client keeps its Handshake keys until the handshake is confirmed, so the
-     * packet that completes the server's handshake can be sent again)
-     */
-    void ArmHandshakeResend();
-
-    /** The Handshake packet was not answered in time: send another one */
-    void HandshakeResendTimeout();
-
-    /**
      * \brief True while the idle timer is running (or the connection is open with the timer
      * disabled)
      */
@@ -1474,17 +1491,138 @@ class QuicSocketBase : public QuicSocket
                                    //!< state of RFC 9000 s10.2.1
     uint32_t m_closingPacketsReceived{
         0}; //!< Packets received while closing, to pace the repeats of CONNECTION_CLOSE
-    Address m_connectAddress;       //!< Address a client connected to, to look up the parameters
-                                    //!< remembered for it
-    EventId m_handshakeResendEvent; //!< Client: repeats the Handshake packet until HANDSHAKE_DONE
-                                    //!< arrives
-    uint32_t m_handshakeResendCount{
-        0}; //!< Client: times the Handshake packet was repeated (the backoff exponent)
-    bool m_handshakeResendPending{false}; //!< The next packet sent carries a Handshake header
+    Address m_connectAddress; //!< Address a client connected to, to look up the parameters
+                              //!< remembered for it
+
+    /** State of one packet number space of the handshake: Initial or Handshake (RFC 9002, Section
+     * 2). */
+    struct HandshakeSpace
+    {
+        /** What is known of a packet that was sent. */
+        struct Sent
+        {
+            Time time;                //!< when it was sent
+            bool ackEliciting{false}; //!< it carries more than ACK and PADDING
+            std::vector<std::pair<uint64_t, uint64_t>>
+                crypto; //!< offset and length of its CRYPTO data
+        };
+
+        QuicCryptoStream crypto;       //!< CRYPTO data of the level
+        QuicTlsParser parser;          //!< handshake messages read from the received data
+        uint64_t nextPn{0};            //!< packet number of the next packet sent
+        std::map<uint64_t, Sent> sent; //!< packets sent and not acknowledged
+        QuicPnRanges received;         //!< packet numbers received
+        Time largestRecvTime;          //!< when the largest packet number arrived
+        bool ackPending{false};        //!< an ACK is owed
+        bool pingPending{false};       //!< a PING is to be sent as a probe
+        bool keys{false};              //!< the keys of the level are available
+        bool discarded{false};         //!< the keys were discarded
+        int64_t largestAcked{-1};      //!< the largest packet number the peer acknowledged
+        Time lastAckElicitingSent;     //!< when the latest ack-eliciting packet was sent
+    };
+
+    HandshakeSpace m_hs[2];                //!< Initial (0) and Handshake (1) spaces
+    QuicTlsProfile m_tlsProfile;           //!< sizes of the TLS messages
+    std::string m_tlsProfileName{"ecdsa"}; //!< attribute TlsProfile
+    uint32_t m_tlsChainLength{1};          //!< attribute CertificateChainLength
+    std::string m_alpn{"erlang"};          //!< attribute Alpn: the protocols, separated by commas
+    std::string m_alpnChosen;              //!< the protocol of the connection
+    std::vector<uint8_t> m_initialToken;   //!< token of the Initial packets of a client
+    bool m_retryReceived{false};           //!< client: a Retry packet was accepted
+    QuicConnectionId m_retrySourceCid; //!< id the Retry packet gave, or the server's id after one
+    bool m_keyUpdateAllowed{false};    //!< a packet of the current send phase was acknowledged
+    uint64_t m_firstPnCurrentPhase{0}; //!< first packet number sent with the current keys
+    QuicHeader::KeyPhase_t m_rxKeyPhase{QuicHeader::PHASE_ZERO}; //!< phase of the receive keys
+    uint32_t m_keyUpdatePackets{0};                              //!< attribute KeyUpdatePackets
+    uint32_t m_packetsInPhase{0};                    //!< 1-RTT packets sent with the current keys
+    uint32_t m_keyUpdates{0};                        //!< key updates so far, of either end
+    TracedCallback<uint32_t, bool> m_keyUpdateTrace; //!< trace of key updates: count, local
+    bool m_tlsHelloDone{false}; //!< the hello of the peer was read (ClientHello or ServerHello)
+    bool m_tlsCertificateSeen{false}; //!< a Certificate message of the peer was read
+    bool m_handshakeComplete{false};  //!< the TLS handshake is complete at this end
+    EventId m_hsTimer;                //!< probe timeout of the handshake spaces
+    bool m_hsSentSinceReceive{
+        false};             //!< an ack-eliciting handshake packet went out since the last one came
+    EventId m_hsFlushEvent; //!< sends the handshake packets once a datagram was processed
+    uint32_t m_hsPtoCount{0}; //!< consecutive handshake probe timeouts
+
+    /** Start the handshake of a client: the ClientHello goes in an Initial packet. */
+    void StartClientHandshake();
+
+    /**
+     * A client received a Retry packet (RFC 9000, Section 17.2.5.2): it sends its Initial packet
+     * again, with the token and to the id of the server.
+     *
+     * @param header the header of the Retry packet.
+     */
+    void HandleRetry(const QuicHeader& header);
+
+    /** Forget a handshake that is being started again, after a Version Negotiation packet. */
+    void ResetHandshake();
+
+    /**
+     * Process an Initial or Handshake packet.
+     *
+     * @param p the frames of the packet.
+     * @param header the header of the packet.
+     */
+    void HandleHandshakePacket(Ptr<Packet> p, const QuicHeader& header);
+
+    /** Send what the Initial and Handshake spaces have to send: ACKs and CRYPTO data. */
+    void FlushHandshake();
+
+    /**
+     * Read the handshake messages that arrived at a level and act on them.
+     *
+     * @param level 0 for Initial, 1 for Handshake.
+     */
+    void ProcessTls(int level);
+
+    /**
+     * Act on one handshake message.
+     *
+     * @param level 0 for Initial, 1 for Handshake.
+     * @param type the message type.
+     * @param body the message without its header.
+     * @return false when the connection was closed because of it.
+     */
+    bool HandleTlsMessage(int level, uint8_t type, const std::vector<uint8_t>& body);
+
+    /**
+     * Take an ACK frame of a handshake level into account.
+     *
+     * @param level 0 for Initial, 1 for Handshake.
+     * @param sub the frame.
+     */
+    void HandleHandshakeAck(int level, const QuicSubheader& sub);
+
+    /** The server has the Finished of the client: the connection opens. */
+    void CompleteServerHandshake();
+
+    /** The client has the Finished of the server: it sends its own and the connection opens. */
+    void CompleteClientHandshake();
+
+    /**
+     * Discard the keys and the state of a handshake level (RFC 9001, Section 4.9).
+     *
+     * @param level 0 for Initial, 1 for Handshake.
+     */
+    void DiscardHandshakeLevel(int level);
+
+    /** Arm the probe timeout of the handshake spaces, or cancel it. */
+    void ArmHandshakeTimer();
+
+    /** The probe timeout of the handshake fired: send the data again, or a PING. */
+    void OnHandshakeTimeout();
+
+    /**
+     * @param level 0 for Initial, 1 for Handshake.
+     * @return an ACK frame for the packets received at the level.
+     */
+    Ptr<Packet> BuildHandshakeAck(int level);
+
     bool m_handshakeDoneReceived{
         false}; //!< Client: HANDSHAKE_DONE arrived, the handshake is confirmed
-    static constexpr uint32_t kMaxHandshakeResends =
-        8; //!< Handshake packets repeated before the client relies on the idle timeout
 
     // ACK frequency (draft-ietf-quic-ack-frequency), as msquic: always advertised, adjusted by the
     // sender

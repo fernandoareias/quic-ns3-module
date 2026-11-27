@@ -128,6 +128,30 @@ QuicSocketBase::GetTypeId(void)
                           UintegerValue(QUIC_VERSION),
                           MakeUintegerAccessor(&QuicSocketBase::m_vers),
                           MakeUintegerChecker<uint32_t>())
+            .AddAttribute("TlsProfile",
+                          "Sizes of the emulated TLS 1.3 handshake: ecdsa, rsa or pq-hybrid, "
+                          "optionally followed by +mtls for a server that asks the client for a "
+                          "certificate",
+                          StringValue("ecdsa"),
+                          MakeStringAccessor(&QuicSocketBase::m_tlsProfileName),
+                          MakeStringChecker())
+            .AddAttribute("KeyUpdatePackets",
+                          "Start a key update after this many 1-RTT packets with the same keys "
+                          "(RFC 9001, Section 6); 0 never starts one",
+                          UintegerValue(0),
+                          MakeUintegerAccessor(&QuicSocketBase::m_keyUpdatePackets),
+                          MakeUintegerChecker<uint32_t>())
+            .AddAttribute("CertificateChainLength",
+                          "Number of certificates in the chain that the server sends",
+                          UintegerValue(1),
+                          MakeUintegerAccessor(&QuicSocketBase::m_tlsChainLength),
+                          MakeUintegerChecker<uint32_t>(1, 8))
+            .AddAttribute("Alpn",
+                          "Application protocols, separated by commas: the client offers them all, "
+                          "the server takes the first one of the client that it knows (RFC 7301)",
+                          StringValue("erlang"),
+                          MakeStringAccessor(&QuicSocketBase::m_alpn),
+                          MakeStringChecker())
             .AddAttribute("IdleTimeout",
                           "Idle timeout value after which the socket is closed (0 disables it; the "
                           "peer's max_idle_timeout can only shorten it)",
@@ -398,6 +422,11 @@ QuicSocketBase::GetTypeId(void)
                             "Receive QUIC packet from UDP protocol",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_rxTrace),
                             "ns3::QuicSocketBase::QuicTxRxTracedCallback")
+            .AddTraceSource("KeyUpdate",
+                            "The keys of the 1-RTT packets were updated (updates so far, true when "
+                            "this end started it)",
+                            MakeTraceSourceAccessor(&QuicSocketBase::m_keyUpdateTrace),
+                            "ns3::TracedCallback::Uint32BoolCallback")
             .AddTraceSource("PacketLost",
                             "A packet was declared lost (packet number, bytes, trigger: "
                             "reordering_threshold, time_threshold or pto_expired)",
@@ -742,6 +771,11 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
 
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
+    m_keyUpdatePackets = sock.m_keyUpdatePackets;
+    m_keyUpdateTrace = sock.m_keyUpdateTrace;
+    m_tlsProfileName = sock.m_tlsProfileName;
+    m_tlsChainLength = sock.m_tlsChainLength;
+    m_alpn = sock.m_alpn;
     m_cWndTrace = sock.m_cWndTrace;
     m_ssThTrace = sock.m_ssThTrace;
     m_congStateTrace = sock.m_congStateTrace;
@@ -821,7 +855,8 @@ QuicSocketBase::~QuicSocketBase(void)
     m_quicl4 = 0;
     // the timers hold this pointer without a reference
     m_pacingTimer.Cancel();
-    m_handshakeResendEvent.Cancel();
+    m_hsTimer.Cancel();
+    m_hsFlushEvent.Cancel();
     m_sendPendingDataEvent.Cancel();
     m_retxEvent.Cancel();
     m_keepAliveEvent.Cancel();
@@ -1058,7 +1093,7 @@ QuicSocketBase::Connect(const Address& address)
     // resumption here, and a server only accepts a first flight without an Initial when 0-RTT is
     // allowed
     (void)result;
-    if (m_quicl4->Is0RTTHandshakeAllowed())
+    if (m_quicl4->Is0RTTHandshakeAllowed() && !m_isServerSide)
     {
         NS_LOG_INFO("CONNECTION AUTHENTICATED Client found the Server "
                     << InetSocketAddress::ConvertFrom(address).GetIpv4() << " port "
@@ -1636,6 +1671,15 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
         p->AddAtEnd(ackFrame ? ackFrame : OnSendingAckFrame());
     }
 
+    if (m_socketState == OPEN && m_keyUpdatePackets > 0 && m_packetsInPhase >= m_keyUpdatePackets)
+    {
+        InitiateKeyUpdate();
+    }
+    if (m_socketState == OPEN && !m_zeroRttConnect)
+    {
+        ++m_packetsInPhase;
+    }
+
     QuicHeader head;
 
     if (m_socketState == CONNECTING_SVR)
@@ -1652,30 +1696,13 @@ QuicSocketBase::SendDataPacket(SequenceNumber32 packetNumber, uint32_t maxSize, 
         // The first packet of a client that took the fast-connect path carries a
         // 0-RTT header, whether 0-RTT was forced by attribute or allowed because
         // the peer address was already authenticated
-        if (m_handshakeResendPending)
-        {
-            // The server is still waiting for the Handshake packet that completes its handshake:
-            // this one repeats it (RFC 9001 s4.9.2)
-            m_handshakeResendPending = false;
-            head = QuicHeader::CreateHandshake(GetDestCid(), m_connectionId, m_vers, packetNumber);
-        }
-        else if (!m_connected and !m_zeroRttConnect)
-        {
-            m_connected = true;
-            head = QuicHeader::CreateHandshake(GetDestCid(), m_connectionId, m_vers, packetNumber);
-        }
-        else if (m_zeroRttConnect and !m_tcb->m_handshakeConfirmed)
+        if (m_zeroRttConnect and !m_handshakeComplete)
         {
             // The server learns of the connection from a 0-RTT packet, so every packet is one until
             // the first answer arrives: a lost first packet must not leave the server without a
             // connection for the short header ones
             head = QuicHeader::Create0RTT(GetDestCid(), m_connectionId, m_vers, packetNumber);
-            if (!m_connected)
-            {
-                m_connected = true;
-                m_keyPhase == QuicHeader::PHASE_ONE ? m_keyPhase = QuicHeader::PHASE_ZERO
-                                                    : m_keyPhase = QuicHeader::PHASE_ONE;
-            }
+            m_connected = true;
         }
         else
         {
@@ -1754,6 +1781,12 @@ QuicSocketBase::SetReTxTimeout()
 {
     // TODO check for special packets
     NS_LOG_FUNCTION(this);
+
+    // the handshake packets have a timer of their own (ArmHandshakeTimer)
+    if (m_socketState == CONNECTING_CLT || m_socketState == CONNECTING_SVR)
+    {
+        return;
+    }
 
     // RFC 9002 §5.4 #24: client SHOULD arm PTO even when no in-flight if handshake unconfirmed.
     // Cancel the alarm only when there is nothing in flight AND handshake is already confirmed.
@@ -2072,41 +2105,6 @@ QuicSocketBase::SendKeepAlive()
     }
     NS_LOG_INFO(this << " keep-alive PING at " << Simulator::Now().GetSeconds());
     SendControlFrame(QuicSubheader::CreatePing());
-}
-
-void
-QuicSocketBase::ArmHandshakeResend()
-{
-    m_handshakeResendEvent.Cancel();
-    if (m_isServerSide || m_zeroRttConnect || m_handshakeDoneReceived || m_socketState != OPEN ||
-        m_handshakeResendCount >= kMaxHandshakeResends)
-    {
-        return;
-    }
-    Time delay = ProbeTimeout(false) * (1u << m_handshakeResendCount);
-    NS_LOG_INFO("Handshake packet repeated in " << delay.GetSeconds()
-                                                << " s unless HANDSHAKE_DONE arrives");
-    m_handshakeResendEvent =
-        Simulator::Schedule(delay, &QuicSocketBase::HandshakeResendTimeout, this);
-}
-
-void
-QuicSocketBase::HandshakeResendTimeout()
-{
-    NS_LOG_FUNCTION(this);
-    if (m_isServerSide || m_handshakeDoneReceived || m_socketState != OPEN)
-    {
-        return;
-    }
-    ++m_handshakeResendCount;
-    NS_LOG_INFO("No HANDSHAKE_DONE yet: repeating the Handshake packet (attempt "
-                << m_handshakeResendCount << ")");
-    // the PING makes the packet ack-eliciting even when nothing else is queued
-    m_handshakeResendPending = true;
-    SendControlFrame(QuicSubheader::CreatePing());
-    SendPendingData(true);
-    m_handshakeResendPending = false;
-    ArmHandshakeResend();
 }
 
 bool
@@ -2698,59 +2696,6 @@ QuicSocketBase::SendInitialHandshake(uint8_t type, const QuicHeader& quicHeader,
         NotifyPacketSent(p, head);
         NotifyDataSent(p->GetSize());
     }
-    else if (type == QuicHeader::INITIAL)
-    {
-        // Set initial congestion window and Ssthresh
-        m_tcb->m_cWnd = m_tcb->m_initialCWnd;
-        m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
-
-        NS_LOG_INFO("Create INITIAL");
-        Ptr<Packet> p = Create<Packet>();
-        p->AddHeader(OnSendingTransportParameters());
-        // RFC 9000 Section 14.1: a client expands the datagram of an Initial packet to 1200 bytes
-        // or more: the datagram is padded with PADDING frames when it is built (QuicL4Protocol)
-        m_quicl5->DispatchSend(p, QuicStream::HANDSHAKE_STREAM_ID);
-    }
-    else if (type == QuicHeader::RETRY)
-    {
-        NS_LOG_INFO("Create RETRY");
-        Ptr<Packet> p = Create<Packet>();
-        p->AddHeader(OnSendingTransportParameters());
-        Ptr<Packet> payload = Create<Packet>(GetInitialPacketSize() - p->GetSize());
-        p->AddAtEnd(payload);
-
-        m_quicl5->DispatchSend(p, QuicStream::HANDSHAKE_STREAM_ID);
-    }
-    else if (type == QuicHeader::HANDSHAKE)
-    {
-        NS_LOG_INFO("Create HANDSHAKE");
-        Ptr<Packet> p = Create<Packet>();
-        if (m_socketState == CONNECTING_SVR)
-        {
-            p->AddHeader(OnSendingTransportParameters());
-            // Initial congestion window (the VERSION_NEGOTIATION path sets it otherwise)
-            m_tcb->m_cWnd = m_tcb->m_initialCWnd;
-            m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
-        }
-
-        Ptr<Packet> payload = Create<Packet>(GetInitialPacketSize() - p->GetSize());
-        p->AddAtEnd(payload);
-
-        m_quicl5->DispatchSend(p, QuicStream::HANDSHAKE_STREAM_ID);
-        m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
-    }
-    else if (type == QuicHeader::ZRTT_PROTECTED)
-    {
-        // Set initial congestion window and Ssthresh, as for an Initial packet
-        m_tcb->m_cWnd = m_tcb->m_initialCWnd;
-        m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
-
-        NS_LOG_INFO("Create ZRTT_PROTECTED");
-        Ptr<Packet> p = Create<Packet>();
-        p->AddHeader(OnSendingTransportParameters());
-
-        m_quicl5->DispatchSend(p, QuicStream::HANDSHAKE_STREAM_ID);
-    }
     else
     {
         NS_LOG_INFO("Wrong Handshake Type");
@@ -2799,6 +2744,21 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
                        true,
                        std::string(sub.GetReasonPhrase().begin(), sub.GetReasonPhrase().end()));
             EnterDraining();
+        }
+        break;
+
+    case QuicSubheader::NEW_TOKEN:
+        if (m_isServerSide)
+        {
+            // RFC 9000, Section 19.7: a server that receives one closes the connection
+            AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                            "NEW_TOKEN received by a server");
+            return;
+        }
+        if (!sub.GetToken().empty() && InetSocketAddress::IsMatchingType(m_connectAddress))
+        {
+            m_quicl4->RememberToken(InetSocketAddress::ConvertFrom(m_connectAddress).GetIpv4(),
+                                    sub.GetToken());
         }
         break;
 
@@ -2967,18 +2927,6 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
         break;
     }
 
-    case QuicSubheader::NEW_TOKEN:
-        // RFC 9000 §19.7: a server must treat a NEW_TOKEN as a connection error; a client may
-        // ignore it (the simulation issues no tokens)
-        if (m_isServerSide)
-        {
-            AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
-                            "NEW_TOKEN received by a server");
-            return;
-        }
-        NS_LOG_INFO("Received NEW_TOKEN frame (ignored in simulation)");
-        break;
-
     case QuicSubheader::IMMEDIATE_ACK:
         m_immediateAckRequested = true;
         break;
@@ -3015,7 +2963,11 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
         }
         m_connected = true;
         m_handshakeDoneReceived = true;
-        m_handshakeResendEvent.Cancel();
+        m_tcb->m_handshakeConfirmed = true;
+        // RFC 9001, Section 4.9.2: the client discards its Handshake keys when the handshake is
+        // confirmed
+        DiscardHandshakeLevel(0);
+        DiscardHandshakeLevel(1);
         break;
 
     case QuicSubheader::PATH_CHALLENGE: {
@@ -3129,6 +3081,12 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
     uint32_t ackFloor = (uint32_t)sub.GetFirstAckBlock();
     m_txBuffer->SetAckFloor(ackFloor);
     m_tcb->m_lastAckedSeq = largestAcknowledged;
+    if (largestAcknowledged >= m_firstPnCurrentPhase)
+    {
+        // RFC 9001, Section 6.1: the next update may start once a packet with the current keys was
+        // acknowledged
+        m_keyUpdateAllowed = true;
+    }
     uint32_t ackBlockCount = sub.GetAckBlockCount();
 
     // RFC 9002 §2: update per-space largest-acked
@@ -3376,6 +3334,10 @@ QuicSocketBase::OnSendingTransportParameters()
         // RFC 9000 §18.2: server sets original_destination_connection_id = client's DCID
         transportParameters.SetOriginalDestinationConnectionId(m_originalDcid);
     }
+    if (m_socketState == CONNECTING_SVR && !m_retrySourceCid.IsEmpty())
+    {
+        transportParameters.SetRetrySourceConnectionId(m_retrySourceCid);
+    }
     // RFC 9000 §18.2: both endpoints set initial_source_connection_id = their own CID
     transportParameters.SetInitialSourceConnectionId(m_connectionId);
     if (m_qlog && !m_qlogLocalParams)
@@ -3449,10 +3411,13 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
                             "Destination Connection ID");
             return;
         }
-        if (!transportParameters.GetRetrySourceConnectionId().IsEmpty())
+        // RFC 9000, Section 7.3: with a Retry packet the server says which id the Retry had, and
+        // says nothing when there was none
+        const QuicConnectionId retrySource = transportParameters.GetRetrySourceConnectionId();
+        if (m_retryReceived ? retrySource != m_retrySourceCid : !retrySource.IsEmpty())
         {
             AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
-                            "retry_source_connection_id without a Retry packet");
+                            "retry_source_connection_id does not match the Retry packet");
             return;
         }
     }
@@ -3597,8 +3562,7 @@ QuicSocketBase::DoConnect(void)
         // RFC 9000 Section 7.2: the first Destination Connection ID is random, at least 8 bytes
         m_initialDcid = m_quicl4->AllocateInitialDestinationId();
         SetState(CONNECTING_CLT);
-        QuicHeader q;
-        SendInitialHandshake(QuicHeader::INITIAL, q, 0);
+        StartClientHandshake();
     }
     return 0;
 }
@@ -3654,8 +3618,7 @@ QuicSocketBase::DoFastConnect(void)
         SetState(OPEN);
         Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
         m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
-        QuicHeader q;
-        SendInitialHandshake(QuicHeader::ZRTT_PROTECTED, q, 0);
+        StartClientHandshake();
     }
     return 0;
 }
@@ -3728,6 +3691,7 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
     NS_LOG_INFO("Received packet of size " << p->GetSize());
 
     // check if this packet is not received during the draining period
+    m_hsSentSinceReceive = false;
     if (!m_drainingPeriodEvent.IsPending())
     {
         ArmIdleTimer(); // reset the IDLE timeout
@@ -3748,128 +3712,32 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         return;
     }
 
-    // A 0-RTT client never receives a Handshake packet: the first packet from
-    // the server shows the 0-RTT data was accepted, which confirms the
-    // handshake and lets the PTO alarm be cancelled when nothing is in flight
-    if (m_zeroRttConnect && !m_tcb->m_handshakeConfirmed)
-    {
-        m_tcb->m_handshakeConfirmed = true;
-    }
-
     int onlyAckFrames = 0;
     bool unsupportedVersion = false;
 
-    if (quicHeader.IsORTT() and m_socketState == LISTENING)
+    if ((quicHeader.IsInitial() or quicHeader.IsHandshake()) and m_socketState != LISTENING and
+        m_socketState != CLOSING and m_socketState != IDLE)
     {
-        if (m_serverBusy)
-        {
-            AbortConnection(QuicSubheader::TransportErrorCodes_t::CONNECTION_REFUSED,
-                            "Server too busy to accept new connections");
-            return;
-        }
-
-        m_couldContainTransportParameters = true;
-
-        // A 0-RTT server socket never sends an Initial packet, which is where
-        // the congestion window is otherwise initialized
-        m_tcb->m_cWnd = m_tcb->m_initialCWnd;
-        m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
-
-        m_currentRecvPacketNumberSpace = GetPacketNumberSpace(quicHeader);
-        onlyAckFrames = m_quicl5->DispatchRecv(p, address);
-        NotePacketReceived(quicHeader.GetPacketNumber().GetValue());
-
-        m_connected = true;
-        m_tcb->m_handshakeConfirmed = true; // RFC 9002 §5.3: handshake confirmed (0-RTT server)
-        DiscardInitialPacketSpace();        // RFC 9002 §9.1: 0-RTT skips full handshake
-        DiscardHandshakePacketSpace();      // RFC 9002 §9.1: 0-RTT — no Handshake phase
-        m_keyPhase == QuicHeader::PHASE_ONE ? m_keyPhase = QuicHeader::PHASE_ZERO
-                                            : m_keyPhase = QuicHeader::PHASE_ONE;
-        SetState(OPEN);
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
-        m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
-        // each frame of the client's first flight is a packet of its own (the first one carries the
-        // 0-RTT header), so the transport parameters may come in a later packet: they are looked
-        // for until they arrive
-        m_couldContainTransportParameters = !m_receivedTransportParameters;
-    }
-    else if (quicHeader.IsInitial() and m_socketState == CONNECTING_SVR)
-    {
-        NS_LOG_INFO("Server receives INITIAL");
-        if (m_serverBusy)
-        {
-            AbortConnection(QuicSubheader::TransportErrorCodes_t::CONNECTION_REFUSED,
-                            "Server too busy to accept new connections");
-            return;
-        }
-
-        // RFC 9000 §8: track bytes received for anti-amplification: the whole datagram
-        m_bytesReceivedPreValidation +=
-            quicHeader.GetSerializedSize() + p->GetSize() + QUIC_AEAD_TAG_SIZE;
-
-        // The client Initial carries its transport parameters (stream 0)
-        m_receivedTransportParameters = false;
-        m_couldContainTransportParameters = true;
-        onlyAckFrames = m_quicl5->DispatchRecv(p, address);
-        NotePacketReceived(quicHeader.GetPacketNumber().GetValue());
-
-        if (IsVersionSupported(quicHeader.GetVersion()))
-        {
-            m_couldContainTransportParameters = false;
-            SendInitialHandshake(QuicHeader::HANDSHAKE, quicHeader, p);
-        }
-        else
+        if (m_isServerSide and quicHeader.IsInitial() and m_socketState == CONNECTING_SVR and
+            !IsVersionSupported(quicHeader.GetVersion()))
         {
             NS_LOG_INFO(this << " WRONG VERSION " << quicHeader.GetVersion());
-            unsupportedVersion = true;
             SendInitialHandshake(QuicHeader::VERSION_NEGOTIATION, quicHeader, p);
+            return;
         }
+        if (m_serverBusy and m_isServerSide and quicHeader.IsInitial() and
+            m_socketState == CONNECTING_SVR and !m_hs[0].keys)
+        {
+            AbortConnection(QuicSubheader::TransportErrorCodes_t::CONNECTION_REFUSED,
+                            "Server too busy to accept new connections");
+            return;
+        }
+        HandleHandshakePacket(p, quicHeader);
         return;
     }
-    else if (quicHeader.IsHandshake() and
-             m_socketState == CONNECTING_CLT) // Undefined compiler behaviour if i try to receive
-                                              // transport parameters
+    else if (quicHeader.IsRetry() and m_socketState == CONNECTING_CLT)
     {
-        NS_LOG_INFO("Client receives HANDSHAKE");
-
-        onlyAckFrames = m_quicl5->DispatchRecv(p, address);
-        NotePacketReceived(quicHeader.GetPacketNumber().GetValue());
-
-        m_tcb->m_handshakeConfirmed = true; // RFC 9002 §5.3: handshake confirmed (client)
-        DiscardInitialPacketSpace(); // RFC 9002 §9.1: discard Initial on first Handshake recv
-        SetState(OPEN);
-        DiscardHandshakePacketSpace(); // RFC 9002 §9.1: discard Handshake on reaching OPEN
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
-        m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
-        m_couldContainTransportParameters = false;
-
-        SendInitialHandshake(QuicHeader::HANDSHAKE, quicHeader, p);
-        ArmHandshakeResend();
-        return;
-    }
-    else if (quicHeader.IsHandshake() and m_socketState == CONNECTING_SVR)
-    {
-        NS_LOG_INFO("Server receives HANDSHAKE");
-
-        // RFC 9000 §8: client address is validated once handshake completes
-        m_peerAddressValidated = true;
-
-        m_currentRecvPacketNumberSpace = GetPacketNumberSpace(quicHeader);
-        onlyAckFrames = m_quicl5->DispatchRecv(p, address);
-        NotePacketReceived(quicHeader.GetPacketNumber().GetValue());
-
-        m_tcb->m_handshakeConfirmed = true; // RFC 9002 §5.3: handshake confirmed (server)
-        DiscardInitialPacketSpace();        // RFC 9002 §9.1: discard Initial on Handshake recv
-        SetState(OPEN);
-        DiscardHandshakePacketSpace(); // RFC 9002 §9.1: discard Handshake on reaching OPEN
-        Simulator::ScheduleNow(&QuicSocketBase::ConnectionSucceeded, Ptr<QuicSocketBase>(this));
-        m_congestionControl->CongestionStateSet(m_tcb, TcpSocketState::CA_OPEN);
-        // RFC 9000 s19.20: the server sends HANDSHAKE_DONE; like every frame but ACK and PADDING it
-        // is retransmitted if its packet is lost (RFC 9000 s13.3), so it goes through the transmit
-        // buffer
-        SendControlFrame(QuicSubheader::CreateHandshakeDone());
-        NS_LOG_INFO("Server queued HANDSHAKE_DONE (RFC 9000 s19.20)");
-        SendPendingData(true);
+        HandleRetry(quicHeader);
         return;
     }
     else if (quicHeader.IsVersionNegotiation() and m_socketState == CONNECTING_CLT)
@@ -3912,7 +3780,8 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
             NS_LOG_INFO("A matching supported version is found " << foundVersion
                                                                  << " re-send initial");
             m_vers = foundVersion;
-            SendInitialHandshake(QuicHeader::INITIAL, quicHeader, p);
+            ResetHandshake();
+            StartClientHandshake();
         }
         else
         {
@@ -3922,9 +3791,10 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         }
         return;
     }
-    else if ((quicHeader.IsShort() or
-              (m_isServerSide and (quicHeader.IsHandshake() or quicHeader.IsORTT()))) and
-             (m_socketState == OPEN or IsFlushingOnClose()))
+    else if ((quicHeader.IsShort() or (m_isServerSide and quicHeader.IsORTT())) and
+             (m_socketState == OPEN or IsFlushingOnClose() or
+              (m_socketState == CONNECTING_SVR and quicHeader.IsORTT() and
+               m_quicl4->Is0RTTHandshakeAllowed())))
     {
         // RFC 9000 §12.3: duplicate packet numbers MUST be discarded
         QuicPacketNumber pktNum = quicHeader.GetPacketNumber();
@@ -3940,6 +3810,22 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         bool newLargest = m_receivedPacketNumbers.Empty() ||
                           pktNum.GetValue() > m_receivedPacketNumbers.Largest();
         NotePacketReceived(pktNum.GetValue());
+        if (quicHeader.IsShort() && newLargest &&
+            quicHeader.GetKeyPhaseBit() != (m_rxKeyPhase == QuicHeader::PHASE_ONE))
+        {
+            // RFC 9001, Section 6.2: a packet with the other phase and a number above the ones of
+            // the current phase is the peer's key update; a lower one belongs to the old keys
+            m_rxKeyPhase =
+                quicHeader.GetKeyPhaseBit() ? QuicHeader::PHASE_ONE : QuicHeader::PHASE_ZERO;
+            if (m_keyPhase != m_rxKeyPhase)
+            {
+                m_keyPhase = m_rxKeyPhase;
+                m_firstPnCurrentPhase = m_tcb->m_nextTxSequence.Get().GetValue();
+                m_keyUpdateAllowed = false;
+                m_packetsInPhase = 0;
+                m_keyUpdateTrace(++m_keyUpdates, false);
+            }
+        }
         if (newLargest && quicHeader.IsShort())
         {
             m_spinBit = m_isServerSide ? quicHeader.GetSpinBit() : !quicHeader.GetSpinBit();
@@ -3949,6 +3835,8 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         // space, because the Handshake space is gone
         m_currentRecvPacketNumberSpace =
             quicHeader.IsShort() ? GetPacketNumberSpace(quicHeader) : APP_DATA_SPACE;
+        m_quicl5->SetReceivedPacketType(quicHeader.IsORTT() ? QuicPacketType::ZERO_RTT
+                                                            : QuicPacketType::ONE_RTT);
         onlyAckFrames = m_quicl5->DispatchRecv(p, address);
     }
     else if (m_socketState == CLOSING)
@@ -4142,41 +4030,48 @@ QuicSocketBase::AbortConnection(uint16_t transportErrorCode,
     frame->AddHeader(quicSubheader);
 
     QuicHeader quicHeader;
-    switch (m_socketState)
+    // while the handshake runs the close goes in the highest level that has keys, with a packet
+    // number of that level (RFC 9000, Section 10.2.3)
+    int closeLevel = -1;
+    if (m_socketState == CONNECTING_CLT || m_socketState == CONNECTING_SVR ||
+        (m_socketState == OPEN && !m_connected))
     {
-    case CONNECTING_CLT:
-        quicHeader = QuicHeader::CreateInitial(GetDestCid(),
-                                               m_connectionId,
-                                               m_vers,
-                                               m_tcb->m_nextTxSequence++);
-        break;
-    case CONNECTING_SVR:
-        quicHeader = QuicHeader::CreateHandshake(GetDestCid(),
-                                                 m_connectionId,
-                                                 m_vers,
-                                                 m_tcb->m_nextTxSequence++);
-        break;
-    case OPEN:
-        quicHeader = !m_connected ? QuicHeader::CreateHandshake(GetDestCid(),
-                                                                m_connectionId,
-                                                                m_vers,
-                                                                m_tcb->m_nextTxSequence++)
-                                  : QuicHeader::CreateShort(GetDestCid(),
-                                                            m_tcb->m_nextTxSequence++,
-                                                            m_keyPhase,
-                                                            SpinBitValue(),
-                                                            LargestAckedPacket());
-        break;
-    case CLOSING:
-        quicHeader = QuicHeader::CreateShort(GetDestCid(),
-                                             m_tcb->m_nextTxSequence++,
-                                             m_keyPhase,
-                                             SpinBitValue(),
-                                             LargestAckedPacket());
-        break;
-    default:
-        NS_ABORT_MSG("AbortConnection in unfeasible Socket State for the request");
-        return;
+        closeLevel = (m_hs[1].keys && !m_hs[1].discarded) ? 1 : 0;
+    }
+    if (closeLevel >= 0)
+    {
+        const uint64_t number = m_hs[closeLevel].nextPn++;
+        quicHeader = closeLevel == 0 ? QuicHeader::CreateInitial(GetDestCid(),
+                                                                 m_connectionId,
+                                                                 m_vers,
+                                                                 QuicPacketNumber(number))
+                                     : QuicHeader::CreateHandshake(GetDestCid(),
+                                                                   m_connectionId,
+                                                                   m_vers,
+                                                                   QuicPacketNumber(number));
+    }
+    else
+    {
+        switch (m_socketState)
+        {
+        case OPEN:
+            quicHeader = QuicHeader::CreateShort(GetDestCid(),
+                                                 m_tcb->m_nextTxSequence++,
+                                                 m_keyPhase,
+                                                 SpinBitValue(),
+                                                 LargestAckedPacket());
+            break;
+        case CLOSING:
+            quicHeader = QuicHeader::CreateShort(GetDestCid(),
+                                                 m_tcb->m_nextTxSequence++,
+                                                 m_keyPhase,
+                                                 SpinBitValue(),
+                                                 LargestAckedPacket());
+            break;
+        default:
+            NS_ABORT_MSG("AbortConnection in unfeasible Socket State for the request");
+            return;
+        }
     }
     Ptr<Packet> packet = Create<Packet>();
     packet->AddAtEnd(frame);
@@ -5462,6 +5357,22 @@ QuicSocketBase::SetLastRtt(Time rtt)
         m_lastRtt = rtt;
         m_rttTrace(old, rtt);
     }
+}
+
+bool
+QuicSocketBase::InitiateKeyUpdate()
+{
+    if (m_socketState != OPEN || !m_tcb->m_handshakeConfirmed || !m_keyUpdateAllowed)
+    {
+        return false;
+    }
+    m_keyPhase =
+        m_keyPhase == QuicHeader::PHASE_ONE ? QuicHeader::PHASE_ZERO : QuicHeader::PHASE_ONE;
+    m_firstPnCurrentPhase = m_tcb->m_nextTxSequence.Get().GetValue() + 1;
+    m_keyUpdateAllowed = false;
+    m_packetsInPhase = 0;
+    m_keyUpdateTrace(++m_keyUpdates, true);
+    return true;
 }
 
 } // namespace ns3

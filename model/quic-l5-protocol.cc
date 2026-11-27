@@ -402,6 +402,14 @@ QuicL5Protocol::DisgregateRecv(Ptr<Packet> data)
             m_frameError = sub.GetParseError();
             break;
         }
+        if (!sub.IsAllowedIn(m_recvPacketType))
+        {
+            // RFC 9000 Section 12.4: a frame that the packet type does not allow is a
+            // PROTOCOL_VIOLATION
+            NS_LOG_WARN("Frame " << sub.GetFrameType() << " not allowed in this packet type");
+            m_frameError = QuicSubheader::PROTOCOL_VIOLATION;
+            break;
+        }
 
         // a STREAM frame with the LEN bit says how many bytes of data follow, which can be none;
         // one without it runs to the end of the packet

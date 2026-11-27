@@ -1610,6 +1610,11 @@ class FeatPtoRecorder
         {
             return;
         }
+        if (firstProbe.IsZero() && !firstData.IsZero() &&
+            Simulator::Now() > firstData + MilliSeconds(50))
+        {
+            firstProbe = Simulator::Now();
+        }
         // (a PING padded to the probe size is a path MTU probe, not a PTO probe)
         if (first == QuicSubheader::PING && p->GetSize() < 100)
         {
@@ -1635,19 +1640,22 @@ class FeatPtoRecorder
     Time firstPing;
     Time firstData;
     Time secondData;
+    Time firstProbe; //!< the first ack-eliciting packet after a quiet spell, whatever it carries
 };
 
 /**
- * RFC 9002 s6.2.2: before any RTT sample the first PTO is smoothed_rtt (kInitialRtt, 333 ms) +
- * 4 * rttvar (2 * kInitialRtt) + max_ack_delay (25 ms), about 1.02 s, measured from the packet
- * that was sent.
+ * RFC 9002 s6.2.1: the PTO is smoothed_rtt + 4 * rttvar + max_ack_delay, measured from the packet
+ * that was sent. The handshake gives the server an RTT sample (RFC 9002 s5.3), here about 42 ms,
+ * so the first probe comes 130 to 150 ms after the data and not after the 1 s that the initial
+ * RTT would give.
  */
 class FeatInitialPtoTest : public TestCase
 {
   public:
     FeatInitialPtoTest()
-        : TestCase("PTO: the first one, before any RTT sample, is 3 * kInitialRtt + max_ack_delay "
-                   "after the packet (RFC 9002 s6.2.2)")
+        : TestCase(
+              "PTO: the first one is smoothed_rtt + 4 * rttvar + max_ack_delay after the packet "
+              "(RFC 9002 s6.2.1)")
     {
     }
 
@@ -1677,12 +1685,12 @@ class FeatInitialPtoTest : public TestCase
         Simulator::Schedule(Seconds(2.5), &ErrorModel::Disable, em);
         r.Run();
         NS_TEST_ASSERT_MSG_EQ(r.rx[0][1].bytes, 500u, "delivered");
-        NS_TEST_ASSERT_MSG_EQ(m_rec.secondData.IsStrictlyPositive(),
+        NS_TEST_ASSERT_MSG_EQ(m_rec.firstProbe.IsStrictlyPositive(),
                               true,
-                              "the data was never sent again");
-        Time pto = m_rec.secondData - m_rec.firstData;
-        NS_TEST_ASSERT_MSG_GT(pto, Seconds(0.99), "first PTO after " << pto.GetSeconds() << " s");
-        NS_TEST_ASSERT_MSG_LT(pto, Seconds(1.1), "first PTO after " << pto.GetSeconds() << " s");
+                              "nothing was sent after the quiet spell");
+        Time pto = m_rec.firstProbe - m_rec.firstData;
+        NS_TEST_ASSERT_MSG_GT(pto, Seconds(0.12), "first PTO after " << pto.GetSeconds() << " s");
+        NS_TEST_ASSERT_MSG_LT(pto, Seconds(0.16), "first PTO after " << pto.GetSeconds() << " s");
     }
 
     FeatPtoRecorder m_rec;
@@ -2200,6 +2208,13 @@ class FeatClientHandshakeLossTest : public TestCase
 
     void OnClientTx(Ptr<const Packet>, const QuicHeader& h, Ptr<const QuicSocketBase>)
     {
+        // an Initial and a Handshake packet of the same instant travel in one datagram, and the
+        // device counts datagrams
+        const bool coalesced = h.IsHandshake() && m_lastInitial == Simulator::Now();
+        if (h.IsInitial())
+        {
+            m_lastInitial = Simulator::Now();
+        }
         if (h.IsHandshake())
         {
             ++m_handshakePackets;
@@ -2207,15 +2222,21 @@ class FeatClientHandshakeLossTest : public TestCase
             {
                 // the server device counts arrivals in the order the client sent them
                 m_dropped = true;
-                m_drop->m_target = m_sent;
+                m_drop->m_target = coalesced ? m_sent - 1 : m_sent;
             }
         }
-        ++m_sent;
+        if (!coalesced)
+        {
+            ++m_sent;
+        }
     }
+
+    Time m_lastInitial{Seconds(-1)};
 
     Ptr<FeatDropNth> m_drop;
     bool m_dropped{false};
-    uint32_t m_sent{0};
+    uint32_t m_sent{
+        1}; //!< datagrams sent: the first Initial left inside Connect (), before the trace
     uint32_t m_handshakePackets{0};
 };
 

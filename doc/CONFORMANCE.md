@@ -19,7 +19,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 5.1 | Long header: form bit, version, connection id lengths and ids | done | | quic-wire: header vectors |
 | 5.2 | Short header: form bit, destination id of agreed length | done | | quic-wire: header forms |
 | 5.4 | Version Negotiation packet | done | | quic-wire: header forms; quic-features: version negotiation |
-| 6 | The client ignores a Version Negotiation packet that lists its version | done | | quic-loss-stress `--vn` |
+| 6 | Key update | partial | F8 | The Key Phase bit changes after `KeyUpdatePackets` packets or `InitiateKeyUpdate ()`, once a packet with the current keys was acknowledged, and the peer follows (quic-handshake); no AEAD usage limits, no KEY_UPDATE_ERROR |
 
 ## RFC 9000 (transport)
 
@@ -32,18 +32,18 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 5.2 | Receiving packets: demultiplexing by connection id | partial | F5 | IPv4 only; no zero-length ids |
 | 6 | Version negotiation | partial | F9 | The client discards a list that holds its version; with no common version it sends CONNECTION_CLOSE instead of abandoning the attempt in silence |
 | 7.2 | The client picks a random Destination Connection ID of at least 8 bytes; the server picks its own id | done | | quic-features: connection ids |
-| 7.3 | Authenticating connection ids with transport parameters | partial | F7 | Checked for initial_source and original_destination (the handshake data is not authenticated); no Retry |
+| 7.3 | Authenticating connection ids with transport parameters | done | | initial_source, original_destination and retry_source are checked, with and without Retry (quic-handshake) |
 | 7.4 | Transport parameters; remembering them for 0-RTT | done | | quic-wire: RFC 9001 appendix A.2, defaults, invalid values; the client remembers them for 0-RTT |
-| 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | partial | F7 | Limit on the server, in datagram bytes on both sides; no Retry, no tokens |
+| 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | done | | `RetryEnabled` makes a server answer the first Initial with a Retry; NEW_TOKEN after the handshake lets the next connection skip it; the 3x limit counts datagram bytes (quic-handshake); tokens are random bytes the server remembers, not encrypted ones |
 | 8.2 | Path validation | done | | quic: migration cases |
 | 9 | Connection migration | partial | F7, F11 | Client-initiated only; no `preferred_address` |
 | 10.1 | Idle timeout | done | | quic: idle timeout cases |
 | 10.2 | Closing and draining | done | | |
 | 10.3 | Stateless reset | done | | quic: stateless reset |
 | 11 | Error handling | partial | F4 | Malformed frames and unknown types close the connection (quic-frames); the stream-level errors of Section 4.5 are still to do |
-| 12.2 | Coalescing packets | partial | F7 | Received and sent by the L4 protocol (quic-datagrams); no endpoint sends coalesced packets until the handshake is reworked |
+| 12.2 | Coalescing packets | done | | The server sends its Initial and Handshake packets in one datagram and the client its Initial ACK and Handshake packet (quic-handshake); quic-datagrams covers reception |
 | 12.3 | Packet numbers: one space per encryption level | divergent | F7 | One counter for all; the header truncates and recovers them as in Appendix A |
-| 12.4 | Frames allowed in each packet type | missing | F3 | STREAM frames travel in Initial and Handshake packets |
+| 12.4 | Frames allowed in each packet type | partial | F7 | Initial and Handshake packets carry only ACK, CRYPTO, PING, PADDING and CONNECTION_CLOSE, and the receiver closes the connection otherwise; 0-RTT and 1-RTT packets are not checked yet |
 | 13.2 | Generating acknowledgements | done | | quic-features: delayed ACK |
 | 13.4 | ECN | missing | F8 | `ACK_ECN` closes the connection |
 | 14.1 | Initial datagrams of at least 1200 bytes | done | | quic-features: Initial datagram; PADDING frames, exactly the InitialPacketSize; a server discards smaller ones |
@@ -51,15 +51,15 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 15 | Versions; reserved versions | partial | F9 | Version 2 is only in the header codec |
 | 16 | Variable-length integers | done | | quic-wire: Appendix A.1 |
 | 17.2 | Long header packets | done | | quic-wire: RFC 9001 appendix A.2, A.3 |
-| 17.2.5 | Retry | partial | F7 | The header is done (quic-wire: A.4); no endpoint sends or handles it |
+| 17.2.5 | Retry | done | | Sent and handled (quic-handshake); the integrity tag is the 16 zero bytes of the other tags |
 | 17.3 | Short header packets | done | | quic-wire: header forms |
 | 17.4 | Spin bit | done | | quic: spin bit; the `SpinBit` attribute turns it off (random values), the one-in-16 policy is left to the application |
-| 18.2 | Transport parameters | partial | F7 | All but preferred_address (F11) and the extension parameters (F9); carried behind the handshake pseudo-stream until F7 |
+| 18.2 | Transport parameters | partial | F9, F11 | All but preferred_address (F11) and the extension parameters (F9); carried in the quic_transport_parameters extension of the ClientHello and EncryptedExtensions |
 | 19.1 to 19.2 | PADDING, PING | done | | quic-frames |
 | 19.3 | ACK | done | | quic-frames: bytes, invalid ranges |
 | 19.3.2 | ACK with ECN counts | partial | F8 | Codec done and accepted on receipt (quic-frames); nothing sends or counts ECN yet |
 | 19.4, 19.5 | RESET_STREAM, STOP_SENDING | done | | quic-frames: 62-bit error codes |
-| 19.6, 19.7 | CRYPTO, NEW_TOKEN | partial | F7 | Codecs done (quic-frames); no endpoint sends them |
+| 19.6, 19.7 | CRYPTO, NEW_TOKEN | partial | F7 | CRYPTO is sent and received, with retransmission (quic-handshake); NEW_TOKEN is not sent |
 | 19.8 | STREAM | done | | quic-frames: LEN, OFF and FIN bits; a length of zero is zero; the sender always writes LEN |
 | 19.9 to 19.14 | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, *_BLOCKED | done | | |
 | 19.15, 19.16 | NEW_CONNECTION_ID, RETIRE_CONNECTION_ID | done | | quic-frames: ids of 1 to 20 bytes |
@@ -71,12 +71,12 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 
 | Section | Requirement | Status | Phase | Note |
 |---|---|---|---|---|
-| 4 | CRYPTO frames carry the TLS handshake | missing | F7 | The handshake is a padded STREAM payload |
-| 4.1.2 | The handshake is confirmed by HANDSHAKE_DONE | divergent | F8 | The client confirms on its first Handshake packet |
-| 4.6 | 0-RTT with session tickets | divergent | F7 | A flag, not a ticket |
-| 4.9 | Discarding Initial and Handshake keys | divergent | F7 | |
+| 4 | CRYPTO frames carry the TLS handshake | done | | ClientHello, ServerHello, EncryptedExtensions, Certificate, CertificateVerify and Finished, with the sizes of a real handshake (profiles ecdsa, rsa, pq-hybrid, mtls) and ALPN |
+| 4.1.2 | The handshake is confirmed by HANDSHAKE_DONE | done | | The server confirms when it has the client's Finished, the client on HANDSHAKE_DONE |
+| 4.6 | 0-RTT with session tickets | divergent | F7 | The client's cache of the server's transport parameters stands for the ticket; no NewSessionTicket |
+| 4.9 | Discarding Initial and Handshake keys | done | | The client drops the Initial level when it sends its first Handshake packet, the server when it reads one; both drop the Handshake level when the handshake is confirmed |
 | 5 | Packet protection (size: 16-byte tag) | partial | F5 | The tag is there (zeros) and counted in the path MTU; the cryptography stays emulated |
-| 5.8 | Retry integrity tag | missing | F7 | |
+| 5.8 | Retry integrity tag | divergent | | 16 bytes that are not computed |
 | 6 | Key update | missing | F7 | |
 | 8.1 | ALPN | missing | F7 | |
 

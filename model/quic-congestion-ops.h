@@ -146,6 +146,15 @@ class QuicCongestionOps : public TcpNewReno
      */
     virtual void OnPathChange(Ptr<TcpSocketState> tcb);
 
+    /**
+     * \brief Method called to update the Rtt. It updates the quantities in the tcb.
+     *
+     * \param tcb a smart pointer to the SocketState (it accepts a QuicSocketState)
+     * \param latestRtt the latest Rtt
+     * \param ackDelay the ack delay
+     */
+    void UpdateRtt(Ptr<TcpSocketState> tcb, Time latestRtt, Time ackDelay);
+
   protected:
     /**
      * \brief Reduce the window on a new congestion event (new recovery epoch)
@@ -160,15 +169,6 @@ class QuicCongestionOps : public TcpNewReno
     virtual void OnPersistentCongestion(Ptr<QuicSocketState> tcbd);
 
     // QuicCongestionControl Draft10
-
-    /**
-     * \brief Method called to update the Rtt. It updates the quantities in the tcb.
-     *
-     * \param tcb a smart pointer to the SocketState (it accepts a QuicSocketState)
-     * \param latestRtt the latest Rtt
-     * \param ackDelay the ack delay
-     */
-    void UpdateRtt(Ptr<TcpSocketState> tcb, Time latestRtt, Time ackDelay);
 
     /**
      * \brief Method called when a packet is acked. It process the acked packet and updates
