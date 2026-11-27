@@ -268,13 +268,14 @@ QuicCubic::OnPacketAcked(Ptr<TcpSocketState> tcb, Ptr<QuicSocketTxItem> ackedPac
         m_aimdWindow = cwnd;
     }
 
-    Time minRtt = (tcbd->m_minRtt == Time::Max()) ? Seconds(0) : tcbd->m_minRtt;
-    double t = (now - m_congAvoidStart + minRtt).GetSeconds();
+    // RFC 9438, Section 4.2: the target is the cubic function one smoothed RTT ahead
+    double t = (now - m_congAvoidStart + tcbd->m_smoothedRtt).GetSeconds();
     double dt = t - m_k;
     double cubicWindow = m_c * dt * dt * dt * mss + m_windowMax;
 
     // Reno-friendly estimate (RFC 9438 s4.3)
-    double alpha = 3.0 * (1.0 - m_beta) / (1.0 + m_beta);
+    // alpha_cubic is 1 once the estimate has caught up with W_max (RFC 9438, Section 4.3)
+    double alpha = (m_aimdWindow < m_windowMax) ? 3.0 * (1.0 - m_beta) / (1.0 + m_beta) : 1.0;
     m_aimdWindow += alpha * acked * mss / cwnd;
 
     if (cubicWindow < m_aimdWindow)
