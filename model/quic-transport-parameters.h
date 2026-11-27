@@ -80,6 +80,8 @@ class QuicTransportParameters : public Header
     static constexpr uint64_t RETRY_SOURCE_CONNECTION_ID = 0x10;
     /** Identifier of min_ack_delay (draft-ietf-quic-ack-frequency). */
     static constexpr uint64_t MIN_ACK_DELAY = 0xff04de1b;
+    /** Identifier of version_information (RFC 9368). */
+    static constexpr uint64_t VERSION_INFORMATION = 0x11;
     /** Identifier of max_datagram_frame_size (RFC 9221). */
     static constexpr uint64_t MAX_DATAGRAM_FRAME_SIZE = 0x20;
     /** Identifier of grease_quic_bit (RFC 9287). */
@@ -189,6 +191,37 @@ class QuicTransportParameters : public Header
     void SetMaxAckDelay(uint64_t val);
 
     /** @return min_ack_delay in microseconds, 0 when the endpoint does not support ACK_FREQUENCY. */
+    /** @return true when the parameters have version_information (RFC 9368). */
+    bool HasVersionInformation() const
+    {
+        return m_has_version_information;
+    }
+
+    /** @return the Chosen Version of version_information. */
+    uint32_t GetChosenVersion() const
+    {
+        return m_chosen_version;
+    }
+
+    /** @return the Available Versions of version_information, the preferred one first. */
+    const std::vector<uint32_t>& GetAvailableVersions() const
+    {
+        return m_available_versions;
+    }
+
+    /**
+     * Set version_information.
+     *
+     * @param chosen the version of the packets that carry it.
+     * @param available the versions the endpoint can use, in order of preference.
+     */
+    void SetVersionInformation(uint32_t chosen, const std::vector<uint32_t>& available)
+    {
+        m_has_version_information = true;
+        m_chosen_version = chosen;
+        m_available_versions = available;
+    }
+
     /** @return max_datagram_frame_size (RFC 9221), 0 when the endpoint does not take datagrams. */
     uint64_t GetMaxDatagramFrameSize() const
     {
@@ -311,6 +344,9 @@ class QuicTransportParameters : public Header
     uint64_t m_initial_max_stream_id_uni{0};  //!< initial_max_streams_uni
     uint64_t m_initial_max_stream_data_bidi_remote{0}; //!< initial_max_stream_data_bidi_remote
     uint64_t m_initial_max_stream_data_uni{0};         //!< initial_max_stream_data_uni
+    bool m_has_version_information{false};             //!< version_information is present
+    uint32_t m_chosen_version{0};                      //!< its Chosen Version
+    std::vector<uint32_t> m_available_versions;        //!< its Available Versions
     uint64_t m_max_datagram_frame_size{0};             //!< max_datagram_frame_size
     bool m_grease_quic_bit{false};                     //!< grease_quic_bit is present
     bool m_reset_stream_at{false};                     //!< reset_stream_at is present

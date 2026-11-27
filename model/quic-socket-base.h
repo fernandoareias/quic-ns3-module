@@ -1575,6 +1575,16 @@ class QuicSocketBase : public QuicSocket
      */
     bool IsVersionSupported(uint32_t version);
 
+    /** @return the versions this endpoint offers for a compatible upgrade, the first preferred. */
+    std::vector<uint32_t> GetAvailableVersions() const;
+
+    /**
+     * @param from the version of the first Initial packet.
+     * @param to a version the endpoint would move to.
+     * @return true when RFC 9368 allows the upgrade: version 1 and version 2 are compatible.
+     */
+    static bool VersionsCompatible(uint32_t from, uint32_t to);
+
     /**
      * \brief Check if there are missing packets in the m_receivedPacketNumbers list
      *
@@ -1687,6 +1697,7 @@ class QuicSocketBase : public QuicSocket
     bool m_greaseQuicBit{false};             //!< attribute GreaseQuicBit
     bool m_peerGreaseQuicBit{false};         //!< the peer announced grease_quic_bit
     Ptr<UniformRandomVariable> m_greaseRv;   //!< makes the Fixed Bit of the packets that are sent
+    uint64_t m_peerMinAckDelayUs{0};         //!< min_ack_delay of the peer, in microseconds
     bool m_ecnEnabled{false};           //!< attribute EnableEcn
     EcnState m_ecnState{ECN_OFF};       //!< state of the validation
     uint8_t m_receivedEcn{0};           //!< ECN codepoint of the datagram being processed
@@ -1988,6 +1999,9 @@ class QuicSocketBase : public QuicSocket
     bool m_zeroRttConnect; //!< True on a client socket that connected with a 0-RTT handshake
     QuicConnectionId m_connectionId;   //!< Connection id
     uint32_t m_vers;                   //!< Quic protocol version
+    std::string m_availableVersions{"00000001"}; //!< attribute AvailableVersions
+    uint32_t m_firstVersion{0};                  //!< the version of the first Initial of the client
+    bool m_versionUpgraded{false};     //!< a compatible version negotiation changed the version
     QuicHeader::KeyPhase_t m_keyPhase; //!< Key phase
     bool m_spinBit;                    //!< Spin bit for latency measurement (RFC 9000 §17.3.1)
     Time m_lastReceived;               //!< Time of last received packet

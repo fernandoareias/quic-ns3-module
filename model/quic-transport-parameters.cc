@@ -158,6 +158,9 @@ QuicTransportParameters::ResetToDefaults()
     m_initial_max_stream_data_uni = 0;
     m_min_ack_delay = 0;
     m_max_datagram_frame_size = 0;
+    m_has_version_information = false;
+    m_chosen_version = 0;
+    m_available_versions.clear();
     m_grease_quic_bit = false;
     m_reset_stream_at = false;
     m_max_ack_delay = 25;
@@ -256,6 +259,23 @@ QuicTransportParameters::EncodeEntries() const
     if (m_min_ack_delay != 0)
     {
         AppendVarIntEntry(out, MIN_ACK_DELAY, m_min_ack_delay);
+    }
+    if (m_has_version_information)
+    {
+        // RFC 9368, Section 3: the Chosen Version and the Available Versions, four bytes each
+        std::vector<uint8_t> value;
+        auto put = [&value](uint32_t v) {
+            for (int k = 3; k >= 0; --k)
+            {
+                value.push_back(static_cast<uint8_t>(v >> (8 * k)));
+            }
+        };
+        put(m_chosen_version);
+        for (uint32_t v : m_available_versions)
+        {
+            put(v);
+        }
+        AppendBytesEntry(out, VERSION_INFORMATION, value);
     }
     if (m_max_datagram_frame_size != 0)
     {
@@ -438,6 +458,28 @@ QuicTransportParameters::Deserialize(Buffer::Iterator start)
             ok = isNumber;
             m_min_ack_delay = number;
             break;
+        case VERSION_INFORMATION:
+            // at least the Chosen Version, and whole versions
+            ok = value.size() >= 4 && value.size() % 4 == 0;
+            if (ok)
+            {
+                m_has_version_information = true;
+                m_available_versions.clear();
+                for (size_t k = 0; k < value.size(); k += 4)
+                {
+                    const uint32_t v = (value[k] << 24) | (value[k + 1] << 16) |
+                                       (value[k + 2] << 8) | value[k + 3];
+                    if (k == 0)
+                    {
+                        m_chosen_version = v;
+                    }
+                    else
+                    {
+                        m_available_versions.push_back(v);
+                    }
+                }
+            }
+            break;
         case MAX_DATAGRAM_FRAME_SIZE:
             ok = isNumber;
             m_max_datagram_frame_size = number;
@@ -536,6 +578,9 @@ operator==(const QuicTransportParameters& lhs, const QuicTransportParameters& rh
            lhs.m_initial_max_stream_data_uni == rhs.m_initial_max_stream_data_uni &&
            lhs.m_min_ack_delay == rhs.m_min_ack_delay &&
            lhs.m_max_ack_delay == rhs.m_max_ack_delay &&
+           lhs.m_has_version_information == rhs.m_has_version_information &&
+           lhs.m_chosen_version == rhs.m_chosen_version &&
+           lhs.m_available_versions == rhs.m_available_versions &&
            lhs.m_max_datagram_frame_size == rhs.m_max_datagram_frame_size &&
            lhs.m_grease_quic_bit == rhs.m_grease_quic_bit &&
            lhs.m_reset_stream_at == rhs.m_reset_stream_at &&

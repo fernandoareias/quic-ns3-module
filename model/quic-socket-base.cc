@@ -185,6 +185,15 @@ QuicSocketBase::GetTypeId(void)
                           StringValue("erlang"),
                           MakeStringAccessor(&QuicSocketBase::m_alpn),
                           MakeStringChecker())
+            .AddAttribute("AvailableVersions",
+                          "Versions this endpoint can use, in order of preference, as hexadecimal "
+                          "numbers separated by commas (RFC 9368): a client offers them in its "
+                          "version_information, a server moves the connection to the first one it "
+                          "shares with the client, when it is compatible (version 1 and version 2 "
+                          "are)",
+                          StringValue("00000001"),
+                          MakeStringAccessor(&QuicSocketBase::m_availableVersions),
+                          MakeStringChecker())
             .AddAttribute("IdleTimeout",
                           "Idle timeout value after which the socket is closed (0 disables it; the "
                           "peer's max_idle_timeout can only shorten it)",
@@ -815,6 +824,7 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
 
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
+    m_availableVersions = sock.m_availableVersions;
     m_resetStreamAt = sock.m_resetStreamAt;
     m_greaseQuicBit = sock.m_greaseQuicBit;
     m_maxDatagramFrameSize = sock.m_maxDatagramFrameSize;
@@ -2740,7 +2750,7 @@ QuicSocketBase::SendInitialHandshake(uint8_t type, const QuicHeader& quicHeader,
 
         std::vector<uint32_t> supportedVersions;
         supportedVersions.push_back(QUIC_VERSION);
-        supportedVersions.push_back(QUIC_VERSION_DRAFT_10);
+        supportedVersions.push_back(QUIC_VERSION_2);
         supportedVersions.push_back(0x1a2a3a4a); // RFC 9000 §15: reserved version (greasing)
 
         // RFC 9000 s17.2.1: the connection ids are those of the client, swapped; the versions are
@@ -3008,7 +3018,10 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
         }
         m_nextRecvAckFreqSeq = sub.GetAckFreqSequence() + 1;
         m_tcb->m_kDelayedAckTimeout = MicroSeconds(sub.GetAckFreqMaxDelayUs());
-        m_ackTolerance = (uint8_t)std::min<uint64_t>(sub.GetAckFreqThreshold(), 255);
+        // draft-ietf-quic-ack-frequency: the Ack-Eliciting Threshold is the number of
+        // ack-eliciting packets that may arrive without an ACK; the receiver acknowledges at once
+        // when it has received more than that, so it acknowledges every threshold + 1 packets
+        m_ackTolerance = (uint8_t)std::min<uint64_t>(sub.GetAckFreqThreshold() + 1, 255);
         m_ackReorderingThreshold = (uint8_t)std::min<uint64_t>(sub.GetAckFreqReordering(), 255);
         NS_LOG_INFO("Updating packet tolerance to " << (uint32_t)m_ackTolerance);
         break;
@@ -3373,6 +3386,18 @@ QuicSocketBase::OnSendingTransportParameters()
     // msquic always advertises min_ack_delay (its timer resolution, 1 ms) and accepts ACK_FREQUENCY
     transportParameters.SetMinAckDelay(1000);
     transportParameters.SetActiveConnectionIdLimit(kActiveCidLimit);
+    {
+        // RFC 9368, Section 3: the version of the Initial packet of the client, or the one the
+        // server settled on, and the versions the endpoint can use
+        std::vector<uint32_t> available = GetAvailableVersions();
+        const uint32_t chosen =
+            m_isServerSide ? m_vers : (m_firstVersion ? m_firstVersion : m_vers);
+        if (std::find(available.begin(), available.end(), chosen) == available.end())
+        {
+            available.insert(available.begin(), chosen);
+        }
+        transportParameters.SetVersionInformation(chosen, available);
+    }
     transportParameters.SetMaxDatagramFrameSize(m_maxDatagramFrameSize);
     transportParameters.SetGreaseQuicBit(m_greaseQuicBit);
     transportParameters.SetResetStreamAt(m_resetStreamAt);
@@ -3583,6 +3608,7 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     // delay)
     m_tcb->m_maxAckDelay = MilliSeconds(transportParameters.GetMaxAckDelay());
     m_peerSupportsAckFreq = transportParameters.GetMinAckDelay() > 0;
+    m_peerMinAckDelayUs = transportParameters.GetMinAckDelay();
     m_peerActiveCidLimit =
         (uint8_t)std::min<uint64_t>(transportParameters.GetActiveConnectionIdLimit(), 255);
     m_peerDisablesMigration = transportParameters.GetDisableActiveMigration() != 0;
@@ -3824,22 +3850,18 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
             return;
         }
 
-        std::vector<uint32_t> supportedVersions;
+        // the first version of this endpoint's preference that the server also has
+        std::vector<uint32_t> supportedVersions = GetAvailableVersions();
         supportedVersions.push_back(QUIC_VERSION);
-        supportedVersions.push_back(QUIC_VERSION_DRAFT_10);
-        supportedVersions.push_back(QUIC_VERSION_NS3_IMPL);
+        supportedVersions.push_back(QUIC_VERSION_2);
 
         uint32_t foundVersion = 0;
-        for (size_t i = 0; i < receivedVersions.size(); i++)
+        for (size_t j = 0; j < supportedVersions.size() && foundVersion == 0; j++)
         {
-            for (size_t j = 0; j < supportedVersions.size(); j++)
+            if (std::find(receivedVersions.begin(), receivedVersions.end(), supportedVersions[j]) !=
+                receivedVersions.end())
             {
-                //			NS_LOG_INFO("rec " << receivedVersions[i] << " myvers " <<
-                // m_supportedVersions[j] );
-                if (receivedVersions[i] == supportedVersions[j])
-                {
-                    foundVersion = receivedVersions[i];
-                }
+                foundVersion = supportedVersions[j];
             }
         }
 
@@ -4010,9 +4032,7 @@ QuicSocketBase::SetState(TracedValue<QuicStates_t> newstate)
     if (newstate == OPEN && m_qlog)
     {
         QlogStart();
-        m_qlog->VersionInformation(m_vers,
-                                   {QUIC_VERSION, QUIC_VERSION_DRAFT_10, QUIC_VERSION_NS3_IMPL},
-                                   !m_isServerSide);
+        m_qlog->VersionInformation(m_vers, GetAvailableVersions(), !m_isServerSide);
     }
     if (newstate == OPEN && m_quicl5 != nullptr)
     {
@@ -4061,7 +4081,7 @@ QuicSocketBase::FlushPendingWrites()
 bool
 QuicSocketBase::IsVersionSupported(uint32_t version)
 {
-    if (version == QUIC_VERSION || version == QUIC_VERSION_DRAFT_10 ||
+    if (version == QUIC_VERSION || version == QUIC_VERSION_2 || version == QUIC_VERSION_DRAFT_10 ||
         version == QUIC_VERSION_NS3_IMPL)
     {
         return true;
@@ -4576,9 +4596,11 @@ QuicSocketBase::UpdatePeerAckTolerance(uint8_t tolerance)
     m_peerAckTolerance = tolerance;
     uint64_t delayUs =
         m_tcb->m_maxAckDelay.IsStrictlyPositive() ? m_tcb->m_maxAckDelay.GetMicroSeconds() : 25000;
+    // the requested delay cannot be below the min_ack_delay that the peer announced
+    delayUs = std::max<uint64_t>(delayUs, m_peerMinAckDelayUs);
     Ptr<Packet> p = Create<Packet>(0);
     p->AddHeader(QuicSubheader::CreateAckFrequency(m_sendAckFreqSeq,
-                                                   tolerance,
+                                                   tolerance > 0 ? tolerance - 1 : 0,
                                                    delayUs,
                                                    m_peerAckReordering));
     AppendingTx(p);
@@ -5591,6 +5613,33 @@ QuicSocketBase::ResetStreamAt(uint64_t streamId, uint64_t errorCode, uint64_t re
     }
     Ptr<QuicStreamBase> stream = m_quicl5->SearchStream(streamId);
     return stream != nullptr && stream->ResetAt(errorCode, reliableSize);
+}
+
+std::vector<uint32_t>
+QuicSocketBase::GetAvailableVersions() const
+{
+    std::vector<uint32_t> versions;
+    std::stringstream in(m_availableVersions);
+    std::string item;
+    while (std::getline(in, item, ','))
+    {
+        if (!item.empty())
+        {
+            versions.push_back(static_cast<uint32_t>(std::stoul(item, nullptr, 16)));
+        }
+    }
+    if (versions.empty())
+    {
+        versions.push_back(QUIC_VERSION);
+    }
+    return versions;
+}
+
+bool
+QuicSocketBase::VersionsCompatible(uint32_t from, uint32_t to)
+{
+    return (from == QUIC_VERSION && to == QUIC_VERSION_2) ||
+           (from == QUIC_VERSION_2 && to == QUIC_VERSION);
 }
 
 } // namespace ns3

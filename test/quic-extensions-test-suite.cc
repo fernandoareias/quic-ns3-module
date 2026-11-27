@@ -31,6 +31,7 @@
 #include "ns3/point-to-point-module.h"
 #include "ns3/test.h"
 
+#include <memory>
 #include <set>
 #include <vector>
 
@@ -569,6 +570,155 @@ class ResetStreamAtTest : public TestCase
     uint64_t m_bytesAtReset{0};   //!< bytes read when the reset came
 };
 
+/**
+ * QUIC version 2 (RFC 9369) and the compatible version negotiation of RFC 9368.
+ */
+class VersionTest : public TestCase
+{
+  public:
+    VersionTest()
+        : TestCase("QUIC version 2 and compatible version negotiation")
+    {
+    }
+
+  private:
+    /** What a run of the scenario shows. */
+    struct Result
+    {
+        bool connected{false};                //!< the client connected
+        std::vector<uint32_t> clientVersions; //!< versions of the long header packets of the client
+        std::vector<uint32_t> serverVersions; //!< ... and of the server
+        uint8_t firstByte{0};                 //!< first byte of the first datagram of the client
+    };
+
+    /**
+     * @param initial InitialVersion of the client.
+     * @param clientVersions AvailableVersions of the client.
+     * @param serverVersions AvailableVersions of the server.
+     * @return what happened.
+     */
+    Result Run(uint32_t initial,
+               const std::string& clientVersions,
+               const std::string& serverVersions)
+    {
+        auto result = std::make_shared<Result>();
+        Config::SetDefault("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue(4));
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper link;
+        link.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+        link.SetChannelAttribute("Delay", StringValue("5ms"));
+        NetDeviceContainer devices = link.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        QuicHelper quic;
+        quic.InstallQuic(nodes);
+        Ipv4AddressHelper address;
+        address.SetBase("10.8.7.0", "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = address.Assign(devices);
+        devices.Get(1)->TraceConnectWithoutContext(
+            "PhyTxEnd",
+            Callback<void, Ptr<const Packet>>([result](Ptr<const Packet> p) {
+                if (result->firstByte == 0 && p->GetSize() > 30)
+                {
+                    uint8_t byte;
+                    p->CopyData(&byte, 1); // placeholder, replaced below
+                    std::vector<uint8_t> raw(31);
+                    p->CopyData(raw.data(), 31);
+                    result->firstByte = raw[30];
+                }
+            }));
+        auto record = [](std::vector<uint32_t>* out) {
+            return Callback<void, Ptr<const Packet>, const QuicHeader&, Ptr<const QuicSocketBase>>(
+                [out](Ptr<const Packet>, const QuicHeader& h, Ptr<const QuicSocketBase>) {
+                    if (h.IsLong() && !h.IsVersionNegotiation() && !h.IsRetry())
+                    {
+                        out->push_back(h.GetVersion());
+                    }
+                });
+        };
+        TypeId factory = QuicSocketFactory::GetTypeId();
+        Ptr<Socket> listener = Socket::CreateSocket(nodes.Get(0), factory);
+        listener->SetAttribute("AvailableVersions", StringValue(serverVersions));
+        listener->Bind(InetSocketAddress(Ipv4Address::GetAny(), 4433));
+        listener->Listen();
+        Ptr<QuicSocketBase> lq = DynamicCast<QuicSocketBase>(listener);
+        lq->TraceConnectWithoutContext("Tx", record(&result->serverVersions));
+        Ptr<Socket> socket = Socket::CreateSocket(nodes.Get(1), factory);
+        socket->SetAttribute("InitialVersion", UintegerValue(initial));
+        socket->SetAttribute("AvailableVersions", StringValue(clientVersions));
+        DynamicCast<QuicSocketBase>(socket)->TraceConnectWithoutContext(
+            "Tx",
+            record(&result->clientVersions));
+        socket->SetConnectCallback(
+            Callback<void, Ptr<Socket>>([result](Ptr<Socket>) { result->connected = true; }),
+            MakeNullCallback<void, Ptr<Socket>>());
+        Simulator::Schedule(Seconds(0.1), [socket, interfaces]() {
+            socket->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
+        });
+        Simulator::Stop(Seconds(5));
+        Simulator::Run();
+        Simulator::Destroy();
+        return *result;
+    }
+
+    void DoRun() override
+    {
+        const uint32_t v1 = 1;
+        const uint32_t v2 = 0x6b3343cf;
+
+        Result plain = Run(v1, "00000001", "00000001");
+        NS_TEST_ASSERT_MSG_EQ(plain.connected, true, "version 1");
+        for (uint32_t v : plain.clientVersions)
+        {
+            NS_TEST_EXPECT_MSG_EQ(v, v1, "version 1 on the wire");
+        }
+        NS_TEST_EXPECT_MSG_EQ(int(plain.firstByte & 0x30),
+                              0x00,
+                              "an Initial of version 1 has type 0");
+
+        // the client starts in version 2
+        Result full = Run(v2, "6b3343cf", "6b3343cf,00000001");
+        NS_TEST_ASSERT_MSG_EQ(full.connected, true, "version 2");
+        NS_TEST_ASSERT_MSG_GT(full.clientVersions.size(), 0, "packets");
+        for (uint32_t v : full.clientVersions)
+        {
+            NS_TEST_EXPECT_MSG_EQ(v, v2, "client in version 2");
+        }
+        for (uint32_t v : full.serverVersions)
+        {
+            NS_TEST_EXPECT_MSG_EQ(v, v2, "server in version 2");
+        }
+        NS_TEST_EXPECT_MSG_EQ(int(full.firstByte & 0x30),
+                              0x10,
+                              "an Initial of version 2 has type 1");
+
+        // the client starts in version 1 and offers version 2, which the server prefers
+        Result upgrade = Run(v1, "6b3343cf,00000001", "6b3343cf,00000001");
+        NS_TEST_ASSERT_MSG_EQ(upgrade.connected, true, "compatible negotiation");
+        NS_TEST_ASSERT_MSG_GT(upgrade.clientVersions.size(), 1, "packets");
+        NS_TEST_EXPECT_MSG_EQ(upgrade.clientVersions.front(), v1, "the first Initial is version 1");
+        NS_TEST_EXPECT_MSG_EQ(upgrade.clientVersions.back(), v2, "the Handshake packets version 2");
+        NS_TEST_ASSERT_MSG_GT(upgrade.serverVersions.size(), 0, "answers");
+        for (uint32_t v : upgrade.serverVersions)
+        {
+            NS_TEST_EXPECT_MSG_EQ(v, v2, "the server answers in version 2");
+        }
+
+        // a server that does not have version 2 stays in version 1
+        Result stay = Run(v1, "6b3343cf,00000001", "00000001");
+        NS_TEST_ASSERT_MSG_EQ(stay.connected, true, "no common better version");
+        for (uint32_t v : stay.serverVersions)
+        {
+            NS_TEST_EXPECT_MSG_EQ(v, v1, "the server stays in version 1");
+        }
+
+        // a version that the server does not know: Version Negotiation, then version 1
+        Result negotiated = Run(0x2a3a4a5a, "00000001", "6b3343cf,00000001");
+        NS_TEST_EXPECT_MSG_EQ(negotiated.connected, true, "Version Negotiation");
+    }
+};
+
 class QuicExtensionsTestSuite : public TestSuite
 {
   public:
@@ -579,6 +729,7 @@ class QuicExtensionsTestSuite : public TestSuite
         AddTestCase(new DatagramTest, TestCase::Duration::QUICK);
         AddTestCase(new GreaseTest, TestCase::Duration::QUICK);
         AddTestCase(new ResetStreamAtTest, TestCase::Duration::QUICK);
+        AddTestCase(new VersionTest, TestCase::Duration::QUICK);
     }
 };
 

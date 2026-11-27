@@ -112,6 +112,7 @@ QuicSocketBase::StartClientHandshake()
     m_tcb->m_ssThresh = m_tcb->m_initialSsThresh;
     m_hs[0].keys = true;
     m_ecnState = m_ecnEnabled ? ECN_TESTING : ECN_OFF;
+    m_firstVersion = m_vers;
     if (!m_retryReceived && InetSocketAddress::IsMatchingType(m_connectAddress))
     {
         // a token of an earlier connection (NEW_TOKEN) lets the server skip its Retry
@@ -358,6 +359,30 @@ QuicSocketBase::HandleHandshakePacket(Ptr<Packet> p, const QuicHeader& header)
     {
         // the Initial keys come from the Destination Connection ID of the first packet
         space.keys = true;
+        if (m_firstVersion == 0)
+        {
+            // the connection starts in the version of the first Initial packet
+            m_firstVersion = header.GetVersion();
+            m_vers = header.GetVersion();
+        }
+    }
+    if (!m_isServerSide && header.GetVersion() != m_vers)
+    {
+        // RFC 9368, Section 4: a server may answer in a version that is compatible with the one
+        // of the first Initial packet and that the client offered
+        const std::vector<uint32_t> offered = GetAvailableVersions();
+        if (!m_tlsHelloDone &&
+            std::find(offered.begin(), offered.end(), header.GetVersion()) != offered.end() &&
+            VersionsCompatible(m_firstVersion, header.GetVersion()))
+        {
+            m_vers = header.GetVersion();
+            m_versionUpgraded = true;
+        }
+        else
+        {
+            NotifyPacketDropped(&header, p->GetSize(), "unsupported", "version");
+            return;
+        }
     }
     if (space.discarded || !space.keys)
     {
@@ -607,6 +632,26 @@ QuicSocketBase::HandleTlsMessage(int level, uint8_t type, const std::vector<uint
                                 "No application protocol in common");
                 return false;
             }
+            // RFC 9368, Section 4: the server moves to the first version of its own preference
+            // that the client offered, when it is compatible with the one of the Initial packet
+            if (tp.HasVersionInformation())
+            {
+                const std::vector<uint32_t> mine = GetAvailableVersions();
+                const std::vector<uint32_t>& theirs = tp.GetAvailableVersions();
+                for (uint32_t version : mine)
+                {
+                    if (std::find(theirs.begin(), theirs.end(), version) == theirs.end())
+                    {
+                        continue;
+                    }
+                    if (version != m_vers && VersionsCompatible(m_firstVersion, version))
+                    {
+                        m_vers = version;
+                        m_versionUpgraded = true;
+                    }
+                    break;
+                }
+            }
             OnReceivedTransportParameters(tp);
             if (m_socketState == CLOSING || m_socketState == IDLE)
             {
@@ -680,6 +725,15 @@ QuicSocketBase::HandleTlsMessage(int level, uint8_t type, const std::vector<uint
             return false;
         }
         m_alpnChosen = chosen[0];
+        // RFC 9368, Section 4: the version the server says it chose is the one of its packets,
+        // and a server that changed the version has to say so
+        if ((tp.HasVersionInformation() && tp.GetChosenVersion() != m_vers) ||
+            (!tp.HasVersionInformation() && m_versionUpgraded))
+        {
+            AbortConnection(static_cast<QuicSubheader::TransportErrorCodes_t>(0x11),
+                            "version_information does not match the version in use");
+            return false;
+        }
         OnReceivedTransportParameters(tp);
         return m_socketState != CLOSING && m_socketState != IDLE;
     }
