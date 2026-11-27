@@ -158,12 +158,6 @@ class QuicL5Protocol : public Object
     Ptr<QuicStreamBase> SearchStream(uint64_t streamId);
 
     /**
-     * \brief Create the stream that carries the handshake (internal id
-     * QuicStream::HANDSHAKE_STREAM_ID)
-     */
-    void CreateHandshakeStream(void);
-
-    /**
      * \brief Apply the stream data limits the peer announced to the streams that already exist
      */
     void UpdateInitialMaxStreamData(void);
@@ -183,14 +177,6 @@ class QuicL5Protocol : public Object
     uint16_t GetMaxPacketSize() const;
 
     /**
-     * \brief Check with the QUIC socket if the packet that has just been received could contain
-     * transport parameters
-     *
-     * \return a boolean, true if the packet that has just been received contains transport params
-     */
-    bool ContainsTransportParameters();
-
-    /**
      * Set the type of the packet that is read next, which decides the frames it may carry (RFC
      * 9000, Section 12.4).
      *
@@ -200,13 +186,6 @@ class QuicL5Protocol : public Object
     {
         m_recvPacketType = type;
     }
-
-    /**
-     * \brief Pass the transportParameters to the the QUIC socket
-     *
-     * \param transportParameters the QuicTransportParameters
-     */
-    void OnReceivedTransportParameters(QuicTransportParameters transportParameters);
 
     /**
      * \brief call AbortConnection in the QUIC socket implementation

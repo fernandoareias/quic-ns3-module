@@ -104,7 +104,7 @@ class QuicSocketTxItem : public Object
     bool m_sacked;                   //!< true if already acknowledged
     bool m_acked;                    //!< true if already passed to the application
     bool m_isStream;                 //!< true for frames of a stream (not control)
-    bool m_isStream0;                //!< true for a frame from stream 0
+    bool m_isStream0; //!< true for a control frame, which goes out before stream data
     Time m_lastSent;                 //!< time at which it was sent
     Time m_ackTime;   //!< time at which the packet was first acked (if m_sacked is true)
     Time m_generated; //!< expiration deadline for the TX item

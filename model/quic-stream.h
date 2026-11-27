@@ -43,12 +43,6 @@ class QuicStream : public Object
     virtual ~QuicStream(void);
 
     /**
-     * Internal id of the stream that carries the handshake (transport parameters). It is outside
-     * the ids an application can use: RFC 9000 stream ids 0, 1, 2... belong to application streams.
-     */
-    static constexpr uint64_t HANDSHAKE_STREAM_ID = (1ULL << 62) - 1;
-
-    /**
      * \brief Quic Stream types, which are represented by the 2 lsb of stream Id
      */
     typedef enum

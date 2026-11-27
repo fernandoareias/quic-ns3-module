@@ -85,33 +85,15 @@ QuicL5Protocol::AddStream(uint64_t streamId)
     stream->SetConnectionId(m_connectionId);
     stream->SetStreamId(streamId);
 
-    if (streamId == QuicStream::HANDSHAKE_STREAM_ID)
-    {
-        stream->SetStreamDirectionType(QuicStream::BIDIRECTIONAL);
-        stream->SetMaxStreamData(UINT64_MAX);
-        stream->InitRecvWindow(m_socket->GetOwnStreamRecvWindow(true, true));
-    }
-    else
-    {
-        bool local = IsLocallyInitiated(streamId);
-        bool bidi = (streamId & 2) == 0;
-        stream->SetStreamDirectionType(bidi ? QuicStream::BIDIRECTIONAL
-                                            : (local ? QuicStream::SENDER : QuicStream::RECEIVER));
-        stream->SetMaxStreamData(m_socket->GetPeerStreamDataLimit(local, bidi));
-        stream->InitRecvWindow(m_socket->GetOwnStreamRecvWindow(local, bidi));
-    }
+    bool local = IsLocallyInitiated(streamId);
+    bool bidi = (streamId & 2) == 0;
+    stream->SetStreamDirectionType(bidi ? QuicStream::BIDIRECTIONAL
+                                        : (local ? QuicStream::SENDER : QuicStream::RECEIVER));
+    stream->SetMaxStreamData(m_socket->GetPeerStreamDataLimit(local, bidi));
+    stream->InitRecvWindow(m_socket->GetOwnStreamRecvWindow(local, bidi));
     m_streams.push_back(stream);
     m_streamById[streamId] = stream;
     return stream;
-}
-
-void
-QuicL5Protocol::CreateHandshakeStream(void)
-{
-    if (m_streamById.find(QuicStream::HANDSHAKE_STREAM_ID) == m_streamById.end())
-    {
-        AddStream(QuicStream::HANDSHAKE_STREAM_ID);
-    }
 }
 
 Ptr<QuicStreamBase>
@@ -186,7 +168,7 @@ QuicL5Protocol::GetStreamForPeer(uint64_t streamId, bool& fatal)
 void
 QuicL5Protocol::OnStreamClosed(Ptr<QuicStreamBase> stream)
 {
-    if (stream->IsHandshake() || IsLocallyInitiated(stream->GetStreamId()))
+    if (IsLocallyInitiated(stream->GetStreamId()))
     {
         return;
     }
@@ -218,15 +200,7 @@ QuicL5Protocol::DispatchSend(Ptr<Packet> data, uint64_t streamId)
     Ptr<QuicStreamBase> stream = SearchStream(streamId);
     if (stream == nullptr)
     {
-        if (streamId == QuicStream::HANDSHAKE_STREAM_ID)
-        {
-            CreateHandshakeStream();
-            stream = SearchStream(streamId);
-        }
-        else
-        {
-            stream = OpenLocalStream(streamId);
-        }
+        stream = OpenLocalStream(streamId);
     }
     if (stream == nullptr)
     {
@@ -283,19 +257,11 @@ QuicL5Protocol::DispatchRecv(Ptr<Packet> data, Address& address)
             sub.IsStopSending() or sub.IsStream())
         {
             Ptr<QuicStreamBase> stream;
-            if (sub.GetStreamId() == QuicStream::HANDSHAKE_STREAM_ID)
+            bool fatal = false;
+            stream = GetStreamForPeer(sub.GetStreamId(), fatal);
+            if (fatal)
             {
-                CreateHandshakeStream();
-                stream = SearchStream(QuicStream::HANDSHAKE_STREAM_ID);
-            }
-            else
-            {
-                bool fatal = false;
-                stream = GetStreamForPeer(sub.GetStreamId(), fatal);
-                if (fatal)
-                {
-                    return -1;
-                }
+                return -1;
             }
 
             // MAX_STREAM_DATA and STOP_SENDING travel from the receiving to the sending side
@@ -476,18 +442,6 @@ QuicL5Protocol::GetMaxPacketSize() const
     return m_socket->GetPacketBudget();
 }
 
-bool
-QuicL5Protocol::ContainsTransportParameters()
-{
-    return m_socket->CouldContainTransportParameters();
-}
-
-void
-QuicL5Protocol::OnReceivedTransportParameters(QuicTransportParameters transportParameters)
-{
-    m_socket->OnReceivedTransportParameters(transportParameters);
-}
-
 void
 QuicL5Protocol::SignalAbortConnection(uint16_t transportErrorCode, const char* reasonPhrase)
 {
@@ -500,12 +454,9 @@ QuicL5Protocol::UpdateInitialMaxStreamData(void)
 {
     for (auto stream : m_streams)
     {
-        if (!stream->IsHandshake())
-        {
-            uint64_t id = stream->GetStreamId();
-            stream->SetMaxStreamData(
-                m_socket->GetPeerStreamDataLimit(IsLocallyInitiated(id), (id & 2) == 0));
-        }
+        uint64_t id = stream->GetStreamId();
+        stream->SetMaxStreamData(
+            m_socket->GetPeerStreamDataLimit(IsLocallyInitiated(id), (id & 2) == 0));
     }
 }
 
@@ -570,10 +521,7 @@ QuicL5Protocol::OnConnectionWindowUpdate()
 {
     for (auto stream : m_streams)
     {
-        if (!stream->IsHandshake())
-        {
-            stream->WakeUp();
-        }
+        stream->WakeUp();
     }
 }
 
@@ -612,7 +560,7 @@ QuicL5Protocol::HasPendingStreamData() const
 {
     for (auto stream : m_streams)
     {
-        if (!stream->IsHandshake() && stream->HasPendingData())
+        if (stream->HasPendingData())
         {
             return true;
         }

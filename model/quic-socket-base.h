@@ -561,13 +561,6 @@ class QuicSocketBase : public QuicSocket
     void SendStreamsBlockedFrame(uint64_t streamLimit, bool bidirectional);
 
     /**
-     * \brief Check if transport parameters are ever being received
-     *
-     * \return true if received, false otherwise
-     */
-    bool GetReceivedTransportParametersFlag() const;
-
-    /**
      * \brief check if the data received in this connection exceeds MAX_DATA
      *
      * \param a vector of pairs with received frames and subheaders
@@ -585,13 +578,6 @@ class QuicSocketBase : public QuicSocket
      * \return the maximum stream ID
      */
     uint32_t GetMaxStreamId() const;
-
-    /**
-     * \brief return true if the packet that has just been received contains transport params
-     *
-     * \return a boolean, true if the packet that has just been received contains transport params
-     */
-    bool CouldContainTransportParameters() const;
 
     /**
      * \brief Get the maximum of stream ID for bidirectional streams (i.e., number of streams - 1)
@@ -1894,8 +1880,6 @@ class QuicSocketBase : public QuicSocket
 
     // Transport Parameters management
     bool m_receivedTransportParameters; //!< Check if Transport Parameters are already been received
-    bool m_couldContainTransportParameters; //!< Check if in the actual conditions can receive
-                                            //!< Transport Parameters
 
     // Timers and Events
     EventId m_sendPendingDataEvent; //!< Micro-delay event to send pending data

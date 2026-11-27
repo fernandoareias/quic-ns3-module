@@ -235,12 +235,6 @@ class QuicStreamBase : public QuicStream
     void SetStreamId(uint64_t streamId);
     uint64_t GetStreamId(void);
 
-    /** \\return true for the stream that carries the handshake, not an application stream */
-    bool IsHandshake(void) const
-    {
-        return m_streamId == HANDSHAKE_STREAM_ID;
-    }
-
     uint32_t GetStreamTxAvailable(void) const;
 
   protected:

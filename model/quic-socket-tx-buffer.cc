@@ -298,7 +298,7 @@ QuicSocketTxBuffer::Add(Ptr<Packet> p)
                 isStream = qsb.IsStream();
                 bool carriesStreamId = isStream || qsb.IsRstStream() || qsb.IsStopSending() ||
                                        qsb.IsMaxStreamData() || qsb.IsStreamBlocked();
-                priority = !carriesStreamId || qsb.GetStreamId() == QuicStream::HANDSHAKE_STREAM_ID;
+                priority = !carriesStreamId;
             }
             else
             {

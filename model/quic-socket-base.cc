@@ -646,7 +646,6 @@ QuicSocketBase::QuicSocketBase(void)
       m_maxTrackedGaps(20),
       m_ackToleranceCwndDivisor(8),
       m_receivedTransportParameters(false),
-      m_couldContainTransportParameters(true),
       m_rto(Seconds(30.0)),
       m_flushOnClose(true),
       m_closeOnEmpty(false),
@@ -725,7 +724,6 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
       m_maxTrackedGaps(sock.m_maxTrackedGaps),
       m_ackToleranceCwndDivisor(sock.m_ackToleranceCwndDivisor),
       m_receivedTransportParameters(sock.m_receivedTransportParameters),
-      m_couldContainTransportParameters(sock.m_couldContainTransportParameters),
       m_rto(sock.m_rto),
       m_flushOnClose(sock.m_flushOnClose),
       m_closeOnEmpty(sock.m_closeOnEmpty),
@@ -1080,7 +1078,6 @@ QuicSocketBase::Connect(const Address& address)
     if (m_quicl5 == nullptr)
     {
         m_quicl5 = CreateStreamController();
-        m_quicl5->CreateHandshakeStream();
     }
 
     m_connectAddress = address;
@@ -2676,7 +2673,6 @@ QuicSocketBase::SendInitialHandshake(uint8_t type, const QuicHeader& quicHeader,
     {
         NS_LOG_INFO("Create VERSION_NEGOTIATION");
         m_receivedTransportParameters = false;
-        m_couldContainTransportParameters = true;
 
         std::vector<uint32_t> supportedVersions;
         supportedVersions.push_back(QUIC_VERSION);
@@ -3364,7 +3360,6 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
         return;
     }
     m_receivedTransportParameters = true;
-    m_couldContainTransportParameters = false;
     if (m_qlog)
     {
         QlogStart();
@@ -4083,12 +4078,6 @@ QuicSocketBase::AbortConnection(uint16_t transportErrorCode,
 }
 
 bool
-QuicSocketBase::GetReceivedTransportParametersFlag() const
-{
-    return m_receivedTransportParameters;
-}
-
-bool
 QuicSocketBase::CheckIfPacketOverflowMaxDataLimit(
     std::vector<std::pair<Ptr<Packet>, QuicSubheader>> disgregated)
 {
@@ -4102,7 +4091,7 @@ QuicSocketBase::CheckIfPacketOverflowMaxDataLimit(
         QuicSubheader sub = (*frame_recv_it).second;
         // (*frame_recv_it)->PeekHeader (sub);
 
-        if (sub.IsStream() and sub.GetStreamId() != QuicStream::HANDSHAKE_STREAM_ID)
+        if (sub.IsStream())
         {
             validPacketSize += (*frame_recv_it).first->GetSize();
         }
@@ -4131,12 +4120,6 @@ uint32_t
 QuicSocketBase::GetMaxStreamIdUnidirectional() const
 {
     return m_initial_max_stream_id_uni;
-}
-
-bool
-QuicSocketBase::CouldContainTransportParameters() const
-{
-    return m_couldContainTransportParameters;
 }
 
 void
