@@ -36,30 +36,30 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 7.4 | Transport parameters; remembering them for 0-RTT | done | | quic-wire: RFC 9001 appendix A.2, defaults, invalid values; the client remembers them for 0-RTT |
 | 8.1 | Address validation: Retry, NEW_TOKEN, 3x amplification limit | done | | `RetryEnabled` makes a server answer the first Initial with a Retry; NEW_TOKEN after the handshake lets the next connection skip it; the 3x limit counts datagram bytes (quic-handshake); tokens are random bytes the server remembers, not encrypted ones |
 | 8.2 | Path validation | done | | quic: migration cases |
-| 9 | Connection migration | partial | F7, F11 | Client-initiated only; no `preferred_address` |
+| 9 | Connection migration | partial | F11 | Client-initiated only, with path validation; no `preferred_address`, no multipath |
 | 10.1 | Idle timeout | done | | quic: idle timeout cases |
 | 10.2 | Closing and draining | done | | |
 | 10.3 | Stateless reset | done | | quic: stateless reset |
 | 11 | Error handling | partial | F4 | Malformed frames and unknown types close the connection (quic-frames); the stream-level errors of Section 4.5 are still to do |
 | 12.2 | Coalescing packets | done | | The server sends its Initial and Handshake packets in one datagram and the client its Initial ACK and Handshake packet (quic-handshake); quic-datagrams covers reception |
-| 12.3 | Packet numbers: one space per encryption level | divergent | F7 | One counter for all; the header truncates and recovers them as in Appendix A |
+| 12.3 | Packet numbers: one space per encryption level | partial | | Initial, Handshake and application data packets have their own counters, from 0; the header truncates and recovers them as in Appendix A and ACK frames hold 62 bits, but the sent-packet list and the counters of the application space hold 32 bits |
 | 12.4 | Frames allowed in each packet type | partial | F7 | Initial and Handshake packets carry only ACK, CRYPTO, PING, PADDING and CONNECTION_CLOSE, and the receiver closes the connection otherwise; 0-RTT and 1-RTT packets are not checked yet |
 | 13.2 | Generating acknowledgements | done | | quic-features: delayed ACK |
 | 13.4 | ECN | done | | `EnableEcn` marks packets with ECT(0), counts the codepoints received, validates the path (an ACK without counts, counts that go down or too few counts fail it) and stops marking on failure (quic-ecn); ECT(1) is counted but not sent |
 | 14.1 | Initial datagrams of at least 1200 bytes | done | | quic-features: Initial datagram; PADDING frames, exactly the InitialPacketSize; a server discards smaller ones |
 | 14.3 | Path MTU discovery | partial | | msquic-style search from 1288 bytes in steps of 80; no black-hole detection and no ICMP; the budget follows the connection id length (quic-features: no fragmentation) |
-| 15 | Versions; reserved versions | partial | F9 | Version 2 is only in the header codec |
+| 15 | Versions; reserved versions | done | | Versions 1 and 2, reserved versions in Version Negotiation lists (quic-extensions) |
 | 16 | Variable-length integers | done | | quic-wire: Appendix A.1 |
 | 17.2 | Long header packets | done | | quic-wire: RFC 9001 appendix A.2, A.3 |
 | 17.2.5 | Retry | done | | Sent and handled (quic-handshake); the integrity tag is the 16 zero bytes of the other tags |
 | 17.3 | Short header packets | done | | quic-wire: header forms |
 | 17.4 | Spin bit | done | | quic: spin bit; the `SpinBit` attribute turns it off (random values), the one-in-16 policy is left to the application |
-| 18.2 | Transport parameters | partial | F9, F11 | All but preferred_address (F11) and the extension parameters (F9); carried in the quic_transport_parameters extension of the ClientHello and EncryptedExtensions |
+| 18.2 | Transport parameters | partial | F11 | All but preferred_address; carried in the quic_transport_parameters extension of the ClientHello and EncryptedExtensions |
 | 19.1 to 19.2 | PADDING, PING | done | | quic-frames |
 | 19.3 | ACK | done | | quic-frames: bytes, invalid ranges |
 | 19.3.2 | ACK with ECN counts | done | | Sent when an endpoint has seen ECN codepoints and handled on receipt (quic-ecn, quic-frames) |
 | 19.4, 19.5 | RESET_STREAM, STOP_SENDING | done | | quic-frames: 62-bit error codes |
-| 19.6, 19.7 | CRYPTO, NEW_TOKEN | partial | F7 | CRYPTO is sent and received, with retransmission (quic-handshake); NEW_TOKEN is not sent |
+| 19.6, 19.7 | CRYPTO, NEW_TOKEN | done | | Both are sent, received and retransmitted (quic-handshake) |
 | 19.8 | STREAM | done | | quic-frames: LEN, OFF and FIN bits; a length of zero is zero; the sender always writes LEN |
 | 19.9 to 19.14 | MAX_DATA, MAX_STREAM_DATA, MAX_STREAMS, *_BLOCKED | done | | |
 | 19.15, 19.16 | NEW_CONNECTION_ID, RETIRE_CONNECTION_ID | done | | quic-frames: ids of 1 to 20 bytes |
@@ -77,22 +77,21 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | 4.9 | Discarding Initial and Handshake keys | done | | The client drops the Initial level when it sends its first Handshake packet, the server when it reads one; both drop the Handshake level when the handshake is confirmed |
 | 5 | Packet protection (size: 16-byte tag) | partial | F5 | The tag is there (zeros) and counted in the path MTU; the cryptography stays emulated |
 | 5.8 | Retry integrity tag | divergent | | 16 bytes that are not computed |
-| 6 | Key update | missing | F7 | |
-| 8.1 | ALPN | missing | F7 | |
+| 8.1 | ALPN | done | | `Alpn`; no protocol in common is CRYPTO_ERROR 0x178 (quic-handshake) |
 
 ## RFC 9002 (recovery)
 
 | Section | Requirement | Status | Phase | Note |
 |---|---|---|---|---|
-| 5 | RTT estimation | divergent | F8 | Samples only from ACKs that free stream data |
+| 5 | RTT estimation | done | | A sample from the largest newly acknowledged ack-eliciting packet of each ACK, the handshake levels included; min_rtt ignores the ack delay; the delay is capped and used after the handshake is confirmed |
 | 6.1 | Packet and time thresholds | partial | F8 | A hole when the largest acknowledged packet is not in the sent list |
-| 6.2 | Probe timeout | partial | F8 | One timer for all spaces; no per-space backoff |
-| 6.4 | Discarding a packet number space | divergent | F7, F8 | |
+| 6.2 | Probe timeout | partial | F8 | The Initial and Handshake levels have a timer with backoff of their own; the application space has one timer for the connection |
+| 6.4 | Discarding a packet number space | partial | F8 | The keys and the state of the Initial and Handshake levels are discarded as RFC 9001, Section 4.9 says |
 | 7.1 to 7.4 | NewReno, slow start, recovery | done | | quic: RFC 9002 cases |
-| 7.6 | Persistent congestion | partial | F8 | msquic rule by default; the RFC rule with `PersistentCongestionByPto=false` |
+| 7.6 | Persistent congestion | done | | The RFC duration test is the default; `PersistentCongestionByPto=true` selects the rule of msquic; BBR version 1 does not use it |
 | 7.7 | Pacing | partial | | msquic scheme |
 | 7.8 | Application-limited sender | divergent | | msquic rule in CUBIC |
-| 2 | bytes_in_flight counts every packet in flight | divergent | F8 | Only the payload of STREAM frames |
+| 2 | bytes_in_flight counts every packet in flight | done | | Every ack-eliciting packet of the application space counts with its header and tag, and a packet declared lost stops counting; the handshake levels are not counted |
 | B.7 | ECN-CE as a congestion signal | done | | An increase of the CE count is one congestion event per recovery epoch, through the controller, without retransmission (quic-ecn) |
 
 ## Extensions and drafts
@@ -104,7 +103,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | RFC 9368 compatible version negotiation | done: `AvailableVersions` and the version_information parameter; a server moves to the first shared version when it is compatible, the client follows and checks the Chosen Version, with VERSION_NEGOTIATION_ERROR (0x11) otherwise (quic-extensions) | F9 |
 | RFC 9369 QUIC version 2 | done: version 0x6b3343cf with its packet type bits, started with `InitialVersion` or reached by compatible negotiation; the cryptographic changes (salt, labels) do not apply to emulated keys (quic-extensions, quic-wire, the linter) | F9 |
 | RFC 10069 Multipath | missing | F11 |
-| RFC 9438 CUBIC | partial (three divergences) | F8 |
+| RFC 9438 CUBIC | done: the target uses the smoothed RTT, alpha_cubic becomes 1 when the estimate reaches W_max, growth is capped at 1.5 times per RTT; msquic's rule for an application-limited sender and HyStart++ off by default stay as choices | F8 |
 | RFC 9406 HyStart++ | done (off by default) | |
 | RFC 8899 DPLPMTUD | partial | F5 |
 | draft-ietf-quic-reliable-stream-reset-11 | done: `ResetStreamAt` announces parameter 0x1d, `QuicSocketBase::ResetStreamAt ()` sends frame 0x24 after discarding what was not sent, lost bytes beyond the reliable size are not sent again, the receiver delivers the reliable bytes and then resets (quic-extensions); the reliable size is capped at what was already sent | F9 |

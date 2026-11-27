@@ -86,9 +86,9 @@ QuicCryptoStream::NextChunk(uint32_t maxBytes, uint64_t& offset, std::vector<uin
     {
         auto it = m_lost.begin();
         const uint64_t start = it->first;
-        const uint64_t end = it->second;
+        const uint64_t end = std::min<uint64_t>(it->second, m_data.size());
         m_lost.erase(it);
-        if (Covers(m_acked, start, end))
+        if (start >= end || Covers(m_acked, start, end))
         {
             continue;
         }
@@ -121,6 +121,12 @@ QuicCryptoStream::OnAcked(uint64_t offset, uint64_t length)
 void
 QuicCryptoStream::OnLost(uint64_t offset, uint64_t length)
 {
+    // only what was queued can be sent again
+    if (offset >= m_data.size())
+    {
+        return;
+    }
+    length = std::min<uint64_t>(length, m_data.size() - offset);
     if (!Covers(m_acked, offset, offset + length))
     {
         AddRange(m_lost, offset, offset + length);

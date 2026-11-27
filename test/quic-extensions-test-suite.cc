@@ -14,6 +14,7 @@
  */
 
 #include "../helper/quic-helper.h"
+#include "../model/quic-crypto-stream.h"
 #include "../model/quic-header.h"
 #include "../model/quic-l4-protocol.h"
 #include "../model/quic-l5-protocol.h"
@@ -22,6 +23,7 @@
 #include "../model/quic-stream-base.h"
 #include "../model/quic-stream-id-tag.h"
 #include "../model/quic-subheader.h"
+#include "../model/quic-tls-emulator.h"
 #include "../model/quic-transport-parameters.h"
 
 #include "ns3/core-module.h"
@@ -887,6 +889,167 @@ class ReceiveTimestampTest : public TestCase
     std::map<uint64_t, uint64_t> m_stamps; //!< timestamps of the run
 };
 
+/**
+ * Random bytes into every parser that reads the network: no input may crash it or read past the
+ * end of its buffer (the sanitizer builds check the second), and what is valid reads back the
+ * same.
+ */
+class ParserFuzzTest : public TestCase
+{
+  public:
+    ParserFuzzTest()
+        : TestCase("random input to the parsers")
+    {
+    }
+
+  private:
+    /** @return a random byte string. */
+    std::vector<uint8_t> Random(Ptr<UniformRandomVariable> rng, size_t most)
+    {
+        std::vector<uint8_t> bytes(rng->GetInteger(0, most));
+        for (auto& b : bytes)
+        {
+            b = static_cast<uint8_t>(rng->GetInteger(0, 255));
+        }
+        return bytes;
+    }
+
+    /** @return a buffer that holds the bytes. */
+    Buffer BufferOf(const std::vector<uint8_t>& bytes)
+    {
+        Buffer buffer;
+        buffer.AddAtStart(bytes.size());
+        Buffer::Iterator it = buffer.Begin();
+        for (uint8_t b : bytes)
+        {
+            it.WriteU8(b);
+        }
+        return buffer;
+    }
+
+    /** @return a packet that holds the bytes. */
+    Ptr<Packet> PacketOf(const std::vector<uint8_t>& bytes)
+    {
+        return bytes.empty() ? Create<Packet>() : Create<Packet>(bytes.data(), bytes.size());
+    }
+
+    void DoRun() override
+    {
+        Ptr<UniformRandomVariable> rng = CreateObject<UniformRandomVariable>();
+        rng->SetStream(4242);
+        // the frame types of the module, with the extension frames among them
+        const std::vector<uint64_t> types{
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a,       0x0b,      0x0c,
+            0x0d, 0x0e, 0x0f, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17,       0x18,      0x19,
+            0x1a, 0x1b, 0x1c, 0x1d, 0x1e, 0x1f, 0xaf, 0x24, 0x30, 0x31, 0x03178307, 0x03178308};
+        size_t validFrames = 0;
+        for (int round = 0; round < 30000; ++round)
+        {
+            std::vector<uint8_t> bytes = Random(rng, 60);
+            // most inputs start with a real frame type
+            std::vector<uint8_t> head;
+            const uint64_t type = types[rng->GetInteger(0, types.size() - 1)];
+            Buffer typeBuffer;
+            typeBuffer.AddAtStart(8);
+            Buffer::Iterator it = typeBuffer.Begin();
+            QuicWriteVarInt(it, type);
+            const uint32_t typeLength = QuicVarIntLength(type);
+            head.resize(typeLength);
+            typeBuffer.CopyData(head.data(), typeLength);
+            head.insert(head.end(), bytes.begin(), bytes.end());
+            QuicSubheader sub;
+            const uint32_t subUsed = sub.Deserialize(BufferOf(head).Begin());
+            NS_TEST_ASSERT_MSG_LT(subUsed, head.size() + 1, "a frame never takes more than it has");
+            if (sub.IsValid())
+            {
+                ++validFrames;
+                // what reads back as valid writes back to something that reads back the same
+                Ptr<Packet> again = Create<Packet>();
+                again->AddHeader(sub);
+                QuicSubheader second;
+                again->RemoveHeader(second);
+                NS_TEST_ASSERT_MSG_EQ(second.IsValid(), true, "a valid frame stays valid");
+                NS_TEST_ASSERT_MSG_EQ(second.GetFrameType(), sub.GetFrameType(), "same type");
+            }
+
+            // headers, with every length of connection id a short header can have
+            std::vector<uint8_t> hb = Random(rng, 80);
+            QuicHeader header;
+            header.SetShortHeaderConnectionIdLength(rng->GetInteger(0, 20));
+            const uint32_t headerUsed = header.Deserialize(BufferOf(hb).Begin());
+            NS_TEST_ASSERT_MSG_LT(headerUsed,
+                                  hb.size() + 1,
+                                  "a header never takes more than it has");
+            if (header.IsValid())
+            {
+                header.GetSerializedSize();
+            }
+
+            // transport parameters
+            std::vector<uint8_t> list = Random(rng, 120);
+            Buffer input;
+            input.AddAtStart(list.size());
+            Buffer::Iterator at = input.Begin();
+            for (uint8_t b : list)
+            {
+                at.WriteU8(b);
+            }
+            QuicTransportParameters tp;
+            const uint32_t used = tp.Deserialize(input.Begin());
+            NS_TEST_ASSERT_MSG_LT(used, list.size() + 1, "never more than the bytes it was given");
+            if (tp.IsValid())
+            {
+                Buffer b;
+                b.AddAtStart(tp.GetSerializedSize());
+                tp.Serialize(b.Begin());
+                QuicTransportParameters back;
+                back.Deserialize(b.Begin());
+                NS_TEST_ASSERT_MSG_EQ(back.IsValid(), true, "valid parameters read back");
+            }
+
+            // the TLS messages and what is read out of them
+            std::vector<uint8_t> tls = Random(rng, 90);
+            QuicTlsParser parser;
+            parser.Append(tls);
+            uint8_t messageType;
+            std::vector<uint8_t> body;
+            while (parser.Next(messageType, body))
+            {
+                std::vector<uint8_t> data;
+                std::vector<std::string> names;
+                QuicTlsParser::FindExtension(messageType, body, QUIC_TLS_EXT_ALPN, data);
+                QuicTlsParser::ParseAlpn(data, names);
+                QuicTransportParameters parsed;
+                QuicTlsParser::ParseTransportParameters(data, parsed);
+                uint64_t ticket;
+                QuicTlsParser::ParseTicket(body, ticket);
+                QuicTlsParser::ParseTicketIdentity(data);
+            }
+            for (uint8_t kind : {TLS_CLIENT_HELLO, TLS_SERVER_HELLO, TLS_ENCRYPTED_EXTENSIONS})
+            {
+                std::vector<uint8_t> data;
+                QuicTlsParser::FindExtension(kind, tls, QUIC_TLS_EXT_TRANSPORT_PARAMETERS, data);
+            }
+
+            // the CRYPTO stream with frames at any offset
+            QuicCryptoStream stream;
+            for (int k = 0; k < 4; ++k)
+            {
+                stream.OnFrame(rng->GetInteger(0, 200), Random(rng, 50), 256);
+            }
+            stream.Read();
+            stream.Queue(Random(rng, 40));
+            uint64_t offset;
+            std::vector<uint8_t> chunk;
+            stream.NextChunk(rng->GetInteger(0, 30), offset, chunk);
+            stream.OnLost(rng->GetInteger(0, 40), rng->GetInteger(0, 40));
+            stream.OnAcked(rng->GetInteger(0, 40), rng->GetInteger(0, 40));
+            stream.NextChunk(rng->GetInteger(0, 30), offset, chunk);
+        }
+        NS_TEST_EXPECT_MSG_GT(validFrames, 2000, "a good part of the inputs is valid");
+    }
+};
+
 class QuicExtensionsTestSuite : public TestSuite
 {
   public:
@@ -899,6 +1062,7 @@ class QuicExtensionsTestSuite : public TestSuite
         AddTestCase(new ResetStreamAtTest, TestCase::Duration::QUICK);
         AddTestCase(new VersionTest, TestCase::Duration::QUICK);
         AddTestCase(new ReceiveTimestampTest, TestCase::Duration::QUICK);
+        AddTestCase(new ParserFuzzTest, TestCase::Duration::QUICK);
     }
 };
 
