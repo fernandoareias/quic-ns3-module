@@ -31,6 +31,7 @@
 #include "ns3/point-to-point-module.h"
 #include "ns3/test.h"
 
+#include <map>
 #include <memory>
 #include <set>
 #include <vector>
@@ -719,6 +720,173 @@ class VersionTest : public TestCase
     }
 };
 
+/**
+ * Receive timestamps (draft-ietf-quic-receive-ts): the frame on the wire, and a connection in
+ * which the receiver of the data tells the sender when each packet arrived.
+ */
+class ReceiveTimestampTest : public TestCase
+{
+  public:
+    ReceiveTimestampTest()
+        : TestCase("receive timestamps in ACK frames")
+    {
+    }
+
+  private:
+    void OnTimestamp(uint64_t packet, uint64_t micro)
+    {
+        m_stamps[packet] = micro;
+    }
+
+    /** Run a transfer and collect the timestamps the sender is given. */
+    void Transfer(uint32_t perAck, uint32_t exponent, std::map<uint64_t, uint64_t>& out)
+    {
+        m_stamps.clear();
+        Config::SetDefault("ns3::QuicSocketBase::MaxStreamIdBidi", UintegerValue(4));
+        NodeContainer nodes;
+        nodes.Create(2);
+        PointToPointHelper link;
+        link.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+        link.SetChannelAttribute("Delay", StringValue("10ms"));
+        NetDeviceContainer devices = link.Install(nodes);
+        InternetStackHelper internet;
+        internet.Install(nodes);
+        QuicHelper quic;
+        quic.InstallQuic(nodes);
+        Ipv4AddressHelper address;
+        address.SetBase("10.1.9.0", "255.255.255.0");
+        Ipv4InterfaceContainer interfaces = address.Assign(devices);
+        TypeId factory = QuicSocketFactory::GetTypeId();
+        Ptr<Socket> listener = Socket::CreateSocket(nodes.Get(0), factory);
+        // both ends announce the parameters: the exponent is that of the end that sends the frame
+        listener->SetAttribute("MaxReceiveTimestampsPerAck", UintegerValue(perAck));
+        listener->SetAttribute("ReceiveTimestampsExponent", UintegerValue(exponent));
+        listener->Bind(InetSocketAddress(Ipv4Address::GetAny(), 4433));
+        listener->Listen();
+        listener->SetAcceptCallback(
+            MakeNullCallback<bool, Ptr<Socket>, const Address&>(),
+            Callback<void, Ptr<Socket>, const Address&>([](Ptr<Socket> sock, const Address&) {
+                sock->SetRecvCallback(Callback<void, Ptr<Socket>>([](Ptr<Socket> r) {
+                    Ptr<Packet> p;
+                    while ((p = r->Recv()) && p->GetSize() > 0)
+                    {
+                    }
+                }));
+            }));
+        Ptr<Socket> socket = Socket::CreateSocket(nodes.Get(1), factory);
+        socket->SetAttribute("MaxReceiveTimestampsPerAck", UintegerValue(perAck));
+        Ptr<QuicSocketBase> client = DynamicCast<QuicSocketBase>(socket);
+        client->TraceConnectWithoutContext("ReceiveTimestamp",
+                                           MakeCallback(&ReceiveTimestampTest::OnTimestamp, this));
+        Simulator::Schedule(Seconds(0.1), [socket, interfaces]() {
+            socket->Connect(InetSocketAddress(interfaces.GetAddress(0), 4433));
+        });
+        Simulator::Schedule(Seconds(0.5), [client]() { client->Send(Create<Packet>(200000), 0); });
+        Simulator::Stop(Seconds(5));
+        Simulator::Run();
+        Simulator::Destroy();
+        out = m_stamps;
+    }
+
+    void DoRun() override
+    {
+        // the frame: type 0x03178307 as a varint of four bytes, then the ACK fields and the
+        // ranges of timestamps
+        std::vector<uint64_t> gaps;
+        std::vector<uint64_t> blocks;
+        QuicSubheader ack = QuicSubheader::CreateAck(20, 0, 15, gaps, blocks);
+        QuicSubheader::TimestampRange first;
+        first.deltaLargest = 0;
+        first.deltas = {5000, 120, 90};
+        QuicSubheader::TimestampRange second;
+        second.deltaLargest = 6;
+        second.deltas = {300};
+        ack.SetTimestampRanges({first, second});
+        Ptr<Packet> p = Create<Packet>();
+        p->AddHeader(ack);
+        std::vector<uint8_t> bytes(p->GetSize());
+        p->CopyData(bytes.data(), bytes.size());
+        NS_TEST_EXPECT_MSG_EQ(int(bytes[0]), 0x83, "the type is a varint of four bytes");
+        NS_TEST_EXPECT_MSG_EQ(int(bytes[1]), 0x17, "0x03178307");
+        NS_TEST_EXPECT_MSG_EQ(int(bytes[3]), 0x07, "without ECN counts");
+        QuicSubheader back;
+        p->RemoveHeader(back);
+        NS_TEST_ASSERT_MSG_EQ(back.IsValid(), true, "valid");
+        NS_TEST_EXPECT_MSG_EQ(back.HasReceiveTimestamps(), true, "with timestamps");
+        NS_TEST_EXPECT_MSG_EQ(back.GetTimestampRanges().size(), 2, "two ranges");
+        NS_TEST_EXPECT_MSG_EQ(back.GetTimestampRanges()[0].deltas.size(), 3, "three deltas");
+        NS_TEST_EXPECT_MSG_EQ(back.GetTimestampRanges()[1].deltaLargest, 6, "the second range");
+        NS_TEST_EXPECT_MSG_EQ(back.IsAllowedIn(QuicPacketType::ONE_RTT), true, "1-RTT");
+        NS_TEST_EXPECT_MSG_EQ(back.IsAllowedIn(QuicPacketType::HANDSHAKE), false, "only 1-RTT");
+        ack.SetEcnCounts(4, 0, 1);
+        NS_TEST_EXPECT_MSG_EQ(ack.GetFrameType(), QuicSubheader::ACK_RECEIVE_TIMESTAMPS_ECN, "ECN");
+
+        // a range that reaches below packet number 0 is a FRAME_ENCODING_ERROR
+        QuicSubheader::TimestampRange wrong;
+        wrong.deltaLargest = 19;
+        wrong.deltas = {1, 1, 1};
+        QuicSubheader bad = QuicSubheader::CreateAck(20, 0, 15, gaps, blocks);
+        bad.SetTimestampRanges({wrong});
+        Ptr<Packet> q = Create<Packet>();
+        q->AddHeader(bad);
+        QuicSubheader invalid;
+        q->RemoveHeader(invalid);
+        NS_TEST_EXPECT_MSG_EQ(invalid.IsValid(), false, "below packet number 0");
+
+        // the exponent is at most 20
+        QuicTransportParameters tp =
+            QuicTransportParameters::CreateTransportParameters(1, 1, 1, 1, 1472, 3, 1);
+        tp.SetMaxReceiveTimestampsPerAck(10);
+        tp.SetReceiveTimestampsExponent(21);
+        Buffer buffer;
+        buffer.AddAtStart(tp.GetSerializedSize());
+        tp.Serialize(buffer.Begin());
+        QuicTransportParameters read;
+        read.Deserialize(buffer.Begin());
+        NS_TEST_EXPECT_MSG_EQ(read.IsValid(), false, "an exponent above 20");
+
+        std::map<uint64_t, uint64_t> none;
+        Transfer(0, 0, none);
+        NS_TEST_EXPECT_MSG_EQ(none.size(), 0, "nothing is reported when the sender takes none");
+
+        std::map<uint64_t, uint64_t> stamps;
+        Transfer(20, 0, stamps);
+        NS_TEST_ASSERT_MSG_GT(stamps.size(), 50, "the receiver reports many arrivals");
+        // the data packets arrive one after the other on a link of 10 Mbps: about 1.2 ms apart
+        uint64_t previousPacket = 0;
+        uint64_t previousTime = 0;
+        size_t spaced = 0;
+        size_t pairs = 0;
+        for (const auto& entry : stamps)
+        {
+            if (previousPacket != 0 && entry.first == previousPacket + 1)
+            {
+                NS_TEST_EXPECT_MSG_GT(entry.second, previousTime, "later packets arrive later");
+                const uint64_t gap = entry.second - previousTime;
+                ++pairs;
+                spaced += (gap > 800 && gap < 1700) ? 1 : 0;
+            }
+            previousPacket = entry.first;
+            previousTime = entry.second;
+        }
+        NS_TEST_EXPECT_MSG_GT(pairs, 30, "consecutive packets");
+        NS_TEST_EXPECT_MSG_GT(spaced * 10, pairs * 7, "spaced by the serialization time");
+
+        // with an exponent of 3 the times are rounded to eight microseconds
+        std::map<uint64_t, uint64_t> coarse;
+        Transfer(20, 3, coarse);
+        NS_TEST_ASSERT_MSG_GT(coarse.size(), 50, "reported");
+        size_t multiples = 0;
+        for (const auto& entry : coarse)
+        {
+            multiples += (entry.second % 8 == 0) ? 1 : 0;
+        }
+        NS_TEST_EXPECT_MSG_EQ(multiples, coarse.size(), "multiples of 2^3 microseconds");
+    }
+
+    std::map<uint64_t, uint64_t> m_stamps; //!< timestamps of the run
+};
+
 class QuicExtensionsTestSuite : public TestSuite
 {
   public:
@@ -730,6 +898,7 @@ class QuicExtensionsTestSuite : public TestSuite
         AddTestCase(new GreaseTest, TestCase::Duration::QUICK);
         AddTestCase(new ResetStreamAtTest, TestCase::Duration::QUICK);
         AddTestCase(new VersionTest, TestCase::Duration::QUICK);
+        AddTestCase(new ReceiveTimestampTest, TestCase::Duration::QUICK);
     }
 };
 

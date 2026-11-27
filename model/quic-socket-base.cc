@@ -136,6 +136,19 @@ QuicSocketBase::GetTypeId(void)
                           StringValue("ecdsa"),
                           MakeStringAccessor(&QuicSocketBase::m_tlsProfileName),
                           MakeStringChecker())
+            .AddAttribute("MaxReceiveTimestampsPerAck",
+                          "Announce max_receive_timestamps_per_ack "
+                          "(draft-ietf-quic-receive-ts): the number of receive timestamps this "
+                          "endpoint takes in an ACK frame; 0 takes none",
+                          UintegerValue(0),
+                          MakeUintegerAccessor(&QuicSocketBase::m_maxReceiveTimestamps),
+                          MakeUintegerChecker<uint32_t>())
+            .AddAttribute("ReceiveTimestampsExponent",
+                          "receive_timestamps_exponent to announce: the timestamps this endpoint "
+                          "sends are divided by 2 to this power",
+                          UintegerValue(0),
+                          MakeUintegerAccessor(&QuicSocketBase::m_receiveTimestampsExponent),
+                          MakeUintegerChecker<uint32_t>(0, 20))
             .AddAttribute("ResetStreamAt",
                           "Announce reset_stream_at (draft-ietf-quic-reliable-stream-reset): the "
                           "RESET_STREAM_AT frame, a reset that waits for the first bytes of the "
@@ -464,6 +477,13 @@ QuicSocketBase::GetTypeId(void)
                             "Receive QUIC packet from UDP protocol",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_rxTrace),
                             "ns3::QuicSocketBase::QuicTxRxTracedCallback")
+            .AddTraceSource(
+                "ReceiveTimestamp",
+                "The peer reported when it received a packet: packet number and time in "
+                "microseconds, in the time of the peer's basis, which is not "
+                "communicated",
+                MakeTraceSourceAccessor(&QuicSocketBase::m_receiveTimestampTrace),
+                "ns3::TracedCallback::Uint64Uint64Callback")
             .AddTraceSource("DatagramRx",
                             "A datagram arrived",
                             MakeTraceSourceAccessor(&QuicSocketBase::m_datagramRxTrace),
@@ -825,6 +845,9 @@ QuicSocketBase::QuicSocketBase(const QuicSocketBase& sock) // Copy constructor
     // the callbacks of the listener follow the connections it accepts, as they do in TCP; the
     // state of the copy is a new object, whose traces lead to this socket
     m_availableVersions = sock.m_availableVersions;
+    m_maxReceiveTimestamps = sock.m_maxReceiveTimestamps;
+    m_receiveTimestampsExponent = sock.m_receiveTimestampsExponent;
+    m_receiveTimestampTrace = sock.m_receiveTimestampTrace;
     m_resetStreamAt = sock.m_resetStreamAt;
     m_greaseQuicBit = sock.m_greaseQuicBit;
     m_maxDatagramFrameSize = sock.m_maxDatagramFrameSize;
@@ -2788,6 +2811,8 @@ QuicSocketBase::OnReceivedFrame(QuicSubheader& sub)
     {
     case QuicSubheader::ACK:
     case QuicSubheader::ACK_ECN:
+    case QuicSubheader::ACK_RECEIVE_TIMESTAMPS:
+    case QuicSubheader::ACK_RECEIVE_TIMESTAMPS_ECN:
         NS_LOG_INFO("Received ACK frame");
         OnReceivedAckFrame(sub);
         break;
@@ -3126,6 +3151,54 @@ QuicSocketBase::OnSendingAckFrame()
         // RFC 9000, Section 13.4.1: an endpoint that has seen ECN codepoints reports the counts
         sub.SetEcnCounts(m_ecnReceived[0], m_ecnReceived[1], m_ecnReceived[2]);
     }
+    if (m_peerMaxReceiveTimestamps > 0 && !m_receiveTimes.empty())
+    {
+        // draft-ietf-quic-receive-ts, Section 5: the packets that were not reported yet, the
+        // newest first, in ranges of consecutive numbers, within what the peer takes
+        std::vector<QuicSubheader::TimestampRange> ranges;
+        uint64_t budget = m_peerMaxReceiveTimestamps;
+        // the sender of the frame scales with the exponent that it announced itself
+        const uint64_t exponent = m_receiveTimestampsExponent;
+        Time previous = Seconds(0); // the basis: the start of the simulation
+        for (auto it = m_receiveTimes.rbegin();
+             it != m_receiveTimes.rend() && budget > 0 &&
+             (!m_anyTimestamped || it->first > m_timestampedUpTo);)
+        {
+            if (it->first > largestAcknowledged)
+            {
+                ++it;
+                continue;
+            }
+            QuicSubheader::TimestampRange range;
+            range.deltaLargest = largestAcknowledged - it->first;
+            uint64_t expected = it->first;
+            while (it != m_receiveTimes.rend() && it->first == expected && budget > 0 &&
+                   (!m_anyTimestamped || it->first > m_timestampedUpTo))
+            {
+                const uint64_t micro = (previous - it->second).GetMicroSeconds();
+                const uint64_t scaled =
+                    (ranges.empty() && range.deltas.empty())
+                        ? static_cast<uint64_t>(it->second.GetMicroSeconds()) >> exponent
+                        : micro >> exponent;
+                range.deltas.push_back(scaled);
+                previous = it->second;
+                --budget;
+                ++it;
+                if (expected == 0)
+                {
+                    break;
+                }
+                --expected;
+            }
+            ranges.push_back(range);
+        }
+        if (!ranges.empty())
+        {
+            m_anyTimestamped = true;
+            m_timestampedUpTo = std::max(m_timestampedUpTo, m_receiveTimes.rbegin()->first);
+            sub.SetTimestampRanges(ranges);
+        }
+    }
 
     Ptr<Packet> ackFrame = Create<Packet>();
     ackFrame->AddHeader(sub);
@@ -3138,6 +3211,10 @@ QuicSocketBase::OnReceivedAckFrame(QuicSubheader& sub)
 {
     NS_LOG_FUNCTION(this);
     NS_LOG_INFO("Process ACK");
+    if (sub.HasReceiveTimestamps() && !ProcessReceiveTimestamps(sub))
+    {
+        return;
+    }
 
     // RFC 9000 s19.3: the sender divided the delay by 2^ack_delay_exponent (the peer's exponent);
     // from here on the ack delay is in microseconds
@@ -3401,6 +3478,8 @@ QuicSocketBase::OnSendingTransportParameters()
     transportParameters.SetMaxDatagramFrameSize(m_maxDatagramFrameSize);
     transportParameters.SetGreaseQuicBit(m_greaseQuicBit);
     transportParameters.SetResetStreamAt(m_resetStreamAt);
+    transportParameters.SetMaxReceiveTimestampsPerAck(m_maxReceiveTimestamps);
+    transportParameters.SetReceiveTimestampsExponent(m_receiveTimestampsExponent);
     transportParameters.SetDisableActiveMigration(m_disableActiveMigration ? 1 : 0);
 
     // RFC 9000 §18.2: server generates a stateless reset token derived from connection ID
@@ -3548,6 +3627,8 @@ QuicSocketBase::OnReceivedTransportParameters(QuicTransportParameters transportP
     m_peerMaxDatagramFrameSize = transportParameters.GetMaxDatagramFrameSize();
     m_peerGreaseQuicBit = transportParameters.GetGreaseQuicBit();
     m_peerResetStreamAt = transportParameters.GetResetStreamAt();
+    m_peerMaxReceiveTimestamps = transportParameters.GetMaxReceiveTimestampsPerAck();
+    m_peerReceiveTimestampsExponent = transportParameters.GetReceiveTimestampsExponent();
 
     // RFC 9000 s10.1: the effective idle timeout is the smaller of the two advertised values, a
     // value of 0 meaning "no limit" for that endpoint (both 0: the timer is off)
@@ -3899,6 +3980,14 @@ QuicSocketBase::ReceivedData(Ptr<Packet> p, const QuicHeader& receivedHeader, Ad
         bool newLargest = m_receivedPacketNumbers.Empty() ||
                           pktNum.GetValue() > m_receivedPacketNumbers.Largest();
         NotePacketReceived(pktNum.GetValue());
+        if (m_peerMaxReceiveTimestamps > 0)
+        {
+            m_receiveTimes[pktNum.GetValue()] = Simulator::Now();
+            while (m_receiveTimes.size() > 512)
+            {
+                m_receiveTimes.erase(m_receiveTimes.begin());
+            }
+        }
         // RFC 9000, Section 13.4.1: the packets are counted by their ECN codepoint
         if (m_receivedEcn == 2 || m_receivedEcn == 1 || m_receivedEcn == 3)
         {
@@ -5476,7 +5565,7 @@ QuicSocketBase::ProcessEcn(const QuicSubheader& sub,
         NS_LOG_INFO("ECN validation failed: " << why);
         m_ecnState = ECN_FAILED;
     };
-    if (sub.GetFrameType() != QuicSubheader::ACK_ECN)
+    if (!sub.HasEcnCounts())
     {
         if (newlyMarked > 0)
         {
@@ -5640,6 +5729,54 @@ QuicSocketBase::VersionsCompatible(uint32_t from, uint32_t to)
 {
     return (from == QUIC_VERSION && to == QUIC_VERSION_2) ||
            (from == QUIC_VERSION_2 && to == QUIC_VERSION);
+}
+
+bool
+QuicSocketBase::ProcessReceiveTimestamps(const QuicSubheader& sub)
+{
+    // draft-ietf-quic-receive-ts, Section 7: a frame that was not asked for, or with more
+    // timestamps than the receiver said it takes, is a PROTOCOL_VIOLATION
+    uint64_t total = 0;
+    for (const auto& range : sub.GetTimestampRanges())
+    {
+        total += range.deltas.size();
+    }
+    if (m_maxReceiveTimestamps == 0 || total > m_maxReceiveTimestamps)
+    {
+        AbortConnection(QuicSubheader::TransportErrorCodes_t::PROTOCOL_VIOLATION,
+                        "ACK frame with receive timestamps that were not agreed to");
+        return false;
+    }
+    const uint64_t exponent = m_peerReceiveTimestampsExponent;
+    const uint64_t limit = (1ULL << 62) - 1;
+    int64_t time = 0;
+    bool first = true;
+    for (const auto& range : sub.GetTimestampRanges())
+    {
+        uint64_t pn = sub.GetLargestAcknowledged() - range.deltaLargest;
+        for (uint64_t delta : range.deltas)
+        {
+            if (delta > (limit >> exponent))
+            {
+                AbortConnection(QuicSubheader::TransportErrorCodes_t::FRAME_ENCODING_ERROR,
+                                "receive timestamp too large");
+                return false;
+            }
+            const int64_t step = static_cast<int64_t>(delta << exponent);
+            time = first ? step : time - step;
+            first = false;
+            if (time >= 0)
+            {
+                m_receiveTimestampTrace(pn, static_cast<uint64_t>(time));
+            }
+            if (pn == 0)
+            {
+                break;
+            }
+            --pn;
+        }
+    }
+    return true;
 }
 
 } // namespace ns3

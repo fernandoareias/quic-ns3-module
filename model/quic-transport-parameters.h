@@ -13,6 +13,7 @@
 #define QUICTRANSPORTPARAMETERS_H
 
 #include "quic-connection-id.h"
+#include "quic-draft-constants.h"
 
 #include "ns3/buffer.h"
 #include "ns3/header.h"
@@ -191,6 +192,30 @@ class QuicTransportParameters : public Header
     void SetMaxAckDelay(uint64_t val);
 
     /** @return min_ack_delay in microseconds, 0 when the endpoint does not support ACK_FREQUENCY. */
+    /** @return max_receive_timestamps_per_ack of the draft, 0 when the endpoint takes none. */
+    uint64_t GetMaxReceiveTimestampsPerAck() const
+    {
+        return m_max_receive_timestamps_per_ack;
+    }
+
+    /** @param value max_receive_timestamps_per_ack, 0 to leave it out. */
+    void SetMaxReceiveTimestampsPerAck(uint64_t value)
+    {
+        m_max_receive_timestamps_per_ack = value;
+    }
+
+    /** @return receive_timestamps_exponent of the draft. */
+    uint64_t GetReceiveTimestampsExponent() const
+    {
+        return m_receive_timestamps_exponent;
+    }
+
+    /** @param value receive_timestamps_exponent, at most 20. */
+    void SetReceiveTimestampsExponent(uint64_t value)
+    {
+        m_receive_timestamps_exponent = value;
+    }
+
     /** @return true when the parameters have version_information (RFC 9368). */
     bool HasVersionInformation() const
     {
@@ -344,6 +369,8 @@ class QuicTransportParameters : public Header
     uint64_t m_initial_max_stream_id_uni{0};  //!< initial_max_streams_uni
     uint64_t m_initial_max_stream_data_bidi_remote{0}; //!< initial_max_stream_data_bidi_remote
     uint64_t m_initial_max_stream_data_uni{0};         //!< initial_max_stream_data_uni
+    uint64_t m_max_receive_timestamps_per_ack{0};      //!< max_receive_timestamps_per_ack
+    uint64_t m_receive_timestamps_exponent{0};         //!< receive_timestamps_exponent
     bool m_has_version_information{false};             //!< version_information is present
     uint32_t m_chosen_version{0};                      //!< its Chosen Version
     std::vector<uint32_t> m_available_versions;        //!< its Available Versions

@@ -13,6 +13,7 @@
 #define QUICSUBHEADER_H
 
 #include "quic-connection-id.h"
+#include "quic-draft-constants.h"
 #include "quic-wire.h"
 
 #include "ns3/buffer.h"
@@ -137,6 +138,8 @@ class QuicSubheader : public Header
         HANDSHAKE_DONE = 0x1e, //!< Handshake Done   RFC 9000 §19.20
         IMMEDIATE_ACK = 0x1f,  //!< Immediate Ack    draft-ietf-quic-ack-frequency (msquic)
         RESET_STREAM_AT = 0x24, //!< Reset Stream At   draft-ietf-quic-reliable-stream-reset
+        ACK_RECEIVE_TIMESTAMPS = 0x03178307,     //!< ACK with receive timestamps (temporary value)
+        ACK_RECEIVE_TIMESTAMPS_ECN = 0x03178308, //!< ... and ECN counts (temporary value)
         DATAGRAM = 0x30,       //!< Datagram, to the end of the packet  RFC 9221
         DATAGRAM_LEN = 0x31,   //!< Datagram with a length              RFC 9221
         ACK_FREQUENCY = 0xaf   //!< Ack Frequency    draft-ietf-quic-ack-frequency (msquic)
@@ -977,6 +980,38 @@ class QuicSubheader : public Header
                                              uint64_t finalSize,
                                              uint64_t reliableSize);
 
+    /** One range of timestamps of an ACK_RECEIVE_TIMESTAMPS frame. */
+    struct TimestampRange
+    {
+        uint64_t deltaLargest{0};     //!< subtracted from the Largest Acknowledged
+        std::vector<uint64_t> deltas; //!< the timestamp deltas, in the unit of the frame
+    };
+
+    /**
+     * Turn an ACK frame into one with receive timestamps (draft-ietf-quic-receive-ts).
+     *
+     * @param ranges the timestamp ranges.
+     */
+    void SetTimestampRanges(const std::vector<TimestampRange>& ranges);
+
+    /** @return the timestamp ranges of an ACK_RECEIVE_TIMESTAMPS frame. */
+    const std::vector<TimestampRange>& GetTimestampRanges() const
+    {
+        return m_tsRanges;
+    }
+
+    /** @return true for an ACK frame with receive timestamps. */
+    bool HasReceiveTimestamps() const
+    {
+        return m_frameType == ACK_RECEIVE_TIMESTAMPS || m_frameType == ACK_RECEIVE_TIMESTAMPS_ECN;
+    }
+
+    /** @return true for an ACK frame with ECN counts, with or without timestamps. */
+    bool HasEcnCounts() const
+    {
+        return m_frameType == ACK_ECN || m_frameType == ACK_RECEIVE_TIMESTAMPS_ECN;
+    }
+
     /** @return true for a RESET_STREAM_AT frame. */
     bool IsResetStreamAt() const
     {
@@ -1057,6 +1092,7 @@ class QuicSubheader : public Header
     uint64_t m_frameType; //!< Frame type
     uint64_t m_streamId;  //!< Stream id
     uint64_t m_errorCode; //!< Error code
+    std::vector<TimestampRange> m_tsRanges; //!< receive timestamps of an ACK frame
     uint64_t m_reliableSize{0}; //!< reliable size of a RESET_STREAM_AT frame
     uint64_t m_triggerFrameType{
         0};            //!< CONNECTION_CLOSE: the frame type that triggered the error (0 = unknown)

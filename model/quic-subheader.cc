@@ -490,6 +490,8 @@ QuicSubheader::Encode(Writer& w) const
 
     case ACK: // RFC 9000 Section 19.3
     case ACK_ECN:
+    case ACK_RECEIVE_TIMESTAMPS:
+    case ACK_RECEIVE_TIMESTAMPS_ECN:
         w.VarInt(m_largestAcknowledged);
         w.VarInt(m_ackDelay);
         w.VarInt(m_ackBlockCount);
@@ -497,11 +499,24 @@ QuicSubheader::Encode(Writer& w) const
         {
             w.VarInt(v);
         }
-        if (m_frameType == ACK_ECN)
+        if (HasEcnCounts())
         {
             w.VarInt(m_ect0Count);
             w.VarInt(m_ect1Count);
             w.VarInt(m_ecnCeCount);
+        }
+        if (HasReceiveTimestamps())
+        {
+            w.VarInt(m_tsRanges.size());
+            for (const auto& range : m_tsRanges)
+            {
+                w.VarInt(range.deltaLargest);
+                w.VarInt(range.deltas.empty() ? 0 : range.deltas.size() - 1);
+                for (uint64_t d : range.deltas)
+                {
+                    w.VarInt(d);
+                }
+            }
         }
         break;
 
@@ -727,7 +742,9 @@ QuicSubheader::Deserialize(Buffer::Iterator start)
         break;
 
     case ACK:
-    case ACK_ECN: {
+    case ACK_ECN:
+    case ACK_RECEIVE_TIMESTAMPS:
+    case ACK_RECEIVE_TIMESTAMPS_ECN: {
         uint64_t count = 0;
         uint64_t firstRange = 0;
         if (!r.VarInt(m_largestAcknowledged) || !r.VarInt(m_ackDelay) || !r.VarInt(count) ||
@@ -755,10 +772,41 @@ QuicSubheader::Deserialize(Buffer::Iterator start)
             lo = hi - length;
         }
         m_firstAckBlock = lo;
-        if (m_frameType == ACK_ECN &&
+        if (HasEcnCounts() &&
             (!r.VarInt(m_ect0Count) || !r.VarInt(m_ect1Count) || !r.VarInt(m_ecnCeCount)))
         {
             return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+        }
+        m_tsRanges.clear();
+        if (HasReceiveTimestamps())
+        {
+            uint64_t rangeCount = 0;
+            if (!r.VarInt(rangeCount) || rangeCount > r.Left())
+            {
+                return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+            }
+            for (uint64_t k = 0; k < rangeCount; ++k)
+            {
+                TimestampRange range;
+                uint64_t more = 0;
+                // the range reaches below packet number 0: a FRAME_ENCODING_ERROR
+                if (!r.VarInt(range.deltaLargest) || !r.VarInt(more) ||
+                    range.deltaLargest > m_largestAcknowledged || more + 1 > r.Left() ||
+                    more > m_largestAcknowledged - range.deltaLargest)
+                {
+                    return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+                }
+                for (uint64_t j = 0; j <= more; ++j)
+                {
+                    uint64_t delta = 0;
+                    if (!r.VarInt(delta))
+                    {
+                        return fail(TransportErrorCodes_t::FRAME_ENCODING_ERROR);
+                    }
+                    range.deltas.push_back(delta);
+                }
+                m_tsRanges.push_back(range);
+            }
         }
         break;
     }
@@ -880,6 +928,8 @@ QuicSubheader::Print(std::ostream& os) const
 
     case ACK:
     case ACK_ECN:
+    case ACK_RECEIVE_TIMESTAMPS:
+    case ACK_RECEIVE_TIMESTAMPS_ECN:
 
         os << "|Largest Acknowledged " << m_largestAcknowledged << "|\n";
         os << "|Ack Delay " << m_ackDelay << "|\n";
@@ -1398,13 +1448,20 @@ QuicSubheader::IsStopSending() const
 bool
 QuicSubheader::IsAck() const
 {
-    return m_frameType == ACK || m_frameType == ACK_ECN;
+    return m_frameType == ACK || m_frameType == ACK_ECN || HasReceiveTimestamps();
+}
+
+void
+QuicSubheader::SetTimestampRanges(const std::vector<TimestampRange>& ranges)
+{
+    m_tsRanges = ranges;
+    m_frameType = HasEcnCounts() ? ACK_RECEIVE_TIMESTAMPS_ECN : ACK_RECEIVE_TIMESTAMPS;
 }
 
 void
 QuicSubheader::SetEcnCounts(uint64_t ect0, uint64_t ect1, uint64_t ce)
 {
-    m_frameType = ACK_ECN;
+    m_frameType = HasReceiveTimestamps() ? ACK_RECEIVE_TIMESTAMPS_ECN : ACK_ECN;
     m_ect0Count = ect0;
     m_ect1Count = ect1;
     m_ecnCeCount = ce;
@@ -1425,6 +1482,9 @@ QuicSubheader::IsAllowedIn(QuicPacketType type) const
     case PADDING:
     case PING:
         return true;
+    case ACK_RECEIVE_TIMESTAMPS:
+    case ACK_RECEIVE_TIMESTAMPS_ECN:
+        return type == QuicPacketType::ONE_RTT;
     case ACK:
     case ACK_ECN:
     case CRYPTO:

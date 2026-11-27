@@ -45,6 +45,7 @@ build_lib(
     HEADER_FILES model/quic-stream-id-tag.h
                  model/quic-bbr-v3.h
                  model/quic-connection-id.h
+                 model/quic-draft-constants.h
                  model/quic-crypto-stream.h
                  model/quic-cubic.h
                  model/quic-bbr.h

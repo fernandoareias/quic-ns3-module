@@ -158,6 +158,8 @@ QuicTransportParameters::ResetToDefaults()
     m_initial_max_stream_data_uni = 0;
     m_min_ack_delay = 0;
     m_max_datagram_frame_size = 0;
+    m_max_receive_timestamps_per_ack = 0;
+    m_receive_timestamps_exponent = 0;
     m_has_version_information = false;
     m_chosen_version = 0;
     m_available_versions.clear();
@@ -259,6 +261,18 @@ QuicTransportParameters::EncodeEntries() const
     if (m_min_ack_delay != 0)
     {
         AppendVarIntEntry(out, MIN_ACK_DELAY, m_min_ack_delay);
+    }
+    if (m_max_receive_timestamps_per_ack != 0)
+    {
+        AppendVarIntEntry(out,
+                          QUIC_TP_MAX_RECEIVE_TIMESTAMPS_PER_ACK,
+                          m_max_receive_timestamps_per_ack);
+        if (m_receive_timestamps_exponent != 0)
+        {
+            AppendVarIntEntry(out,
+                              QUIC_TP_RECEIVE_TIMESTAMPS_EXPONENT,
+                              m_receive_timestamps_exponent);
+        }
     }
     if (m_has_version_information)
     {
@@ -458,6 +472,15 @@ QuicTransportParameters::Deserialize(Buffer::Iterator start)
             ok = isNumber;
             m_min_ack_delay = number;
             break;
+        case QUIC_TP_MAX_RECEIVE_TIMESTAMPS_PER_ACK:
+            ok = isNumber;
+            m_max_receive_timestamps_per_ack = number;
+            break;
+        case QUIC_TP_RECEIVE_TIMESTAMPS_EXPONENT:
+            // draft-ietf-quic-receive-ts, Section 4: a value above 20 is an error
+            ok = isNumber && number <= 20;
+            m_receive_timestamps_exponent = number;
+            break;
         case VERSION_INFORMATION:
             // at least the Chosen Version, and whole versions
             ok = value.size() >= 4 && value.size() % 4 == 0;
@@ -578,6 +601,8 @@ operator==(const QuicTransportParameters& lhs, const QuicTransportParameters& rh
            lhs.m_initial_max_stream_data_uni == rhs.m_initial_max_stream_data_uni &&
            lhs.m_min_ack_delay == rhs.m_min_ack_delay &&
            lhs.m_max_ack_delay == rhs.m_max_ack_delay &&
+           lhs.m_max_receive_timestamps_per_ack == rhs.m_max_receive_timestamps_per_ack &&
+           lhs.m_receive_timestamps_exponent == rhs.m_receive_timestamps_exponent &&
            lhs.m_has_version_information == rhs.m_has_version_information &&
            lhs.m_chosen_version == rhs.m_chosen_version &&
            lhs.m_available_versions == rhs.m_available_versions &&

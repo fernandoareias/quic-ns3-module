@@ -1050,6 +1050,14 @@ class QuicSocketBase : public QuicSocket
      */
     void OnReceivedDatagram(const QuicSubheader& sub, Ptr<Packet> data);
 
+    /**
+     * Read the receive timestamps of an ACK frame and report them to the trace.
+     *
+     * @param sub the frame.
+     * @return false when the frame was not valid and the connection was closed.
+     */
+    bool ProcessReceiveTimestamps(const QuicSubheader& sub);
+
     /** Move datagrams from the queue to the transmit buffer while the congestion window allows. */
     void FlushDatagrams();
 
@@ -1704,6 +1712,14 @@ class QuicSocketBase : public QuicSocket
     bool m_peerGreaseQuicBit{false};         //!< the peer announced grease_quic_bit
     Ptr<UniformRandomVariable> m_greaseRv;   //!< makes the Fixed Bit of the packets that are sent
     uint64_t m_peerMinAckDelayUs{0};         //!< min_ack_delay of the peer, in microseconds
+    uint32_t m_maxReceiveTimestamps{0};      //!< attribute MaxReceiveTimestampsPerAck
+    uint32_t m_receiveTimestampsExponent{0}; //!< attribute ReceiveTimestampsExponent
+    uint64_t m_peerMaxReceiveTimestamps{0};  //!< max_receive_timestamps_per_ack of the peer
+    uint64_t m_peerReceiveTimestampsExponent{0}; //!< receive_timestamps_exponent of the peer
+    std::map<uint64_t, Time> m_receiveTimes;     //!< when the latest packets arrived, by number
+    uint64_t m_timestampedUpTo{0};               //!< packets up to this number were reported
+    bool m_anyTimestamped{false};                //!< m_timestampedUpTo is meaningful
+    TracedCallback<uint64_t, uint64_t> m_receiveTimestampTrace; //!< trace: packet, microseconds
     bool m_ecnEnabled{false};           //!< attribute EnableEcn
     EcnState m_ecnState{ECN_OFF};       //!< state of the validation
     uint8_t m_receivedEcn{0};           //!< ECN codepoint of the datagram being processed

@@ -607,7 +607,7 @@ QuicQlogWriter::FramesToJson(Ptr<const Packet> payload, uint8_t ackDelayExponent
             f << "{\"frame_type\":\"ack\",\"ack_delay\":"
               << FormatMs(MicroSeconds(static_cast<int64_t>(delayUs)))
               << ",\"acked_ranges\":" << AckRangesJson(sub);
-            if (type == QuicSubheader::ACK_ECN)
+            if (sub.HasEcnCounts())
             {
                 f << ",\"ect0\":" << sub.GetEct0Count() << ",\"ect1\":" << sub.GetEct1Count()
                   << ",\"ce\":" << sub.GetEcnCeCount();
