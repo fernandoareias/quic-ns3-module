@@ -111,7 +111,7 @@ packet linter (`test/tools/quic_pcap_lint.py`) or a case of `quic-wire` and `qui
 | draft-ietf-quic-ack-frequency-14 | partial: the frames 0xaf and 0x1f, min_ack_delay, the threshold of the draft (an ACK once more than the threshold of ack-eliciting packets arrived) and a requested delay that respects the peer's min_ack_delay; IMMEDIATE_ACK is received but not sent | F9 |
 | draft-ietf-quic-receive-ts-04 | missing | F10 |
 | draft-ietf-quic-qlog-main-schema-15, quic-events-14 | partial (JSON-SEQ writer, connection, packet, recovery and timer events; no alpn, stream or path events, no drops for packets of unknown connections) | F6 (rest in F7 to F11) |
-| draft-ietf-ccwg-bbr-07 (BBRv3) | missing (the module has BBRv1) | F10 |
+| draft-ietf-ccwg-bbr-07 (BBRv3) | done: `ns3::QuicBbrV3` with Startup, Drain, ProbeBW_DOWN, CRUISE, REFILL and UP, ProbeRTT, a maximum bandwidth filter of two cycles, inflight_longterm raised and lowered by probes, bw_shortterm and inflight_shortterm, a headroom of 15%, a loss threshold of 2%, extra_acked and the pacing margin of 1% (quic-bbr3); BBRv1 stays as `QuicBbr`; the quantization budget uses the segment size and the handling of an idle restart is not done | F10 |
 | RFC 9308, 9312 (applicability, manageability) | checklist at the end of the work | F12 |
 | RFC 9114, 9204 (HTTP/3, QPACK), draft-ietf-quic-address-discovery, load-balancers, extended-key-update, qmux, retry-offload | out of scope | |
 

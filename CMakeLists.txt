@@ -12,6 +12,7 @@ endif()
 build_lib(
     LIBNAME quic
     SOURCE_FILES model/quic-bbr.cc
+                 model/quic-bbr-v3.cc
                  model/quic-connection-id.cc
                  model/quic-crypto-stream.cc
                  model/quic-cubic.cc
@@ -42,6 +43,7 @@ build_lib(
                  model/quic-wire.cc
                  helper/quic-helper.cc
     HEADER_FILES model/quic-stream-id-tag.h
+                 model/quic-bbr-v3.h
                  model/quic-connection-id.h
                  model/quic-crypto-stream.h
                  model/quic-cubic.h
@@ -84,6 +86,7 @@ build_lib(
                  test/quic-qlog-test-suite.cc
                  test/quic-handshake-test-suite.cc
                  test/quic-ecn-test-suite.cc
+                 test/quic-bbr3-test-suite.cc
                  test/quic-extensions-test-suite.cc
                  ${examples_as_tests_sources}
 )

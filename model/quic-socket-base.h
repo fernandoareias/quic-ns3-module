@@ -1053,6 +1053,12 @@ class QuicSocketBase : public QuicSocket
     /** Move datagrams from the queue to the transmit buffer while the congestion window allows. */
     void FlushDatagrams();
 
+    /** @return the congestion controller of the connection. */
+    Ptr<TcpCongestionOps> GetCongestionControl() const
+    {
+        return m_congestionControl;
+    }
+
     /** @return true when this end announced reset_stream_at. */
     bool ResetStreamAtAccepted() const
     {
